@@ -58,11 +58,10 @@ pip downloads a ready-built package (a *wheel*) for Python 3.10 and later on:
 | Windows, x64 | Windows 10 or later |
 
 Each system has a second wheel for free-threaded CPython 3.14 (`python3.14t`),
-which cannot load the first. medh5 is not yet audited for running without the
-GIL, so it asks for it: importing medh5 turns the GIL back on, and Python says
-so once with a `RuntimeWarning`. Everything works as it does on a regular
-CPython; nothing runs in parallel that would not there. Running without the GIL
-is planned for 2.2; see [Threads, processes and open files](explanation/concurrency.md).
+which cannot load the first. It runs without the GIL: importing medh5 leaves
+the GIL off, and threads run Python at once. HDF5 itself still takes one call
+at a time per process; see
+[Threads, processes and open files](explanation/concurrency.md#free-threaded-cpython-314).
 
 Anywhere else, pip builds medh5 from its source package instead. That takes
 several minutes and needs:

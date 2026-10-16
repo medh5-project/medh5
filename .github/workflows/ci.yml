@@ -547,8 +547,9 @@ jobs:
           path: dist/
       - run: pip install "$(ls dist/*-cp314t-*.whl)[dev,torch,nifti,dicom,dicomseg]" "pytest-run-parallel==0.10.0"
       - run: rm -rf medh5
-      # A free-threaded interpreter, the installed wheel, and no GIL.
-      - run: python -c "import sys, sysconfig, medh5; assert sysconfig.get_config_var('Py_GIL_DISABLED'); assert 'site-packages' in medh5.__file__; assert not sys._is_gil_enabled()"
+      # A free-threaded interpreter, the installed wheel, and no GIL: imported
+      # with nothing holding it off, the module leaves it off, and says nothing.
+      - run: env -u PYTHON_GIL python -W error::RuntimeWarning -c "import sys, sysconfig, medh5; assert sysconfig.get_config_var('Py_GIL_DISABLED'); assert 'site-packages' in medh5.__file__; assert not sys._is_gil_enabled()"
       - run: pytest tests/ -v -rs --no-cov -p no:cacheprovider
       - run: pytest tests/format tests/tools -rs --no-cov -p no:cacheprovider --parallel-threads=4
 

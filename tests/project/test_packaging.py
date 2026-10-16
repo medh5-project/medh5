@@ -392,12 +392,34 @@ class TestRepositoryGates:
         dependabot = (ROOT / ".github/dependabot.yml").read_text(encoding="utf-8")
         assert "package-ecosystem: github-actions" in dependabot
 
-    def test_the_extension_asks_a_free_threaded_python_for_the_gil(self):
-        """PyO3 declares a module GIL-free unless told otherwise, so a build
-        for free-threaded CPython ran `_core`, never audited for it, with no
-        GIL at all.  An abi3 build cannot show the slot, so the source must."""
+    def test_the_extension_runs_without_the_gil(self):
+        """2.1.0 asked free-threaded CPython for the GIL (`gil_used = true`)
+        until the extension was audited for running without it; 2.2.0 did,
+        and says so.  An abi3 build cannot show the slot, so the source must;
+        the free-threaded CI job checks that the GIL stays off on import."""
         lib = (ROOT / "crates/medh5-python/src/lib.rs").read_text(encoding="utf-8")
-        assert "#[pymodule(gil_used = true)]" in lib
+        assert "#[pymodule(gil_used = false)]" in lib
+        job = _jobs(CI.read_text(encoding="utf-8"))["test-free-threaded"]
+        check = next(line for line in job.splitlines() if "_is_gil_enabled" in line)
+        assert "env -u PYTHON_GIL" in check, "imported with nothing holding it off"
+        assert "assert not sys._is_gil_enabled()" in check
+
+    def test_every_class_of_the_extension_is_frozen(self):
+        """With no GIL, two threads reach one object at once.  A class that is
+        not `frozen` lets PyO3 borrow-check it, and a second thread got
+        `RuntimeError: Already borrowed`; a frozen one keeps whatever changes
+        behind its own lock and refuses a second thread with a `MEDH5Error`
+        (`exclusive.rs`).  A new class is frozen from the start (E4)."""
+        source = ROOT / "crates/medh5-python/src"
+        declared = [
+            (path.name, attrs)
+            for path in sorted(source.glob("*.rs"))
+            for attrs in re.findall(
+                r"#\[pyclass\(([^]]*)\)\]", path.read_text(encoding="utf-8")
+            )
+        ]
+        assert len(declared) >= 36
+        assert [d for d in declared if not re.search(r"\bfrozen\b", d[1])] == []
 
     def test_the_minimum_rust_is_a_full_version(self):
         """`rust-version` is published with every crate and cannot be

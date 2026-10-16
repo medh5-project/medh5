@@ -45,13 +45,16 @@ pub mod validate;
 pub mod values;
 pub mod writer;
 
-// `gil_used = true` is said out loud because PyO3 defaults to the opposite:
-// without it, a build for free-threaded CPython (3.14t) declares the module
-// `Py_MOD_GIL_NOT_USED` and runs it with no GIL at all.  Nothing here has been
-// audited for that --- the mutable handles' borrow checks and the Python
-// handle cache's check-then-act both assume one thread at a time --- so a
-// free-threaded interpreter must turn the GIL back on when it imports us.
-#[pymodule(gil_used = true)]
+// `gil_used = false`: a build for free-threaded CPython (3.14t) declares the
+// module `Py_MOD_GIL_NOT_USED`, and the interpreter keeps the GIL off as it
+// imports it.  What that rests on: every class is `frozen`, and one that
+// changes as it is used keeps its state behind a lock of its own and refuses
+// a second thread (`exclusive`); the Python handle cache and registries are
+// locked; a thread waits for HDF5's lock detached (`wait_detached`); and a
+// fork waits for the engine's locks a detached thread may hold (`h5::fork`).
+// Said out loud, as `true` was until this was audited, so the choice is read
+// here rather than inferred from PyO3's default.
+#[pymodule(gil_used = false)]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(Py_GIL_DISABLED)]
     medh5::h5::on_wait(wait_detached);

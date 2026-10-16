@@ -303,7 +303,13 @@ STALE_CLAIMS: tuple[tuple[str, str, str, str | None], ...] = (
         "thread at a time (2.2, E4).",
         None,
     ),
-
+    (
+        "free-threaded CPython said to turn the GIL back on",
+        r"GIL back on|asks for the GIL|turns the GIL on",
+        "the cp314t wheel runs without the GIL, and importing medh5 leaves it "
+        "off (2.2, E4).",
+        None,
+    ),
 )
 
 
