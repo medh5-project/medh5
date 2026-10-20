@@ -1204,3 +1204,30 @@ class TestAnnotationsFollow:
         assert by_source["seg"].ignore_mask is None
         with pytest.raises(MEDH5ValidationError, match="seg_on_wide_ignore"):
             resample(path, "img", onto="wide")
+
+    def test_S7_5_a_probmap_keeps_its_plane_order(self, tmp_path):
+        """Planes stored in the order `class_ids` gives, not sorted: each
+        carried plane stays with its class."""
+        p = np.random.default_rng(5).random((8, 8, 8))
+        path = self._normalized(tmp_path / "s.medh5", p)
+        with h5py.File(path, "r+") as f:
+            soft = f["annotations/soft"]
+            data = soft["data"][()]
+            del soft["data"]
+            soft.create_dataset("data", data=data[::-1])
+            soft.attrs["class_ids"] = np.asarray(soft.attrs["class_ids"])[::-1]
+        fix(path, rewrite_digests=True, reason="store the planes as 2, 1")
+        with medh5.open(path) as s:
+            assert s.annotations["soft"].class_ids == (2, 1)
+        resample(path, "img", onto="half")
+        with medh5.open(path) as s:
+            out = s.annotations["soft_on_half"]
+            assert out.class_ids == (2, 1)
+            planes = dict(
+                zip(out.class_ids, np.asarray(out.probabilities()), strict=True)
+            )
+        expected = p.reshape(4, 2, 4, 2, 4, 2).mean(axis=(1, 3, 5))
+        np.testing.assert_allclose(planes[1], expected, atol=1e-3)
+        assert not [
+            c for c in validate_file(path, level="integrity").codes if c[0] == "E"
+        ]

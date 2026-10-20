@@ -1017,7 +1017,22 @@ fn probmap_payload(
     }
     let threshold = if attrs::has(&annotation.group, "threshold") { Some(annotation.threshold()?) } else { None };
     let dtype = data::dtype(&annotation.data()?)?;
-    let payload = encode_probmap(&map, Some(&target_spatial), dtype, normalized && filled == 0, threshold)?;
+    let mut payload = encode_probmap(&map, Some(&target_spatial), dtype, normalized && filled == 0, threshold)?;
+    // The encoder stacks the planes by class id; the header keeps the
+    // source's order, so the planes go back into it.
+    if payload.class_ids != classes {
+        let order: Vec<usize> = classes
+            .iter()
+            .map(|c| payload.class_ids.iter().position(|k| k == c).expect("every class is encoded"))
+            .collect();
+        let stacked = payload.array("data")?;
+        let reordered = crate::with_array!(stacked, a => {
+            let picked = a.select(ndarray::Axis(0), &order);
+            NdArray::from_vec(picked.shape(), picked.iter().copied().collect())?
+        });
+        payload.datasets.insert("data".into(), reordered.into());
+        payload.class_ids = classes;
+    }
     Ok((payload, filled))
 }
 
