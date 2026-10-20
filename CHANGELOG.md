@@ -6,6 +6,306 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-10-20
+
+**A minor release, and format 1.2.** 1.2 adds one annotation kind,
+`polylines`, for open curves, and nothing else: a sample is written at 1.2
+only when it holds one, a 1.1 reader reads it as a projection, and the
+diagnostic code table is unchanged. What 2.1.0 wrote, 2.2.0 writes with the
+same `content_id`, but for the imports a fix changed (Fixed). The Python and
+Rust APIs are additive. macOS on Intel is no longer supported; Python 3.10
+still is.
+
+**One NIfTI converter for three frontends, and more of DICOM and ITK.** NIfTI
+is read and written in the engine, held to a corpus recorded from 2.1.0, so
+nibabel is no longer needed and the standalone binary converts NIfTI with no
+Python. Enhanced and legacy-converted multi-frame CT, MR and PET import;
+RTSTRUCT's open contours import and export as polylines; ITK's HDF5 transform
+files and its B-spline transforms are read and written.
+
+**Resampling on the record, de-identification and clinical import at scale.**
+`medh5 resample` puts images and their annotations onto another grid as a
+recorded `resample` derivation; converters and loaders still refuse to
+resample, and now name the command. `medh5 scrub` scrubs a collection member
+by member and redacts clinical text with its spans kept valid, and a whole
+MEDS dataset or FHIR bulk export imports into a cohort in one pass.
+
+**Free-threaded Python and more platforms.** The free-threaded CPython 3.14
+wheel runs without the GIL, and a writer or document that a second thread uses
+at once refuses it rather than race. Alpine and other musl Linux get wheels and
+a static binary. A string stated longer than its file is refused before it is
+read, and the C libraries are fuzzed under AddressSanitizer.
+
+### Security
+
+- **A string stated longer than its file is refused before it is read.** A
+  variable-length string's stored length is the file's to state, up to
+  4 GiB, and a small crafted file could make a read set aside that much
+  memory before failing. A contiguous string dataset — `/meta` among them —
+  is now checked first, and a length longer than the file is reported as
+  unreadable (`E001`) at once.
+
+### Added
+
+- **`SampleWriter.add_polylines` writes open curves, and
+  `PolylinesAnnotation` reads them.** Each `Polyline` is ordered vertices
+  with a class, an optional grid plane (`plane=(axis, index)`) and, through
+  `instance_ids=`, an instance; `polyline(i)`, `polylines()`, `offsets` and
+  `planes` read them back, in index or world space. A polyline of fewer than
+  two vertices is `E404`, offsets that do not delimit the vertices `E408`, and
+  a polylines annotation satisfies neither `seg` nor `det`, whatever its
+  `task`. A curve's instance joins its object's track as presence, as a
+  point's does, and `W909` reads its class. In Rust,
+  `annotations::Polyline`, `encode_polylines` and
+  `SampleWriter::add_polylines`; `version::required_for_content` and
+  `written_version_for_content` give the version a content needs.
+- **Annotations follow a resample.** `medh5 resample` and
+  `medh5.transforms.resample` carry the annotations on the source grids onto
+  the target, each naming its source in `derived_from` and keeping its classes
+  and coverage. Voxel encodings move nearest in their own encoding, instances
+  object by object under their own ids (an object with no voxel left is
+  refused, never dropped), probability maps linearly; points and keypoints
+  map exactly, by the inverse of the path the image is sampled through, and
+  meshes along an affine path. A box is carried only where the
+  mapping keeps the axes and a contour only where its plane stays a grid
+  plane; anything else is refused rather than approximated. Target voxels
+  outside the source become an ignore region (§7.7). `--no-annotations`
+  (`annotations=False`) moves the images alone, and the report lists what was
+  carried (`ResampledAnnotation`) and what was not (`not_carried`).
+- **Images resample onto another grid as a recorded derivation.**
+  `medh5.transforms.resample(path, image_ids, onto=…)` and
+  `medh5 resample PATH --image ID --onto GRID` map images onto an existing
+  grid: through the affines when the two grids share a comparable frame, and
+  through the sample's transforms otherwise (§10.2), evaluated at the target's
+  voxels. `spacing=` with `grid_id=` (`--spacing`, `--grid-id`) makes a new
+  grid in the image's frame that keeps its voxel edges. A pair no transform
+  relates, a frame that cannot be compared (`W917`) and a grid naming no frame
+  are refused rather than assumed aligned. Interpolation is `linear`,
+  `nearest` or `cubic`; voxels outside the source take `fill` and the output's
+  `valid_mask` marks the rest. One `resample` activity records the inputs, the
+  target, the transform path and the interpolation, and every object written
+  names it. The work goes a target chunk at a time, so memory follows the
+  chunk, not the volume. The refusals that send you to resample now name the
+  command: the torch datasets' patch across two grids, the MONAI reader's
+  channel stack across two grids, and agreement between annotations on
+  different grids (`E101`) each say `medh5 resample PATH --image ID --onto
+  GRID`; the NIfTI import's volumes on two grids, its masks drawn on another
+  grid, and the nnU-Net export's labels off the channels' grid name it too.
+- **Format 1.2 adds one annotation kind, `polylines`: open curves.** Vessel
+  centrelines, catheter and applicator paths, needle tracks and RTSTRUCT's
+  open contours had no kind to go into: `contours` are closed polygons, and
+  `points` are unordered. A sample is written at 1.2 only when it holds a
+  polylines annotation, so imaging alone stays 1.0 and the clinical profile
+  1.1; removing the last one lowers the version again. A 1.1 reader reads a
+  1.2 file as its projection, the curves left out as `W913`, and its digests
+  and `content_id` verify. No diagnostic code is added; `E408`'s summary names
+  polyline offsets. The corpus has 175 cases: `shapes-polylines`,
+  `E408-polyline-offsets` and `E404-polyline-one-vertex` are new, and the
+  higher-minor case declares 1.3. The specification is
+  `docs/spec/medh5-1.2.md`.
+- **`medh5 scrub` scans and scrubs a collection, member by member.** A
+  `.medh5c` is scanned into one report whose findings name their member
+  (`KEY::where`); `--apply` writes a new collection at `--out`, or under
+  its own name in `--out-dir`, one of which it requires, and only reads the
+  source. Each member is scrubbed with the one salt, so
+  pseudonyms, re-minted ids and a range's per-subject shift agree across
+  members; under `--pseudonymise-ids` a member is keyed by its pseudonym. A
+  member that refuses leaves nothing written, or with `--skip-refused`
+  (`skip_refused=True`) is left out and listed.
+- **`medh5 scrub --apply --redact-text` rewrites the names, dates, UIDs and
+  sample ids it finds in clinical text.** Each becomes `[NAME]`, `[DATE]` or
+  `[ID]` in a new document owned by a new version of its event, with every
+  span into it moved through the edit; a span that overlaps a redacted range
+  refuses the run (1.1 §6, §10). Python's `scrub.apply` takes
+  `redact_text=True`. The redaction is recorded with the digests it wrote,
+  and the new text still needs `--attest-text`.
+- **`augment_cohort_from_fhir` imports a FHIR Bulk Data export into a
+  cohort's samples.** The export's NDJSON files are streamed and grouped by
+  subject reference, one subject in memory at a time (where each line is, is
+  indexed in a temporary file), and each subject is mapped exactly as
+  `read_fhir` maps a Bundle of its Observations and DiagnosticReports.
+  Resources of unmapped subjects, and resource types the profile does not
+  read, are counted. On the command line, `medh5 clinical augment-cohort
+  --from-fhir-bulk DIR --mapping MAP.csv`.
+- **`augment_cohort_from_meds` imports a whole MEDS cohort into its
+  samples.** A mapping from `subject_id` to sample says where each subject's
+  rows go, in place or into `out_dir`; each subject is mapped exactly as
+  `augment_from_meds` maps it alone. A subject that refuses is listed with
+  its reason and the others are written; subjects the mapping does not name
+  are counted. On the command line, `medh5 clinical augment-cohort
+  --from-meds DIR --mapping MAP.csv`, with `clinical augment`'s options.
+- **ITK B-spline transforms are imported and exported.** A
+  `BSplineTransform` of order 1 or 3, alone or applied first in a composite,
+  is stored as 1.0 §10.5's `bspline` on a grid of its lattice, and maps every
+  point of its domain as SimpleITK does; `to_itk_transform` writes a `bspline`
+  back as one. Other orders and ITKv3's `BSplineDeformableTransform` are
+  refused, each with its reason. B-splines were refused before.
+- **ITK's HDF5 transform files are read and written.** `read_itk_transform`,
+  `from_itk_transform` and `medh5 convert from-itk-transform` take an `.h5`
+  (`.hdf5`, `.hdf`) file as ITK writes one, a composite flattened in reverse
+  as for `.tfm`, and `to_itk_transform` and `write_itk_transform` write one;
+  through the engine's HDF5, so the converters still need no `h5py`. They
+  were refused before. Parameters under the misspelling earlier ITK
+  releases wrote (`TranformParameters`) are read, as ITK reads them.
+- **RTSTRUCT open curves import and export as polylines.**
+  `from_rtstruct(open_curves="polylines")` (`--open-curves polylines`)
+  imports `OPEN_PLANAR` and `OPEN_NONPLANAR` ROIs as a polylines annotation,
+  `<id>_curves` unless `curves_id=` (`--curves-id`) names another, each
+  `OPEN_PLANAR` curve with the grid plane it lies in; the report records that
+  the sample is now written at format 1.2. `to_rtstruct(curves=...)`
+  (`--curves ANN`) writes one back as `OPEN_PLANAR` or `OPEN_NONPLANAR`
+  contours. `omit` stays the default, and its warning now names the option.
+- **The engine writes NIfTI and adds NIfTI masks to a sample.**
+  `medh5::convert::nifti` gains `to_nifti`, `write_nifti`, `for_export`,
+  `write_field` and `import_seg_nifti`, 2.1.0's converter ported rule for
+  rule and held to the same parity corpus as the reader: every one of its 348
+  cases gives 2.1.0's objects, `/meta`, report and refusal.
+- **The engine reads and imports NIfTI itself.** `medh5::convert::nifti`
+  holds `read_nifti` and `from_nifti`, 2.1.0's converter ported rule for
+  rule: NIfTI-1 and NIfTI-2 in either byte order, `.nii`, `.nii.gz` and
+  `.hdr`/`.img`, with the same geometry, notes, objects and refusals, which
+  a parity corpus recorded under 2.1.0 holds it to. gzip is inflated in Rust,
+  never past the bytes the header implies, so a small file cannot make the
+  reader decompress or allocate more; zlib's gzip file interface stays
+  unlinked.
+- **Enhanced multi-frame DICOM imports.** Enhanced and legacy-converted CT, MR
+  and PET objects, skipped with a warning until now, are split into stacks —
+  by `StackID` and the dimensions of `DimensionIndexSequence` that tell stacks
+  apart, such as a time point, a cardiac phase or a flip angle — and each
+  stack imports as the classic series it would have been: the same grid and
+  the same values, placed by the frames' functional groups and decoded one
+  frame at a time. Per-frame rescales follow `per_slice_rescale`, acquisition
+  attributes come from the shared and per-frame groups, and a concatenation is
+  joined into one object. A frame with no position, an irregular stack, a
+  stack whose `InStackPositionNumber` its positions contradict or that skips a
+  number, a concatenation missing a part, a part with no `ConcatenationUID`,
+  an instance whose `NumberOfFrames` its per-frame groups contradict, one
+  instance at two paths and a frame whose geometry is not numbers are
+  refused with the reason. `Series` gains `frames` and `stack`.
+- **The standalone `medh5` binary converts NIfTI itself.** `convert
+  from-nifti`, `import-seg-nifti` and `to-nifti` run in the engine, with the
+  checks, messages and reports the Python package gave them, so they work
+  with no Python installed. The other converters are still handed to Python.
+  An error the package let escape as a traceback, such as a header NIfTI
+  cannot hold, is now `medh5: <why>` with exit code 1.
+- **medh5 runs on free-threaded CPython without re-enabling the GIL.** The
+  cp314t wheel declares the extension safe to run with no GIL, so
+  `import medh5` leaves it off; 2.1.0 asked for it, and CPython turned it on
+  with a warning. The test suite runs on 3.14t with the GIL off, many threads
+  at a time.
+- **Alpine and other musl Linux install a wheel.** x86_64 and aarch64 each get
+  a `musllinux_1_2` abi3 wheel and a free-threaded 3.14 one, so medh5 no
+  longer builds from source there. Each release also has a `medh5` binary
+  for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` that links
+  musl statically and so runs on any Linux of its architecture.
+- **The package's licence names Unicode-3.0.** `unicode-normalization` 0.1.26
+  compiles in Unicode's data tables, under the Unicode License v3, so the
+  wheels' `License-Expression`, the Homebrew formula and `cargo deny`'s
+  allowed licences add `Unicode-3.0`, and `THIRD_PARTY_NOTICES` reproduces its
+  text for that crate.
+
+### Behaviour changes
+
+- **A writer, document, payload, provenance, cache writer, staged file or
+  patch draw used by a second thread at once raises `MEDH5Error`.** The
+  second call is refused, says the object "is used by one thread at a time",
+  and changes nothing; it raised `RuntimeError: Already borrowed` before.
+  Calls that only read share the object: they are refused only while another
+  thread is changing it.
+- **NIfTI conversion no longer needs nibabel.** `medh5.io.nifti`, the ITK
+  displacement fields of `medh5.io.itk` and the nnU-Net exporter read and
+  write NIfTI through the engine, with their signatures unchanged. nibabel is
+  neither installed nor imported; the `nifti` extra is kept, empty, so
+  `pip install "medh5[nifti]"` still works, and `require_nibabel` says medh5
+  no longer needs it rather than naming that extra.
+- **A header NIfTI cannot hold is a `ValueError`.** It was nibabel's
+  `HeaderDataError`, a `ValueError` subclass, with the same message.
+- **A `.nii.bz2` or `.nii.zst` file is refused.** nibabel read them through
+  Python's codecs; the engine inflates gzip only, and says to decompress the
+  file first.
+- **`convert to-nifti` keeps its overlap warning in the report.** Flattening
+  overlapping classes into one labelmap was a Python `UserWarning` on stderr
+  from the command line; it is now a warning in the report, as the other
+  notes are. `to_nifti` in Python still warns, as it did.
+- **macOS on Intel (x86_64) is no longer supported.** 2.2.0 publishes no
+  macOS x86_64 wheel or binary, and the Homebrew formula refuses to install on
+  an Intel Mac. On one, pip builds medh5 from its source package (Rust, a C
+  compiler and CMake), which is no longer tested there; or stay on 2.1. Apple
+  silicon is unchanged.
+
+### Fixed
+
+- **A box whose finite bounds lie past the integers no longer overflows the
+  validator.** An `instances` object's extent was its box's two slice ends
+  subtracted, and a box from one end of the `i64` range to the other
+  overflowed: a build with overflow checks panicked (the `open_validate`
+  fuzzer found it), and a release build compared the crop with a negative
+  extent. The extent now saturates, and the crop is reported as `E405`.
+- **A scaled complex-valued NIfTI mask keeps its imaginary voxels.** Under
+  `scl_slope`, 2.1.0 tested only each voxel's real part, so a voxel such as
+  `0+1i` was dropped from the mask; a voxel is now in the mask when either
+  physical part is non-zero, as it already was unscaled.
+- **Frame times one volume states bind the volumes after it.** When the
+  first volume assumed its frame indices as times and a second stated those
+  same times, a third stating other times replaced them, putting the second
+  on a timeline it disagreed with; it is now refused, as two volumes stating
+  different times always were.
+- **`write_nifti` writes a fourth axis of no frames given its empty
+  `time_values`.** 2.1.0 failed reading the first of no frame times
+  (`IndexError`); there is no first time to state, so the header states none.
+- **A CT's units follow its `RescaleType`.** Every CT was written as
+  quantitative HU, though DICOM lets a derived or multi-energy CT rescale to
+  another quantity. `value_units` is now the stated `RescaleType`. An omitted
+  type is `HU` in a classic CT and in an original, non-localizer,
+  single-energy enhanced frame, and unknown elsewhere. `US` or an unknown type
+  gives `intensity` with no units, and a series whose slices state different
+  types is refused. The `value_scale` decision names the units
+  `read(physical=True)` returns, where it said HU for every image.
+- **Acquisition attributes are recorded only where the slices agree.** A
+  series recorded its first slice's `XRayTubeCurrent`, `ExposureTime` or
+  `EchoTime` for the whole volume, even where the slices stated different
+  ones. An attribute the slices disagree on is now left out, with a warning
+  in the report.
+- **A forked child takes over every handle cache before its first call.** An
+  `os.register_at_fork` hook abandons the parent's handles and gives each
+  cache a new lock as the child starts: two threads of a child that both
+  noticed the fork replaced the cache's lock one after the other, and then
+  held different locks over the same handles. Registering a vocabulary
+  (`medh5.labels.register`) and editing a document's live views from several
+  threads are locked too, and no code of the caller's runs under that lock
+  (an index's `__index__`, an item's `__eq__`, a key's `__hash__`). A key
+  JSON cannot spell is refused as it is given, leaving the member editable.
+  `medh5.labels.describe()` no longer raises E305 for a vocabulary another
+  thread unregisters meanwhile, and a document's label set and timeline are
+  read with every class and timepoint as it stood at one moment.
+- **A thread waiting for HDF5 on free-threaded CPython lets go of the
+  interpreter.** Waiting attached for another thread's HDF5 call held up every
+  stop-the-world pause, a garbage collection among them, until that call ended.
+  A read or write through medh5 now runs detached throughout. Closing a sample
+  no longer holds up a thread asking for it, and a lock left by a panic is taken
+  as it stands instead of raising again. A payload's dicts, edited by another
+  thread while it is written or described, no longer panic the read.
+- **A forked child no longer hangs at its first HDF5 call.** A child forked
+  while another thread was in the middle of a read inherited HDF5's lock held
+  by a thread it does not have. A fork now waits for the call to end, and the
+  child takes the lock over cleanly.
+
+### Performance
+
+- **A MEDS cohort is read once, not once per sample.** The dataset is opened
+  once and read a Parquet row group at a time: its subject column, then the
+  mapped subjects' rows. A subject is imported as soon as its last row is
+  read, so a dataset in MEDS order holds one row group and one subject in
+  memory at a time.
+
+### Documentation
+
+- **A guide to resampling.** "Resample onto another grid" covers when to
+  resample and when not to, onto a grid or onto a spacing, what happens to the
+  annotations, what the `resample` activity records, why the loaders never
+  resample, and when MONAI's `Spacingd` is enough. The NIfTI refusals and the
+  NIfTI import guide link to it.
+
 ## [2.1.0] — 2026-10-15
 
 **A minor release, with no new format version.** Files are still written at

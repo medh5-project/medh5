@@ -16,7 +16,7 @@ default-members = [
 # The one source of the package version for every frontend: the Rust crates,
 # the CLI and the Python wheel (pyproject.toml reads it through maturin).  It is
 # stamped into every file's `generator` attribute and every manifest.
-version = "2.1.0"
+version = "2.2.0"
 edition = "2021"
 rust-version = "1.85.1"
 license = "MIT"
@@ -25,9 +25,9 @@ repository = "https://github.com/medh5-project/medh5"
 homepage = "https://medh5.readthedocs.io/"
 
 [workspace.dependencies]
-medh5-sys = { path = "crates/medh5-sys", version = "=2.1.0" }
-medh5 = { path = "crates/medh5", version = "=2.1.0" }
-medh5-cli = { path = "crates/medh5-cli", version = "=2.1.0" }
+medh5-sys = { path = "crates/medh5-sys", version = "=2.2.0" }
+medh5 = { path = "crates/medh5", version = "=2.2.0" }
+medh5-cli = { path = "crates/medh5-cli", version = "=2.2.0" }
 hdf5 = { package = "hdf5-metno", version = "0.15.0", features = ["static", "zlib", "f16"] }
 ndarray = "0.17"
 half = "2.4"
