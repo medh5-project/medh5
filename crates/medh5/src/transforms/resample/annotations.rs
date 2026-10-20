@@ -36,7 +36,7 @@ use crate::ids::validate_id;
 use crate::json::{float_repr, repr_str};
 use crate::sample::reader::Sample;
 use crate::sample::writer::SampleWriter;
-use crate::transforms::model::can_invert;
+use crate::transforms::model::{can_invert, stored_inverse};
 use crate::{Error, Result};
 
 /// One annotation a resample carried onto the target.
@@ -284,10 +284,16 @@ fn apply(m: &Array2<f64>, points: &Array2<f64>) -> Array2<f64> {
 fn path_matrix(transform: &Transform, s: usize) -> Result<Option<Array2<f64>>> {
     match &transform.body {
         Body::Chain(steps) => chain_matrix(steps, s),
-        Body::Inverse(inner) => match path_matrix(inner, s)? {
-            Some(m) => Ok(Some(inv(&m)?)),
-            None => Ok(None),
-        },
+        Body::Inverse(inner) => {
+            // A stored inverse is what is evaluated (§10.1): its matrix, if any.
+            if let Some(stored) = stored_inverse(inner)? {
+                return path_matrix(&stored, s);
+            }
+            match path_matrix(inner, s)? {
+                Some(m) => Ok(Some(inv(&m)?)),
+                None => Ok(None),
+            }
+        }
         Body::Stored => match transform.kind() {
             "affine" => Ok(Some(transform.matrix()?)),
             "identity" => Ok(Some(Array2::eye(s + 1))),

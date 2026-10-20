@@ -1167,6 +1167,49 @@ class TestAnnotationsFollow:
             assert s.annotations["pa_alone"].correspondence == "pb"
         assert validate_file(path, level="integrity").ok
 
+    def test_S10_1_a_warp_whose_stored_inverse_is_affine_carries_a_box(self, tmp_path):
+        """The image is sampled through a displacement whose `inverse_id`
+        names an affine: that affine is what moves the box, exactly."""
+        path = tmp_path / "s.medh5"
+        shift = np.array([0.5, -0.25, 0.75])
+        back = np.eye(4)
+        back[:3, 3] = -shift
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid("src", shape=SOURCE_SHAPE, spacing=(1.0,) * 3, frame_uid="F0")
+            w.add_image("img", SOURCE, grid="src", modality="CT")
+            w.add_grid("tgt", shape=(3, 4, 5), spacing=(1.0,) * 3, frame_uid="F1")
+            w.add_transform(
+                "t",
+                kind="displacement",
+                from_frame="F1",
+                to_frame="F0",
+                field=np.ascontiguousarray(
+                    np.broadcast_to(shift[:, None, None, None], (3, 3, 4, 5)),
+                    dtype=np.float32,
+                ),
+                field_grid="tgt",
+                inverse_id="back",
+            )
+            w.add_transform(
+                "back",
+                kind="affine",
+                from_frame="F0",
+                to_frame="F1",
+                matrix=back,
+                inverse_id="t",
+            )
+            w.add_boxes(
+                "dets",
+                np.array([[[1, 2], [1, 3], [0, 2]]], np.float32),
+                [1],
+                grid="src",
+            )
+        resample(path, "img", onto="tgt")
+        with medh5.open(path) as s:
+            moved = s.annotations["dets_on_tgt"].boxes
+        expected = np.array([[[1, 2], [1, 3], [0, 2]]]) - shift[None, :, None]
+        np.testing.assert_allclose(moved, expected, atol=1e-5)
+
     def test_S10_2_points_refuse_a_path_with_no_inverse(self, tmp_path):
         """A transform the other way that is not declared `t`'s inverse is
         another mapping: moving the points by it would put them off the
