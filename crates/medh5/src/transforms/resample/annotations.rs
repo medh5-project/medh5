@@ -318,12 +318,15 @@ fn chain_matrix(steps: &[Transform], s: usize) -> Result<Option<Array2<f64>>> {
 /// axis, or `None` when an axis would be mixed with another.
 fn axis_map(m: &Array2<f64>) -> Option<Vec<(usize, f64)>> {
     let s = m.nrows() - 1;
-    let largest = (0..s).flat_map(|r| (0..s).map(move |k| (r, k))).map(|(r, k)| m[[r, k]].abs()).fold(0.0, f64::max);
-    let tolerance = 1e-9 * largest.max(1.0);
+    // An entry is zero only beside both its row's and its column's scale: a
+    // term small against one large factor elsewhere still moves its axis.
+    let row_scale: Vec<f64> = (0..s).map(|r| (0..s).map(|k| m[[r, k]].abs()).fold(0.0, f64::max)).collect();
+    let column_scale: Vec<f64> = (0..s).map(|k| (0..s).map(|r| m[[r, k]].abs()).fold(0.0, f64::max)).collect();
     let mut used = vec![false; s];
     let mut out = Vec::with_capacity(s);
     for k in 0..s {
-        let rows: Vec<usize> = (0..s).filter(|r| m[[*r, k]].abs() > tolerance).collect();
+        let rows: Vec<usize> =
+            (0..s).filter(|r| m[[*r, k]].abs() > 1e-9 * row_scale[*r].min(column_scale[k])).collect();
         let [r] = rows[..] else {
             return None;
         };
@@ -826,6 +829,13 @@ pub(super) fn write(
         let mut header = carried_header(annotation, item, geometry, target, activity);
         let mut note = None;
         let mut overrides: Vec<(String, AttrValue)> = Vec::new();
+        // A landmark pair carried together stays a pair: each copy names the
+        // other's (§10.6).
+        if let Some(partner) = attrs::get_str(&annotation.group, "correspondence")? {
+            if let Some(copy) = carry.items.iter().find(|other| other.source == partner) {
+                overrides.push(("correspondence".into(), AttrValue::Str(copy.output.clone())));
+            }
+        }
         let payload = if item.voxel {
             let near = &nearest_by_grid[&item.grid];
             match item.kind.as_str() {
@@ -1343,6 +1353,16 @@ mod tests {
         let (c, s) = (0.1f64.cos(), 0.1f64.sin());
         let rotated = homogeneous([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]], [0.0; 3]);
         assert_eq!(axis_map(&rotated), None);
+    }
+
+    #[test]
+    fn s8_2_a_shear_beside_a_large_factor_is_not_rounded_away() {
+        // 0.5 is small beside the 1e9 in its column, not beside its row.
+        let sheared = homogeneous([[1e9, 0.0, 0.0], [0.5, 1.0, 0.0], [0.0, 0.0, 1.0]], [0.0; 3]);
+        assert_eq!(axis_map(&sheared), None);
+        // Round-off beside both its row's and its column's scale is zero.
+        let rounded = homogeneous([[2.0, 1e-12, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 1.0]], [0.0; 3]);
+        assert_eq!(axis_map(&rounded), Some(vec![(0, 2.0), (1, 3.0), (2, 1.0)]));
     }
 
     #[test]

@@ -1141,6 +1141,32 @@ class TestAnnotationsFollow:
             moved = s.annotations["marks_on_tgt"].points
         np.testing.assert_allclose(moved, [[1.0, 2.0, 1.0] - shift], atol=1e-5)
 
+    def test_S10_6_a_landmark_pair_carried_together_stays_a_pair(self, tmp_path):
+        """Each copy names the other's copy; a half carried alone keeps
+        naming its partner, which stays where it was."""
+        path = tmp_path / "s.medh5"
+        with medh5.create(path, codec="portable") as w:
+            for grid, start in (("a", 0.0), ("b", 1.0), ("t", 0.5)):
+                w.add_grid(
+                    grid,
+                    shape=(4, 4, 4),
+                    spacing=(1.0,) * 3,
+                    origin=(start, 0.0, 0.0),
+                    frame_uid="F0",
+                )
+            w.add_image("ia", np.ones((4, 4, 4), np.float32), grid="a", modality="CT")
+            w.add_image("ib", np.ones((4, 4, 4), np.float32), grid="b", modality="CT")
+            marks = np.array([[1.0, 2.0, 1.0]], np.float32)
+            w.add_points("pa", marks, grid="a", correspondence="pb")
+            w.add_points("pb", marks, grid="b", correspondence="pa")
+        resample(path, ["ia", "ib"], onto="t", suffix="_both")
+        resample(path, "ia", onto="t", suffix="_alone")
+        with medh5.open(path) as s:
+            assert s.annotations["pa_both"].correspondence == "pb_both"
+            assert s.annotations["pb_both"].correspondence == "pa_both"
+            assert s.annotations["pa_alone"].correspondence == "pb"
+        assert validate_file(path, level="integrity").ok
+
     def test_S10_2_points_refuse_a_path_with_no_inverse(self, tmp_path):
         """A transform the other way that is not declared `t`'s inverse is
         another mapping: moving the points by it would put them off the
