@@ -692,7 +692,7 @@ pub(crate) type FileIdentity = (u64, u128, u64, i128, i128);
 
 /// The files checked already.  A panic while it is held leaves the map whole
 /// (an insert or a clear), so a poisoned lock is taken as it stands.
-fn checked_files() -> &'static Mutex<HashMap<FileIdentity, ()>> {
+pub(super) fn checked_files() -> &'static Mutex<HashMap<FileIdentity, ()>> {
     static CHECKED: std::sync::OnceLock<Mutex<HashMap<FileIdentity, ()>>> = std::sync::OnceLock::new();
     CHECKED.get_or_init(|| Mutex::new(HashMap::new()))
 }

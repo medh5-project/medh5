@@ -8,6 +8,8 @@
 pub mod attrs;
 pub mod data;
 pub mod file;
+#[doc(hidden)]
+pub mod fork;
 pub mod graph;
 pub mod ops;
 mod window;

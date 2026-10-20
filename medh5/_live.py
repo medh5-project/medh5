@@ -242,10 +242,10 @@ class Members(dict[str, Any]):
 
     def _converted(self, value: Any) -> Any:
         """*value* as a member holds it, made before the lock, so the caller's
-        code runs outside it (a quality record is the engine's own).  An edit
+        code runs outside it --- a quality record's too, made anew.  An edit
         and the reread of the members it left are one step under the lock, so
         two threads' rereads land in the order of their edits."""
-        return value if self._field == "quality" else self._document._plain(value)
+        return self._document._plain_member(self._field, value)
 
     def __setitem__(self, key: str, value: Any) -> None:
         if self._document is None:
@@ -294,9 +294,8 @@ class Members(dict[str, Any]):
         if self._document is None:
             return super().setdefault(key, default)
         # A default is converted only when the key is missing, and before
-        # the lock, so the caller's code runs outside it (a quality record is
-        # the engine's own); the look and the write are one step, so one
-        # default is the member.
+        # the lock, so the caller's code runs outside it; the look and the
+        # write are one step, so one default is the member.
         key = _key(key)
         with _LOCK:
             self._sync()

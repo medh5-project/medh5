@@ -930,6 +930,35 @@ class TestOneThreadAtATime:
         assert "1.2" in str(record.to_json())
         assert doc.extra["log"]["seen"] == {"other": 1}
 
+    @pytest.mark.parametrize("given", ["mapping", "record"])
+    def test_a_quality_members_callers_code_runs_outside_the_lock(self, given: str):
+        """A quality record set on the view is converted before the live
+        views' lock is taken, as any other member is: its conversion may wait
+        on an edit of a document."""
+        from medh5.curation import Agreement, QualityRecord
+        from medh5.document import new_document
+
+        doc = new_document("s")
+        doc.extra["log"] = {"seen": {}}
+        seen = doc.extra["log"]["seen"]
+        hook = self._edit_on_another_thread(lambda: seen.__setitem__("other", 1))
+
+        class Dice:
+            def to_json(self) -> float:
+                hook()
+                return 0.5
+
+        value: Any = {
+            "status": "reviewed",
+            "agreement": [{"metric": "dice", "value": 0.5, "per_class": {"1": Dice()}}],
+        }
+        if given == "record":
+            value = QualityRecord("reviewed", agreement=(Agreement("dice", 0.5),))
+            value.agreement[0].per_class["1"] = Dice()
+        doc.quality["q"] = value
+        assert doc.quality["q"].agreement[0].per_class == {"1": 0.5}
+        assert doc.extra["log"]["seen"] == {"other": 1}
+
     def test_a_key_the_document_cannot_hold_is_refused_before_any_change(self):
         """A nested dict refuses a key JSON has no spelling for as it is
         given, and the member stays editable: refused by the rewrite, it was
@@ -1072,8 +1101,33 @@ class TestShared:
     process-wide registries."""
 
     @staticmethod
+    def _ends_in_a_forked_child(call: Callable[[], object]) -> bool:
+        """Whether *call* ends in a child forked now, within ten seconds."""
+        read, write = os.pipe()
+        with warnings.catch_warnings():
+            # Forking a process with threads is what is under test.
+            warnings.simplefilter("ignore", DeprecationWarning)
+            pid = os.fork()
+        if pid == 0:  # pragma: no cover - the child reports through the pipe
+            ok = False
+            try:
+                os.close(read)
+                call()
+                ok = True
+            finally:
+                os.write(write, b"1" if ok else b"0")
+                os._exit(0)
+        os.close(write)
+        ready, _, _ = select.select([read], [], [], 10)
+        if not ready:  # pragma: no cover - the failure: the child hangs
+            os.kill(pid, signal.SIGKILL)
+        ended = bool(ready) and os.read(read, 1) == b"1"
+        os.close(read)
+        os.waitpid(pid, 0)
+        return ended
+
     def _runs_in_a_child_forked_while_held(
-        lock: Any, call: Callable[[], object]
+        self, lock: Any, call: Callable[[], object]
     ) -> bool:
         """Whether *call* ends in a child forked while another thread holds
         *lock*: that thread is not in the child to release it."""
@@ -1087,32 +1141,31 @@ class TestShared:
         holder = threading.Thread(target=hold)
         holder.start()
         held.wait()
-        read, write = os.pipe()
         try:
-            with warnings.catch_warnings():
-                # Forking a process with threads is what is under test.
-                warnings.simplefilter("ignore", DeprecationWarning)
-                pid = os.fork()
-            if pid == 0:  # pragma: no cover - the child reports through the pipe
-                ok = False
-                try:
-                    os.close(read)
-                    call()
-                    ok = True
-                finally:
-                    os.write(write, b"1" if ok else b"0")
-                    os._exit(0)
-            os.close(write)
-            ready, _, _ = select.select([read], [], [], 10)
-            if not ready:  # pragma: no cover - the failure: the child hangs
-                os.kill(pid, signal.SIGKILL)
-            ended = bool(ready) and os.read(read, 1) == b"1"
-            os.close(read)
-            os.waitpid(pid, 0)
-            return ended
+            return self._ends_in_a_forked_child(call)
         finally:
             release.set()
             holder.join()
+
+    def _runs_in_children_forked_during(
+        self, work: Callable[[], object], call: Callable[[], object], forks: int = 20
+    ) -> bool:
+        """Whether *call* ends in every one of *forks* children forked while
+        another thread does *work* over and over: one forked in the middle of
+        it inherits whatever lock the work held, and no thread to release it."""
+        stop = threading.Event()
+
+        def busy() -> None:
+            while not stop.is_set():
+                work()
+
+        worker = threading.Thread(target=busy)
+        worker.start()
+        try:
+            return all(self._ends_in_a_forked_child(call) for _ in range(forks))
+        finally:
+            stop.set()
+            worker.join()
 
     @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX: fork")
     def test_a_fork_while_the_registry_is_held_leaves_the_child_a_registry(self):
@@ -1149,6 +1202,43 @@ class TestShared:
             }
 
         assert self._runs_in_a_child_forked_while_held(_live._LOCK, edit)
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX: fork")
+    def test_a_fork_during_another_threads_reads_leaves_the_child_hdf5(
+        self, tmp_path: Path
+    ):
+        """A child forked while another thread reads a file reads one too:
+        the fork waits for HDF5's lock, which a thread in the middle of a read
+        holds, and which the child would otherwise inherit held forever."""
+        from tests.helpers import write_sample
+
+        other = write_sample(tmp_path / "t.medh5")
+
+        def read() -> None:
+            with medh5.open(other) as s:
+                s.images["CT_tp0"].read()
+
+        with medh5.open(write_sample(tmp_path / "s.medh5")) as s:
+            image = s.images["CT_tp0"]
+            assert self._runs_in_children_forked_during(image.read, read)
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX: fork")
+    def test_a_fork_during_another_threads_loads_leaves_the_child_a_registry(self):
+        """A child forked while another thread loads a registered vocabulary
+        loads one: the fork waits for the engine's registry lock too, which
+        the registry lock the child makes anew in Python does not release."""
+        from medh5 import _core, labels
+        from medh5.labels import LabelClass, LabelSet
+
+        classes = [LabelClass(i, f"c{i}", f"C{i}") for i in range(1, 20_000)]
+        labels.register("test-fork-big", LabelSet("big", classes))
+        name = labels.available()[0]
+        try:
+            assert self._runs_in_children_forked_during(
+                lambda: _core.registry_load("test-fork-big"), lambda: labels.load(name)
+            )
+        finally:
+            labels.unregister("test-fork-big")
 
     @pytest.mark.parametrize("threads", [8])
     def test_threads_naming_outputs_from_one_set_get_distinct_names(self, threads: int):

@@ -659,6 +659,17 @@ impl SampleDocument {
     fn _plain<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         json_to_py(py, &py_to_json(value)?)
     }
+
+    /// A value as member `field` holds it: a quality record made anew from
+    /// the one or the mapping given, any other member as [`Self::_plain`]
+    /// makes it.  What is made converts with no caller's code.
+    #[staticmethod]
+    fn _plain_member<'py>(py: Python<'py>, field: &str, value: &Bound<'py, PyAny>) -> R<Bound<'py, PyAny>> {
+        match Members::of(field)? {
+            Members::Quality => Ok(Bound::new(py, QualityRecord::wrap(QualityRecord::arg(value)?))?.into_any()),
+            _ => Ok(Self::_plain(py, value)?),
+        }
+    }
 }
 
 pub fn provenance_arg(obj: &Bound<'_, PyAny>) -> R<medh5::curation::provenance::Provenance> {

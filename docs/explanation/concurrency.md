@@ -93,6 +93,12 @@ assert tuple(batch["images"]["CT"].shape) == (2, 8, 8, 8)
 The same holds for your own code: open samples in the child, after the fork. A sample opened in the
 parent and read in a forked child is the case the cache exists to avoid.
 
+A fork waits for any HDF5 call another thread is in the middle of. A forked child has only the
+thread that forked, so a lock another thread held at that moment would stay held in the child, and
+its first read would wait for it forever. medh5 has `fork` itself take HDF5's lock as it begins
+(`pthread_atfork`) and let it go on both sides as it returns, and the locks medh5 keeps in Python
+(the handle caches, the vocabulary registry, documents' live views) are made anew in the child.
+
 `exec` is the other half. HDF5 opens files without close-on-exec, so a program started while a
 sample was open used to inherit the descriptor, and with it HDF5's file lock. medh5 now marks each
 file it opens close-on-exec, on every platform, so a child process neither keeps the file locked

@@ -55,6 +55,10 @@ pub mod writer;
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(Py_GIL_DISABLED)]
     medh5::h5::on_wait(wait_detached);
+    // A fork waits for any HDF5 call another thread is in, so the child
+    // never inherits HDF5's lock held by a thread it does not have.
+    #[cfg(unix)]
+    medh5::h5::fork::install();
     m.add("__version__", medh5::VERSION)?;
     m.add("__format_version__", medh5::FORMAT_VERSION)?;
     labels::register(m)?;
