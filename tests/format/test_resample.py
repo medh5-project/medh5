@@ -1400,6 +1400,38 @@ class TestAnnotationsFollow:
         with pytest.raises(MEDH5ValidationError, match="3-D and grid 'src' is 2-D"):
             resample(path, "img", onto="tgt")
 
+    def test_S8_world_coordinates_on_a_grid_of_another_rank_are_refused(self, tmp_path):
+        """A world mesh bound to a 2-D grid keeps 3-D vertices: refused, not
+        multiplied by the grid's 2-D map."""
+        path = tmp_path / "s.medh5"
+        vertices = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], np.float32)
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid("flat", shape=(6, 6), spacing=(1.0, 1.0), frame_uid="F0")
+            w.add_image("img", np.ones((6, 6), np.float32), grid="flat", modality="XR")
+            w.add_mesh(
+                "surface",
+                vertices,
+                np.array([[0, 1, 2]], np.int32),
+                grid="flat",
+                space="world",
+            )
+        before = path.read_bytes()
+        with pytest.raises(MEDH5ValidationError, match="3-D and grid 'flat' is 2-D"):
+            resample(path, "img", spacing=(2.0, 2.0), grid_id="coarse")
+        assert path.read_bytes() == before
+
+    def test_S2_an_output_id_taken_by_another_output_names_it(self, tmp_path):
+        """`img_valid` carried with suffix `_valid` is the id the image's
+        valid mask takes: refused, saying which output holds it."""
+        path = annotated(
+            tmp_path / "s.medh5",
+            mask=lambda w: w.add_mask("img_valid", np.ones((8, 8, 8), bool), grid="g"),
+        )
+        with pytest.raises(
+            MEDH5ValidationError, match="another output of this resample"
+        ):
+            resample(path, "img", onto="half", suffix="_valid")
+
     def test_S7_7_a_new_ignore_mask_takes_its_id_only_when_written(self, tmp_path):
         """Onto a grid inside the source no ignore mask is written, so an
         annotation already holding its would-be id is no collision; onto

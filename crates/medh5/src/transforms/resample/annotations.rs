@@ -453,10 +453,17 @@ pub(super) fn prepare(
     }
     let claim = |id: &str, taken: &mut HashSet<String>| -> Result<()> {
         validate_id(id, "annotation id")?;
-        if annotations.contains_key(id) || !taken.insert(id.to_string()) {
+        if annotations.contains_key(id) {
             return Err(Error::invalid(format!(
                 "annotation {} is already in the sample, so the resample cannot write it; resampling twice onto one \
                  grid needs another suffix",
+                repr_str(id)
+            )));
+        }
+        if !taken.insert(id.to_string()) {
+            return Err(Error::invalid(format!(
+                "annotation {} is also the id of another output of this resample (an image's valid_mask, or a new \
+                 ignore mask); choose another suffix",
                 repr_str(id)
             )));
         }
@@ -523,15 +530,14 @@ fn check(annotation: &Annotation, kind: &str, geometry: &Geometry, on_grid: bool
     let id = &annotation.ann_id;
     let world = annotation.header.space.as_deref() == Some("world");
     let fail = |why: &str| Err(refused(id, kind, &target.grid_id, why));
-    if !on_grid {
-        // Chosen by its frame alone: its coordinates must be of the grid's rank.
-        let s = geometry.source.n_spatial();
-        if let Some(rank) = coordinate_rank(annotation, kind)?.filter(|r| *r != s) {
-            return fail(&format!(
-                "its coordinates are {rank}-D and grid {} is {s}-D, so no mapping of the grid moves them",
-                repr_str(&geometry.source.grid_id)
-            ));
-        }
+    // Its coordinates must be of the grid's rank, whether it was chosen by
+    // its frame or is bound to the grid: world coordinates have their own.
+    let s = geometry.source.n_spatial();
+    if let Some(rank) = coordinate_rank(annotation, kind)?.filter(|r| *r != s) {
+        return fail(&format!(
+            "its coordinates are {rank}-D and grid {} is {s}-D, so no mapping of the grid moves them",
+            repr_str(&geometry.source.grid_id)
+        ));
     }
     match kind {
         "labelmap" | "layers" | "bitmask" | "mask" | "probmap" => Ok(()),
