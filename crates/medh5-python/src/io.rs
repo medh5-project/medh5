@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
 use pyo3::prelude::*;
+use pyo3::sync::critical_section::with_critical_section;
 use pyo3::types::{PyDict, PyList, PySet, PyTuple};
 use serde_json::{Map, Value};
 
@@ -222,6 +223,10 @@ fn io_days_from_baseline(dates: Vec<Option<String>>) -> Vec<Option<i64>> {
 }
 
 /// A unique filename stem for one group; adds it to `used`.
+///
+/// Threads may share `used`: the set is copied in one step, the name made
+/// from the copy (running `safe`, the caller's code, outside any lock), and
+/// added only if no other thread took it meanwhile --- else made again.
 #[pyfunction]
 #[pyo3(signature = (subject_id, keys, used, safe=None))]
 fn io_output_name(
@@ -232,10 +237,32 @@ fn io_output_name(
 ) -> PyResult<String> {
     let n = keys.len();
     let group = group_of(subject_id, keys, vec![None; n]);
-    let mut taken: BTreeSet<String> = BTreeSet::new();
-    for item in used.iter() {
-        taken.insert(item.str()?.to_string());
+    loop {
+        let items: Vec<Bound<'_, PyAny>> = with_critical_section(used.as_any(), || used.iter().collect());
+        let mut taken: BTreeSet<String> = BTreeSet::new();
+        for item in items {
+            taken.insert(item.str()?.to_string());
+        }
+        let name = output_name_from(&group, taken, safe)?;
+        let added = with_critical_section(used.as_any(), || -> PyResult<bool> {
+            if used.contains(&name)? {
+                return Ok(false);
+            }
+            used.add(&name)?;
+            Ok(true)
+        })?;
+        if added {
+            return Ok(name);
+        }
     }
+}
+
+/// A unique filename stem for `group` among `taken`, cleaned by `safe`.
+fn output_name_from(
+    group: &gr::SubjectGroup,
+    mut taken: BTreeSet<String>,
+    safe: Option<&Bound<'_, PyAny>>,
+) -> PyResult<String> {
     let failure: RefCell<Option<PyErr>> = RefCell::new(None);
     let clean = |text: &str| -> String {
         match safe.filter(|s| !s.is_none()) {
@@ -249,11 +276,10 @@ fn io_output_name(
             },
         }
     };
-    let name = gr::output_name(&group, &mut taken, &clean);
+    let name = gr::output_name(group, &mut taken, &clean);
     if let Some(e) = failure.into_inner() {
         return Err(e);
     }
-    used.add(&name)?;
     Ok(name)
 }
 

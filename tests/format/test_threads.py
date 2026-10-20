@@ -1069,6 +1069,25 @@ class TestShared:
     process-wide registries."""
 
     @pytest.mark.parametrize("threads", [8])
+    def test_threads_naming_outputs_from_one_set_get_distinct_names(self, threads: int):
+        """Threads naming groups of one subject into one shared `used` set:
+        every name returned is distinct, and the set holds them all, as a
+        name is added only if no other thread took it meanwhile."""
+        from medh5.io.grouping import Occasion, SubjectGroup, output_name
+
+        group = SubjectGroup("p1", [Occasion("s1", "p1", "20260101")])
+        used: set[str] = set()
+        names: list[str] = []
+        rounds = 100
+
+        def name() -> None:
+            names.append(output_name(group, used))
+
+        assert hammered([name] * threads, rounds=rounds) == 0
+        assert len(set(names)) == len(names) == threads * rounds
+        assert used == set(names)
+
+    @pytest.mark.parametrize("threads", [8])
     def test_one_sample_read_from_eight_threads(
         self, tmp_path: Path, label_set: Any, threads: int
     ):
