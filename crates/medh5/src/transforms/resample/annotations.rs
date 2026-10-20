@@ -191,7 +191,7 @@ impl Geometry {
                         ),
                     ));
                 };
-                let world = path_matrix(&transform)?
+                let world = path_matrix(&transform, s)?
                     .filter(|m| m.nrows() == s + 1)
                     .map(|m| scale(s, out).dot(&m).dot(&scale(s, into)));
                 let index = match &world {
@@ -264,13 +264,14 @@ fn apply(m: &Array2<f64>, points: &Array2<f64>) -> Array2<f64> {
     out
 }
 
-/// A resolved path as one matrix, when every step is affine (or identity).
-fn path_matrix(transform: &Transform) -> Result<Option<Array2<f64>>> {
+/// A resolved path of rank `s` as one matrix, when every step is affine or
+/// the identity.
+fn path_matrix(transform: &Transform, s: usize) -> Result<Option<Array2<f64>>> {
     match &transform.body {
         Body::Chain(steps) => {
             let mut total: Option<Array2<f64>> = None;
             for step in steps {
-                let Some(m) = path_matrix(step)? else {
+                let Some(m) = path_matrix(step, s)? else {
                     return Ok(None);
                 };
                 total = Some(match total {
@@ -281,12 +282,13 @@ fn path_matrix(transform: &Transform) -> Result<Option<Array2<f64>>> {
             }
             Ok(total)
         }
-        Body::Inverse(inner) => match path_matrix(inner)? {
+        Body::Inverse(inner) => match path_matrix(inner, s)? {
             Some(m) => Ok(Some(inv(&m)?)),
             None => Ok(None),
         },
         Body::Stored => match transform.kind() {
             "affine" => Ok(Some(transform.matrix()?)),
+            "identity" => Ok(Some(Array2::eye(s + 1))),
             _ => Ok(None),
         },
     }
@@ -363,10 +365,7 @@ pub(super) fn prepare(
     let annotations = sample.annotations()?;
     let target_frame = target.frame_uid.clone().filter(|f| !f.is_empty());
     let mut candidates: Vec<(&Annotation, String, bool)> = Vec::new();
-    for (id, annotation) in annotations {
-        if excluded.contains(id) {
-            continue;
-        }
+    for annotation in annotations.values() {
         let header = &annotation.header;
         match &header.grid {
             Some(grid) if sources.contains_key(grid) => candidates.push((annotation, grid.clone(), true)),
@@ -386,6 +385,15 @@ pub(super) fn prepare(
             }
         }
     }
+    // An image's valid mask goes with the image, into its output's mask,
+    // unless an annotation carried with it names the mask as its ignore
+    // region: then it is carried too.
+    let named: HashSet<String> = candidates
+        .iter()
+        .filter(|(a, _, _)| !excluded.contains(&a.ann_id))
+        .filter_map(|(a, _, _)| a.header.ignore_mask.clone())
+        .collect();
+    candidates.retain(|(a, _, _)| !excluded.contains(&a.ann_id) || named.contains(&a.ann_id));
     let mut geometry: IndexMap<String, Geometry> = IndexMap::new();
     if !plan.annotations {
         return Ok(Carry {
@@ -507,8 +515,10 @@ fn check(annotation: &Annotation, kind: &str, geometry: &Geometry, on_grid: bool
             if !geometry.can_move() {
                 return fail(NO_PATH);
             }
-            if geometry.linear(world).is_none() && annotation.optional_dataset("normals")?.is_some() {
-                return fail("the transform path to the target is not affine, so its normals cannot be carried");
+            // Off an affine path a face is no longer flat: its vertices alone
+            // would approximate it.
+            if geometry.linear(world).is_none() {
+                return fail(NOT_AFFINE);
             }
             Ok(())
         }

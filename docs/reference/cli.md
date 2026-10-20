@@ -717,7 +717,8 @@ same bytes.
 The annotations on the source grids come along under the same suffix, each
 naming its source in `derived_from`, with its classes and coverage kept: voxel
 encodings nearest in their own encoding, instances object by object, a
-probability map linearly, points, keypoints and meshes exactly. A box goes only
+probability map linearly, points and keypoints exactly, meshes along an affine
+path only. A box goes only
 where the mapping keeps the axes, and a contour only where its plane lands on a
 grid plane; anything else is refused rather than approximated, and
 `--no-annotations` moves the images alone, listing what stayed behind as not

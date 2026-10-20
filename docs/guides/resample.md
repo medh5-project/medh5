@@ -83,8 +83,8 @@ unchanged: what was looked for on the source was looked for on the copy.
   object by object and keeps its ids, so two lesions of one class stay two. An
   object that has no voxel left on the target is refused, never dropped.
 - A probability map moves linearly.
-- Points, keypoints and meshes map exactly through the same mapping as the
-  voxels.
+- Points and keypoints map exactly through the same mapping as the voxels;
+  a mesh does only along an affine path, where its faces stay flat.
 - A box stays a box only where the mapping keeps the axes, and a contour only
   where its plane lands on a grid plane. A classification of slices or of a
   region is carried only onto the source grid's own voxels. Anything else

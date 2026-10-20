@@ -580,7 +580,8 @@ def resample(
     ``<id><suffix>`` naming its source in ``derived_from``, with its classes
     and coverage unchanged: voxel encodings nearest in their own encoding,
     ``instances`` object by object under their own ids, a probability map
-    linearly, points, keypoints and meshes exactly.  A box is carried only
+    linearly, points and keypoints exactly, meshes along an affine path
+    only.  A box is carried only
     where the mapping keeps the axes, and a contour only where its plane
     lands on a grid plane; anything that cannot be carried exactly refuses
     the resample.  Target voxels outside the source become an ignore region

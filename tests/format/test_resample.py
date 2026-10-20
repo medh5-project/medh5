@@ -1039,3 +1039,78 @@ class TestAnnotationsFollow:
             assert s.annotations["img_on_half"].dense([1])[0].tolist() == (
                 one[ON_HALF].tolist()
             )
+
+    def test_S10_an_identity_transform_carries_a_box_exactly(self, tmp_path):
+        path = tmp_path / "s.medh5"
+        box = np.array([[[0, 1], [1, 2], [0, 3]]], np.float32)
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid("src", shape=(4, 4, 4), spacing=(1.0,) * 3, frame_uid="F0")
+            w.add_image(
+                "img", np.zeros((4, 4, 4), np.float32), grid="src", modality="CT"
+            )
+            w.add_grid("tgt", shape=(4, 4, 4), spacing=(1.0,) * 3, frame_uid="F1")
+            w.add_transform("t", kind="identity", from_frame="F1", to_frame="F0")
+            w.add_boxes("dets", box, [1], grid="src")
+        resample(path, "img", onto="tgt")
+        with medh5.open(path) as s:
+            assert s.annotations["dets_on_tgt"].boxes.tolist() == box.tolist()
+
+    def test_S8_a_mesh_off_an_affine_path_is_refused(self, tmp_path):
+        """A displacement curves a face between its vertices: moving the
+        vertices alone would approximate it."""
+        path = tmp_path / "s.medh5"
+        shift = np.array([0.5, -0.25, 0.75])
+        field = np.broadcast_to(shift[:, None, None, None], (3, 3, 4, 5))
+        vertices = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], np.float32)
+        faces = np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]], np.int32)
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid("src", shape=SOURCE_SHAPE, spacing=(1.0,) * 3, frame_uid="F0")
+            w.add_image("img", SOURCE, grid="src", modality="CT")
+            w.add_grid("tgt", shape=(3, 4, 5), spacing=(1.0,) * 3, frame_uid="F1")
+            w.add_transform(
+                "t",
+                kind="displacement",
+                from_frame="F1",
+                to_frame="F0",
+                field=np.ascontiguousarray(field, dtype=np.float32),
+                field_grid="tgt",
+            )
+            # And back, so the mesh has a path into the target's frame.
+            w.add_transform(
+                "back",
+                kind="displacement",
+                from_frame="F0",
+                to_frame="F1",
+                field=np.ascontiguousarray(
+                    np.broadcast_to(-shift[:, None, None, None], (3, *SOURCE_SHAPE)),
+                    dtype=np.float32,
+                ),
+                field_grid="src",
+            )
+            w.add_mesh("surface", vertices, faces, space="world", frame_uid="F0")
+        with pytest.raises(MEDH5ValidationError, match="not affine"):
+            resample(path, "img", onto="tgt")
+
+    def test_S7_7_a_valid_mask_named_as_an_ignore_mask_is_carried(self, tmp_path):
+        """An image's valid mask goes into its output's own; when an
+        annotation also names it as its ignore region, it is carried too."""
+        one, _ = two_classes()
+        ignore = np.zeros((8, 8, 8), bool)
+        ignore[0] = True
+        path = annotated(
+            tmp_path / "s.medh5",
+            seg=lambda w: w.add_segmentation(
+                "seg", grid="g", masks={1: one}, ignore=ignore
+            ),
+        )
+        with medh5.open(path) as s:
+            name = s.annotations["seg"].header.ignore_mask
+        with medh5.amend(path) as w:
+            image = np.ones((8, 8, 8), np.float32)
+            w.add_image("ct", image, grid="g", modality="CT", valid_mask=name)
+        report = resample(path, "ct", onto="half")
+        by_source = {a.source: a for a in report.annotations}
+        assert by_source["seg"].ignore_mask == f"{name}_on_half"
+        with medh5.open(path) as s:
+            carried = s.annotations[f"{name}_on_half"].read()
+        assert carried.tolist() == ignore[ON_HALF].tolist()
