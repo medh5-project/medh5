@@ -50,9 +50,12 @@ the sample with its own JSON report, and exit 0.
 not the same grid, and `from_nifti` will not resample one onto the other to make
 the import work. Resampling is a decision with a filter, an interpolation order
 and a loss of information attached to it; make it deliberately, and say so.
-Import each volume on its own grid and [resample](../guides/resample.md) one
-onto the other with `medh5 resample`, which records the interpolation and the
-mapping in the file.
+One import puts every volume on one grid, so write each volume on a grid of its
+own (the writer's `add_grid` and `add_image`) and [resample](../guides/resample.md)
+one onto the other with `medh5 resample`, which records the interpolation and
+the mapping in the file. A mask drawn on another grid is the same: import it
+onto the grid it was drawn on, and `medh5 resample` carries it across with its
+image.
 
 **A 2-D plane off z = 0 is refused.** A 2-D grid (§3.6) lies on the first two
 world axes and has no z of its own, so a 2-D NIfTI must lie in the x-y world

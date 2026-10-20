@@ -34,10 +34,32 @@ CORPUS = Path(__file__).resolve().parent.parent / "data" / "nifti-parity"
 TABLE = json.loads((CORPUS / "cases.json").read_text(encoding="utf-8"))
 CASES = {case["id"]: case for case in TABLE["cases"]}
 
-ALLOWED: dict[str, tuple[tuple[str, ...], str]] = {}
-"""Case id → the record's keys that may differ from 2.1.0's beyond the two
-masks, and the change that made them differ.  Empty: the engine's converter
-gives 2.1.0's record for every case."""
+_NAMES_THE_COMMAND = (
+    ("error.message",),
+    "W22-10 10.4: a refusal of two grids names `medh5 resample`",
+)
+
+ALLOWED: dict[str, tuple[tuple[str, ...], str]] = {
+    case: _NAMES_THE_COMMAND
+    for case in (
+        "import-two-direction",
+        "import-two-origin",
+        "import-two-shape",
+        "masks-no-mapping-assumed",
+        "masks-origin",
+        "masks-shape",
+        "seg-plain-direction",
+        "seg-plain-no-mapping-assumed",
+        "seg-plain-origin",
+        "seg-plain-spacing",
+        "seg-ras",
+    )
+}
+"""Case id → the record's keys (a dotted key names a field inside one) that
+may differ from 2.1.0's beyond the two masks, and the change that made them
+differ.  The refusals of two grids
+now name the command that resamples; every other part of their records,
+the error's type included, is still 2.1.0's."""
 
 RENAMED = {"HeaderDataError": "ValueError"}
 """The one exception type E3 lets change: nibabel's ``HeaderDataError``,
@@ -206,7 +228,14 @@ def test_E3_the_converter_matches_2_1_0(case_id: str, harness: ModuleType) -> No
         fresh = _respelled(harness.outcome(CASES[case_id], out), out)
     expected, got = masked(_record(case_id)), masked(fresh)
     _renamed(expected, got)
-    for key in ALLOWED.get(case_id, ((), ""))[0]:  # pragma: no cover - none yet
-        expected.pop(key, None)
-        got.pop(key, None)
+    for key in ALLOWED.get(case_id, ((), ""))[0]:
+        # A dotted key names a field inside one: `error.message`.
+        *parents, leaf = key.split(".")
+        mine, theirs = expected, got
+        for parent in parents:
+            mine, theirs = mine.get(parent) or {}, theirs.get(parent) or {}
+        if ALLOWED[case_id] is _NAMES_THE_COMMAND:
+            assert "medh5 resample" in theirs[leaf], theirs[leaf]
+        mine.pop(leaf, None)
+        theirs.pop(leaf, None)
     assert got == expected

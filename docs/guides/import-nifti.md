@@ -62,8 +62,9 @@ file that states no spatial unit is read as millimetres, as a guess (`units`).
 
 **Two files with different affines are refused.** They are not the same grid, and
 the importer will not resample one onto the other to make the import work.
-Import each on its own grid and [resample](resample.md) deliberately with
-`medh5 resample`, which records it.
+One import puts every volume on one grid, so write each on a grid of its own
+and [resample](resample.md) deliberately with `medh5 resample`, which records
+it.
 
 **A file declaring no geometry is refused.** `sform_code == qform_code == 0` is
 NIfTI saying it has voxel indices and no spatial mapping. A reader can still

@@ -687,7 +687,9 @@ fn same_grid(
 ) -> Result<Option<(Vec<f64>, Option<String>)>> {
     if first.shape != other.shape {
         return Err(Error::invalid(format!(
-            "{} has shape {}, but the first volume has {}; resample before converting",
+            "{} has shape {}, but the first volume has {}; one import puts every volume on one grid and a converter \
+             does not resample silently, so resample before converting, or write each volume on a grid of its own \
+             and move one onto the other with `medh5 resample`, which records it",
             repr_str(name),
             repr_int_tuple(&other.shape),
             repr_int_tuple(&first.shape)
@@ -695,8 +697,9 @@ fn same_grid(
     }
     if let Some(key) = geometry_mismatch(first, other) {
         return Err(Error::invalid(format!(
-            "{} disagrees with the first volume on {key}; resample before converting rather than letting a \
-             converter do it silently",
+            "{} disagrees with the first volume on {key}; one import puts every volume on one grid and a converter \
+             does not resample silently, so resample before converting, or write each volume on a grid of its own \
+             and move one onto the other with `medh5 resample`, which records it",
             repr_str(name)
         )));
     }
@@ -1435,8 +1438,9 @@ pub fn import_seg_nifti(
             if !options.assume_aligned {
                 return Err(Error::invalid(format!(
                     "mask {} disagrees with grid {} on {key}: it was drawn on another grid, and taking its voxels \
-                     as this one's would put the labels where nobody drew them --- resample it onto the grid first, \
-                     or pass assume_aligned=True if its header is what is wrong",
+                     as this one's would put the labels where nobody drew them --- import it onto the grid it was \
+                     drawn on and carry it across with `medh5 resample`, resample it before importing, or pass \
+                     assume_aligned=True if its header is what is wrong",
                     repr_str(name),
                     repr_str(&grid_id)
                 )));
