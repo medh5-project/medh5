@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import copy
 import operator
+import os
 import threading
 from collections.abc import Iterable, Mapping
 from typing import Any, SupportsIndex
@@ -51,6 +52,18 @@ rewritten (`_Anchor.rewrite`), while a view edits the document and takes
 the members the edit left, and while a view rereads the document
 (`Members._sync`).  Reentrant, so nested use on one thread never blocks
 itself."""
+
+
+def _after_fork_in_child() -> None:
+    """A lock of the child's own: one another of the parent's threads held at
+    the fork would be held forever.  The engine looks the lock up here on
+    each use, so it takes this one too."""
+    global _LOCK
+    _LOCK = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):  # POSIX; Windows has no fork
+    os.register_at_fork(after_in_child=_after_fork_in_child)
 
 
 def _key(key: Any) -> Any:

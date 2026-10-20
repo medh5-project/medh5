@@ -188,8 +188,9 @@ pub fn under_live_lock_if<T>(py: Python<'_>, anchored: bool, f: impl FnOnce() ->
     if !anchored {
         return f();
     }
-    static LOCK: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
-    let lock = LOCK.import(py, "medh5._live", "_LOCK")?;
+    // Looked up on each use: a forked child replaces it (`_after_fork_in_child`).
+    static LIVE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+    let lock = LIVE.get_or_try_init(py, || py.import("medh5._live").map(Bound::unbind))?.bind(py).getattr("_LOCK")?;
     lock.call_method0("acquire")?;
     let out = f();
     lock.call_method0("release")?;

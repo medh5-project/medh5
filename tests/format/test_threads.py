@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import itertools
 import os
+import select
+import signal
 import threading
 import time
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -1067,6 +1070,85 @@ class TestOneThreadAtATime:
 class TestShared:
     """What threads may share: an open sample, read from many at once, and the
     process-wide registries."""
+
+    @staticmethod
+    def _runs_in_a_child_forked_while_held(
+        lock: Any, call: Callable[[], object]
+    ) -> bool:
+        """Whether *call* ends in a child forked while another thread holds
+        *lock*: that thread is not in the child to release it."""
+        held, release = threading.Event(), threading.Event()
+
+        def hold() -> None:
+            with lock:
+                held.set()
+                release.wait()
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        held.wait()
+        read, write = os.pipe()
+        try:
+            with warnings.catch_warnings():
+                # Forking a process with threads is what is under test.
+                warnings.simplefilter("ignore", DeprecationWarning)
+                pid = os.fork()
+            if pid == 0:  # pragma: no cover - the child reports through the pipe
+                ok = False
+                try:
+                    os.close(read)
+                    call()
+                    ok = True
+                finally:
+                    os.write(write, b"1" if ok else b"0")
+                    os._exit(0)
+            os.close(write)
+            ready, _, _ = select.select([read], [], [], 10)
+            if not ready:  # pragma: no cover - the failure: the child hangs
+                os.kill(pid, signal.SIGKILL)
+            ended = bool(ready) and os.read(read, 1) == b"1"
+            os.close(read)
+            os.waitpid(pid, 0)
+            return ended
+        finally:
+            release.set()
+            holder.join()
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX: fork")
+    def test_a_fork_while_the_registry_is_held_leaves_the_child_a_registry(self):
+        """A child forked while another thread loads a vocabulary loads one
+        too: the hook gives the child a registry lock of its own."""
+        from medh5 import labels
+
+        name = labels.available()[0]
+        assert self._runs_in_a_child_forked_while_held(
+            labels._REGISTRY, lambda: labels.load(name)
+        )
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX: fork")
+    def test_a_fork_while_a_live_view_is_edited_leaves_the_child_its_views(self):
+        """A child forked while another thread edits a document's live view
+        edits views and reads documents too: the hook gives the child a
+        views' lock of its own, which the engine looks up on each use."""
+        from medh5 import _live
+        from medh5.curation import Activity
+        from medh5.document import new_document
+
+        doc = new_document("s")
+        doc.provenance.add_activity(Activity("a", "import"))
+        params = doc.provenance.activities[0].params
+        params["x"] = 1
+        assert doc.provenance.to_json()["activities"][0]["params"] == {"x": 1}
+
+        def edit() -> None:
+            doc.extra["k"] = 1
+            params["y"] = 2
+            assert doc.provenance.to_json()["activities"][0]["params"] == {
+                "x": 1,
+                "y": 2,
+            }
+
+        assert self._runs_in_a_child_forked_while_held(_live._LOCK, edit)
 
     @pytest.mark.parametrize("threads", [8])
     def test_threads_naming_outputs_from_one_set_get_distinct_names(self, threads: int):

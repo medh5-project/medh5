@@ -67,6 +67,17 @@ _REGISTRY = threading.Lock()
 half without the other."""
 
 
+def _after_fork_in_child() -> None:
+    """A registry lock of the child's own: one another of the parent's
+    threads held at the fork would be held forever."""
+    global _REGISTRY
+    _REGISTRY = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):  # POSIX; Windows has no fork
+    os.register_at_fork(after_in_child=_after_fork_in_child)
+
+
 def available() -> tuple[str, ...]:
     """Every vocabulary name :func:`load` accepts, bundled and registered."""
     return tuple(_core.registry_available())
