@@ -635,9 +635,19 @@ fn check_slices(annotation: &Annotation, geometry: &Geometry, refuse: &dyn Fn(&s
         return Err(refuse("the mapping onto it turns the grid's slices, and a slice would land on no slice"));
     };
     let s = index.nrows() - 1;
+    let world = annotation.header.space.as_deref() == Some("world");
+    let along = axis_map(&geometry.source.affine());
     for (i, k) in slices.iter().enumerate() {
-        let Some(axis) = degenerate_axis(&boxes, i) else {
-            continue;
+        let axis = match slice_axis(&boxes, i, world, along.as_deref()) {
+            None => continue,
+            Some(Ok(axis)) => axis,
+            Some(Err(flat)) => {
+                return Err(refuse(&format!(
+                    "box {i} is flat along world axis {flat}, which lies along no axis of grid {}, so slice {k} \
+                     names no plane of the box",
+                    repr_str(&geometry.source.grid_id)
+                )))
+            }
         };
         let (r, factor) = axes[axis];
         let landed = factor * *k as f64 + index[[r, s]];
@@ -679,6 +689,23 @@ fn same_voxels(geometry: &Geometry, target: &Grid) -> bool {
             && geometry.index.as_ref().is_some_and(|m| {
                 m.indexed_iter().all(|((i, j), v)| (v - if i == j { 1.0 } else { 0.0 }).abs() <= 1e-9)
             }))
+}
+
+/// The grid axis box `i` lies on a slice of: its flat axis, which in a
+/// world box is a world axis, taken back to the grid axis along it (`along`:
+/// each index axis of the grid, onto its world axis).  `Some(Err(axis))`: a
+/// world axis along no axis of the grid.
+fn slice_axis(
+    boxes: &ArrayD<f64>,
+    i: usize,
+    world: bool,
+    along: Option<&[(usize, f64)]>,
+) -> Option<std::result::Result<usize, usize>> {
+    let flat = degenerate_axis(boxes, i)?;
+    if !world {
+        return Some(Ok(flat));
+    }
+    Some(along.and_then(|a| a.iter().position(|(w, _)| *w == flat)).ok_or(flat))
 }
 
 /// The axis along which box `i` has no extent (`lo == hi`), if one.
@@ -1235,10 +1262,12 @@ fn geometric_payload(annotation: &Annotation, kind: &str, geometry: &Geometry, o
             if let (true, Some(index), true) = (on_grid, &geometry.index, payload.datasets.contains_key("slice_index"))
             {
                 let index_axes = axis_map(index).expect("checked in prepare");
+                let along = axis_map(&geometry.source.affine());
                 let (slices, slice_dtype) = column(&payload, "slice_index")?;
                 let mut landed = slices.clone();
                 for (i, k) in slices.iter().enumerate() {
-                    if let Some(axis) = degenerate_axis(&values, i) {
+                    if let Some(axis) = slice_axis(&values, i, world, along.as_deref()) {
+                        let axis = axis.expect("checked in prepare");
                         let (r, factor) = index_axes[axis];
                         landed[[i]] = (factor * k + index[[r, s]]).round();
                     }

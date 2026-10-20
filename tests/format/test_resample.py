@@ -1228,6 +1228,40 @@ class TestAnnotationsFollow:
         with medh5.open(path) as s:
             assert list(s.annotations["dets_on_even"].slice_index) == [1]
 
+    def test_S8_2_a_world_box_slice_is_on_the_grid_axis_along_its_flat_axis(
+        self, tmp_path
+    ):
+        """On a grid whose index axes 0 and 1 run along world axes 1 and 0,
+        a world box flat along world axis 0 is on a slice of grid axis 1."""
+        swap = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+        path = tmp_path / "s.medh5"
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid(
+                "p", shape=(4, 6, 8), spacing=(1.0,) * 3, direction=swap, frame_uid="F0"
+            )
+            w.add_image("img", np.ones((4, 6, 8), np.float32), grid="p", modality="CT")
+            w.add_grid(
+                "q",
+                shape=(6, 4, 8),
+                spacing=(1.0,) * 3,
+                origin=(1.0, 0.0, 0.0),
+                frame_uid="F0",
+            )
+            w.add_boxes(
+                "dets",
+                np.array([[[2, 2], [0, 3], [1, 5]]], np.float32),
+                [1],
+                grid="p",
+                space="world",
+                slice_index=[2],
+            )
+        resample(path, "img", onto="q")
+        with medh5.open(path) as s:
+            carried = s.annotations["dets_on_q"]
+            # Grid axis 1, slice 2, is world 2 along axis 0: q's slice 1.
+            assert list(carried.slice_index) == [1]
+            assert carried.boxes.tolist() == [[[2, 2], [0, 3], [1, 5]]]
+
     def test_S10_a_stored_affine_composite_carries_a_box_exactly(self, tmp_path):
         path = tmp_path / "s.medh5"
         box = np.array([[[0, 1], [1, 2], [0, 3]]], np.float32)
