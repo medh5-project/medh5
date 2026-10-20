@@ -271,10 +271,10 @@ impl Provenance {
     /// The graph as it stands: its activities as edited.
     pub fn current(&self, py: Python<'_>) -> R<prov_engine::Provenance> {
         loop {
-            let objects = {
+            let (objects, anchored) = {
                 let state = self.state.read()?;
                 let Some(objects) = &state.activities else { return Ok(state.inner.clone()) };
-                objects.iter().map(|o| o.clone_ref(py)).collect::<Vec<_>>()
+                (objects.iter().map(|o| o.clone_ref(py)).collect::<Vec<_>>(), state.document.is_some())
             };
             // Read under the lock a document's activity takes for an edit to
             // its `params`, so the graph is one state of every activity; the
@@ -282,7 +282,7 @@ impl Provenance {
             // runs Python), so the graph is taken as it was read only if it
             // still holds them, and its agents with them.  An activity
             // replaced meanwhile, and edited by whoever kept it, reads again.
-            let read = crate::document::under_live_lock(py, || {
+            let read = crate::document::under_live_lock_if(py, anchored, || {
                 let activities = objects.iter().map(|a| activity_arg(a.bind(py).as_any())).collect::<R<Vec<_>>>()?;
                 let state = self.state.read()?;
                 let held = state
@@ -656,7 +656,7 @@ impl Timeline {
         let Some(points) = self.points.get() else { return Ok(self.inner.clone()) };
         // Every timepoint in one step under the live views' lock, so that
         // edits to two timepoints are read both or neither.
-        let points = crate::document::under_live_lock(py, || {
+        let points = crate::document::under_live_lock_if(py, self.document.is_some(), || {
             points.bind(py).iter().map(|p| Timepoint::arg(&p)).collect::<R<Vec<_>>>()
         })?;
         Ok(tl_engine::Timeline::new(points)?)

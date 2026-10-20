@@ -886,12 +886,17 @@ class TestOneThreadAtATime:
             items.remove(Matches())
         assert doc.extra["log"]["items"] == [{"a": 9}, {"a": 2}] == list(items)
 
-    def test_a_standalone_records_callers_code_runs_outside_the_lock(self):
+    @pytest.mark.parametrize(
+        "kind", ["activity", "provenance", "label class", "label set", "timeline"]
+    )
+    def test_a_standalone_records_callers_code_runs_outside_the_lock(self, kind: str):
         """A caller's object in a record no document handed out is converted
         by `to_json` without the live views' lock, which guards nothing of
         such a record: its conversion may wait on an edit of a document."""
-        from medh5.curation import Activity
+        from medh5 import Timeline, Timepoint
+        from medh5.curation import Activity, Provenance
         from medh5.document import new_document
+        from medh5.labels import LabelClass, LabelSet
 
         doc = new_document("s")
         doc.extra["log"] = {"seen": {}}
@@ -899,13 +904,27 @@ class TestOneThreadAtATime:
         hook = self._edit_on_another_thread(lambda: seen.__setitem__("other", 1))
 
         class Value:
-            def to_json(self) -> int:
+            def to_json(self) -> str:
                 hook()
-                return 1
+                return "1.2"
 
-        act = Activity("a", "import", params={})
-        act.params["x"] = Value()
-        assert act.to_json()["params"] == {"x": 1}
+        record: Any
+        if kind == "activity":
+            record = Activity("a", "import")
+            record.params["x"] = Value()
+        elif kind == "provenance":
+            record = Provenance(activities=[Activity("a", "import")])
+            record.activities[0].params["x"] = Value()
+        elif kind == "label class":
+            record = LabelClass(1, "a", "A")
+            record.properties["x"] = Value()
+        elif kind == "label set":
+            record = LabelSet("v", [LabelClass(1, "a", "A")])
+            record[1].properties["x"] = Value()
+        else:
+            record = Timeline([Timepoint("tp0", 0)])
+            record[0].series_uids["ct"] = Value()
+        assert "1.2" in str(record.to_json())
         assert doc.extra["log"]["seen"] == {"other": 1}
 
     def test_a_key_the_document_cannot_hold_is_refused_before_any_change(self):

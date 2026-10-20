@@ -294,7 +294,8 @@ impl LabelClass {
         };
         // Under the live views' lock, as a record's fields are read: an edit
         // nested in `properties` and its rewrite are one step under it.
-        let properties = crate::document::under_live_lock(py, || Ok(py_to_json(properties.bind(py))?))?;
+        let properties =
+            crate::document::under_live_lock_if(py, self.held.is_anchored(), || Ok(py_to_json(properties.bind(py))?))?;
         match properties {
             Value::Object(m) if m.is_empty() => {
                 doc.shift_remove("properties");
@@ -548,7 +549,7 @@ impl LabelSet {
         }
         // Every class in one step under the live views' lock, so that edits to
         // two classes' `properties` are read both or neither.
-        let classes = crate::document::under_live_lock(py, || {
+        let classes = crate::document::under_live_lock_if(py, self.document.is_some(), || {
             objects.iter().map(|c| LabelClass::arg(&c)).collect::<R<Vec<_>>>()
         })?;
         Ok(with_classes(&self.inner, classes)?)

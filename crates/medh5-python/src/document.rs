@@ -176,6 +176,18 @@ pub(crate) fn acquisition_view<'py>(doc: &Bound<'py, PyAny>, acquisition: Map<St
 /// `f` reads of those containers is one state of them, not a mix of two.
 /// `f` must not wait for another thread.
 pub fn under_live_lock<T>(py: Python<'_>, f: impl FnOnce() -> R<T>) -> R<T> {
+    under_live_lock_if(py, true, f)
+}
+
+/// `f`, under the live views' lock if `anchored`: if what it reads came from
+/// a document, whose containers' edits take that lock.  What no document
+/// handed out holds the caller's own containers, which the lock never
+/// guards, and the caller's objects, whose conversion is the caller's code:
+/// that is read without it.
+pub fn under_live_lock_if<T>(py: Python<'_>, anchored: bool, f: impl FnOnce() -> R<T>) -> R<T> {
+    if !anchored {
+        return f();
+    }
     static LOCK: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
     let lock = LOCK.import(py, "medh5._live", "_LOCK")?;
     lock.call_method0("acquire")?;
