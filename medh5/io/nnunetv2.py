@@ -1582,7 +1582,9 @@ def _require_one_space(reference: Any, grid: Any, what: str, channel: str) -> No
             f"{what} is on grid {grid.grid_id!r} and channel {channel!r} on "
             f"{reference.grid_id!r} ({'; '.join(problems)}); nnU-Net needs every "
             "channel and the labels on the channels' grid, and resampling is not "
-            "a converter's to do"
+            "a converter's to do: resample onto the channels' grid first with "
+            f"`medh5 resample PATH --image ID --onto {reference.grid_id}`, which "
+            "carries the annotations on the image's grid across and records it"
         )
 
 

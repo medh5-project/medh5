@@ -699,8 +699,9 @@ class TestMonaiReader:
             w.add_image(
                 "CT", np.zeros(Hierarchy.SHAPE, np.int16), grid="g", modality="CT"
             )
-        with pytest.raises(MEDH5ValidationError, match="not on one grid"):
+        with pytest.raises(MEDH5ValidationError, match="not on one grid") as caught:
             LoadImage(reader=MedH5Reader("CT"), image_only=True)([a, other])
+        assert "medh5 resample" in str(caught.value)
 
     def test_a_collection_member_by_path_key(self, tmp_path):
         pytest.importorskip("monai")

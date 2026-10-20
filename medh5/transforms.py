@@ -458,6 +458,24 @@ class ResampledImage:
 
 
 @dataclass(frozen=True, slots=True)
+class ResampledAnnotation:
+    """One annotation a resample carried onto the target."""
+
+    source: str
+    """The annotation carried."""
+    annotation_id: str
+    """The annotation written, which names *source* in ``derived_from``."""
+    kind: str
+    ignore_mask: str | None = None
+    """The ignore mask the written annotation names (§7.7): its own, carried,
+    or a new one over the target voxels outside the source."""
+    note: str | None = None
+    """What the carry changed beyond the coordinates, when anything: a
+    normalized probability map with voxels outside the source is written
+    with ``normalized`` false, for one."""
+
+
+@dataclass(frozen=True, slots=True)
 class ResampleReport:
     """What :func:`resample` wrote."""
 
@@ -474,6 +492,11 @@ class ResampleReport:
     """The transform ids on each path, by source grid, for the source grids
     reached through a transform; an inverted step is ``T⁻¹``.  A grid sharing
     the target's frame (§3.3 rule 4) is mapped by the affines alone."""
+    annotations: tuple[ResampledAnnotation, ...] = ()
+    """The annotations carried onto the target, in the sample's order."""
+    not_carried: tuple[str, ...] = ()
+    """The annotations on the source grids left where they are: all of them
+    with ``annotations=False``."""
     written: tuple[str, ...] = ()
     """Every object written, as a path in the sample (``images/CT_on_ref``)."""
     filled_voxels: int = 0
@@ -502,6 +525,17 @@ class ResampleReport:
                 str(k): [str(t) for t in v]
                 for k, v in (doc.get("transforms") or {}).items()
             },
+            annotations=tuple(
+                ResampledAnnotation(
+                    source=str(a["source"]),
+                    annotation_id=str(a["annotation_id"]),
+                    kind=str(a["kind"]),
+                    ignore_mask=a.get("ignore_mask"),
+                    note=a.get("note"),
+                )
+                for a in doc.get("annotations") or ()
+            ),
+            not_carried=tuple(str(a) for a in doc.get("not_carried") or ()),
             written=tuple(str(w) for w in doc.get("written") or ()),
             filled_voxels=int(doc.get("filled_voxels", 0)),
             content_id=doc.get("content_id"),
@@ -520,6 +554,7 @@ def resample(
     fill: float = 0,
     dtype: npt.DTypeLike | None = None,
     out: str | os.PathLike[str] | None = None,
+    annotations: bool = True,
 ) -> ResampleReport:
     """Resample images of the sample at *path* onto another grid, and record it.
 
@@ -541,6 +576,19 @@ def resample(
     ``resample`` activity records the inputs, the target, the transform path
     and the interpolation, and every object written names it.
 
+    The annotations on the source grids follow the images, each written as
+    ``<id><suffix>`` naming its source in ``derived_from``, with its classes
+    and coverage unchanged: voxel encodings nearest in their own encoding,
+    ``instances`` object by object under their own ids, a probability map
+    linearly, points and keypoints exactly, meshes along an affine path
+    only.  A box is carried only
+    where the mapping keeps the axes, and a contour only where its plane
+    lands on a grid plane; anything that cannot be carried exactly refuses
+    the resample.  Target voxels outside the source become an ignore region
+    (§7.7) of every class-bearing annotation carried.  ``annotations=False``
+    moves the images alone, and the report lists what stayed behind in
+    ``not_carried``.
+
     ``out=None`` amends *path* (copy-on-write); otherwise the result is a new
     file, and an existing *out* is refused.
     """
@@ -557,6 +605,7 @@ def resample(
             fill=float(fill),
             dtype=dtype,
             out=None if out is None else os.fspath(out),
+            annotations=bool(annotations),
         )
     )
 
@@ -580,6 +629,7 @@ __all__ = [
     "IdentityTransform",
     "InverseTransform",
     "ResampleReport",
+    "ResampledAnnotation",
     "ResampledImage",
     "Transform",
     "TransformHeader",

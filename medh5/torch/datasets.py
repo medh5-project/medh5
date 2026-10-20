@@ -219,7 +219,9 @@ class _Base(_DatasetBase):  # type: ignore[misc,valid-type]
                 f"{sample.path}: a patch is a window in one grid, but this "
                 f"selection spans {len(grids)} of them ({listed}); restrict "
                 "`images=`/`annotations=` to one grid, scope the dataset with "
-                "`timepoint=`, or resample the volumes onto a common grid first"
+                "`timepoint=`, or resample the volumes onto a common grid first "
+                "(`medh5 resample PATH --image ID --onto GRID`, which carries "
+                "the annotations along)"
             )
         return grids[0]
 

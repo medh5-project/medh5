@@ -539,7 +539,7 @@ report = resample("case.medh5", ["CT"], spacing=(3.0, 1.6, 1.6),
 
 | Signature | |
 |---|---|
-| `medh5.transforms.resample(path, image_ids, *, onto=None, spacing=None, grid_id=None, suffix=None, interpolation='linear', fill=0, dtype=None, out=None)` | Resample and record; returns a `ResampleReport` |
+| `medh5.transforms.resample(path, image_ids, *, onto=None, spacing=None, grid_id=None, suffix=None, interpolation='linear', fill=0, dtype=None, out=None, annotations=True)` | Resample and record; returns a `ResampleReport` |
 
 `onto` names an existing grid; `spacing` (stored order, one value per spatial
 axis) with `grid_id` makes a new grid in the source's frame that keeps its
@@ -556,6 +556,21 @@ source point lies outside the source take `fill`, and the output's
 it is `new_grid`, an entry per image (`ResampledImage`: `source`, `image_id`,
 `dtype`, `valid_mask`, `filled_voxels`), the transform path per source grid
 (`transforms`) and the new `content_id`. `medh5 resample` is the same call.
+
+The annotations on the source grids follow the images, each written as
+`<id><suffix>` with `derived_from` naming its source, the activity in `prov`,
+and its classes and coverage unchanged. Voxel encodings move nearest in their
+own encoding, an `instances` annotation object by object under its own ids,
+and a probability map linearly. Points and keypoints map exactly, and meshes
+along an affine path; a
+box is carried only where the mapping keeps the axes, and a contour only where
+its plane lands on a grid plane. Anything that cannot be carried exactly
+refuses the whole resample rather than being approximated; `annotations=False`
+moves the images alone. Target voxels outside the source were never looked at,
+so a class-bearing annotation gets an ignore region over them (§7.7): its own ignore mask carried and widened, or a new
+`<output>_ignore` mask. Each carried annotation is a `ResampledAnnotation`
+(its `source`, the id written, `kind`, `ignore_mask` and `note`) in the
+report's `annotations`, and `not_carried` lists the ones left on their grids.
 
 ## Clinical history (format 1.1)
 

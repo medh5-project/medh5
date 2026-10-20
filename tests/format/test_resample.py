@@ -11,11 +11,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import h5py
 import numpy as np
 import pytest
 
 import medh5
 from medh5.errors import MEDH5ValidationError
+from medh5.integrity import fix
 from medh5.transforms import resample
 from medh5.validate import validate_file
 
@@ -582,3 +584,895 @@ class TestRecord:
         path = registered_pair(tmp_path / "s.medh5")
         with pytest.raises(MEDH5ValidationError, match="different grids"):
             resample(path, ["img", "ref"], spacing=(1.0, 1.0, 1.0), grid_id="n")
+
+
+# -- annotations follow their image (W22-10 10.3) ------------------------------
+
+
+def annotated(path: Path, **extra: object) -> Path:
+    """A random 8x8x8 image on grid ``g`` (1 mm, frame F0), a 2 mm grid
+    ``half`` over the same extent edge to edge, and a grid ``wide`` reaching
+    two voxels past the source along x."""
+    image = np.random.default_rng(3).normal(size=(8, 8, 8)).astype(np.float32)
+    with medh5.create(path, codec="portable") as w:
+        w.add_grid("g", shape=image.shape, spacing=(1.0,) * 3, frame_uid="F0")
+        w.add_image("img", image, grid="g", modality="CT")
+        w.add_grid(
+            "half",
+            shape=(4, 4, 4),
+            spacing=(2.0,) * 3,
+            origin=(0.5, 0.5, 0.5),
+            frame_uid="F0",
+        )
+        w.add_grid("wide", shape=(8, 8, 10), spacing=(1.0,) * 3, frame_uid="F0")
+        for write in extra.values():
+            write(w)  # type: ignore[operator]
+    return path
+
+
+def two_classes() -> tuple[np.ndarray, np.ndarray]:
+    """Two overlapping random classes on the 8x8x8 grid."""
+    rng = np.random.default_rng(11)
+    return rng.random((8, 8, 8)) > 0.5, rng.random((8, 8, 8)) > 0.6
+
+
+# Edges kept at 2 mm, target voxel j is centred on source index 2j + 0.5,
+# whose nearest source voxel is 2j + 1.
+ON_HALF = (slice(1, None, 2),) * 3
+
+
+class TestAnnotationsFollow:
+    @pytest.mark.parametrize("encoding", ["labelmap", "layers", "bitmask"])
+    def test_S7_a_resampled_mask_keeps_its_coverage(self, tmp_path, encoding):
+        one, two = two_classes()
+        if encoding == "labelmap":
+            two &= ~one
+        path = annotated(
+            tmp_path / "s.medh5",
+            seg=lambda w: w.add_segmentation(
+                "seg",
+                grid="g",
+                masks={1: one, 2: two},
+                encoding=encoding,
+                annotated_classes=[1],
+            ),
+        )
+        report = resample(path, "img", onto="half")
+        (carried,) = report.annotations
+        assert (carried.source, carried.annotation_id) == ("seg", "seg_on_half")
+        assert carried.kind == encoding and carried.ignore_mask is None
+        with medh5.open(path) as s:
+            source, out = s.annotations["seg"], s.annotations["seg_on_half"]
+            assert out.kind == encoding and out.grid_id == "half"
+            assert out.class_ids == source.class_ids == (1, 2)
+            assert out.annotated_class_ids == source.annotated_class_ids == (1,)
+            for c, mask in ((1, one), (2, two)):
+                assert out.dense([c])[0].tolist() == mask[ON_HALF].tolist()
+        codes = validate_file(path, level="integrity").codes
+        assert not [c for c in codes if c.startswith("E")]
+
+    def test_S6_2_a_resampled_annotation_names_its_source(self, tmp_path):
+        one, _ = two_classes()
+        path = annotated(
+            tmp_path / "s.medh5",
+            seg=lambda w: w.add_segmentation(
+                "seg",
+                grid="g",
+                masks={1: one},
+                quality={"status": "reviewed"},
+            ),
+        )
+        report = resample(path, "img", onto="half")
+        with medh5.open(path) as s:
+            out = s.annotations["seg_on_half"]
+            assert out.header.derived_from == ("seg",)
+            assert out.prov == report.activity_id
+            # Its review was of the source, not of the copy.
+            assert out.quality_key is None
+            activity = s.document.provenance.activity(report.activity_id)
+        assert "annotations/seg" in activity.inputs
+        assert "annotations/seg_on_half" in activity.outputs
+        assert activity.params["annotations"] is True
+
+    def test_S7_7_target_voxels_outside_the_source_are_ignored(self, tmp_path):
+        """Two voxels past the source were never examined: background there
+        would be a negative nobody found, so they are the ignore region."""
+        one, two = two_classes()
+        two &= ~one
+        path = annotated(
+            tmp_path / "s.medh5",
+            seg=lambda w: w.add_segmentation(
+                "seg", grid="g", masks={1: one, 2: two}, encoding="labelmap"
+            ),
+        )
+        report = resample(path, "img", onto="wide", interpolation="nearest")
+        (carried,) = report.annotations
+        assert carried.ignore_mask == "seg_on_wide_ignore"
+        assert "annotations/seg_on_wide_ignore" in report.written
+        with medh5.open(path) as s:
+            out = s.annotations["seg_on_wide"]
+            assert out.dense([1])[0, ..., :8].tolist() == one.tolist()
+            assert out.has_ignore_region
+            ignored = s.annotations["seg_on_wide_ignore"].read()
+            assert not ignored[..., :8].any() and ignored[..., 8:].all()
+            assert s.annotations["seg_on_wide_ignore"].prov == report.activity_id
+        assert "E413" not in validate_file(path, level="integrity").codes
+
+    def test_S7_7_a_carried_ignore_mask_takes_the_outside_too(self, tmp_path):
+        one, two = two_classes()
+        ignore = np.zeros((8, 8, 8), bool)
+        ignore[0] = True
+        path = annotated(
+            tmp_path / "s.medh5",
+            seg=lambda w: w.add_segmentation(
+                "seg",
+                grid="g",
+                masks={1: one, 2: two},
+                encoding="bitmask",
+                ignore=ignore,
+            ),
+        )
+        with medh5.open(path) as s:
+            name = s.annotations["seg"].header.ignore_mask
+        report = resample(path, "img", onto="wide")
+        by_source = {a.source: a for a in report.annotations}
+        assert by_source["seg"].ignore_mask == f"{name}_on_wide"
+        with medh5.open(path) as s:
+            carried = s.annotations[f"{name}_on_wide"].read()
+        expected = np.zeros((8, 8, 10), bool)
+        expected[0] = True
+        expected[..., 8:] = True
+        assert carried.tolist() == expected.tolist()
+
+    def test_S7_4_resampled_instances_keep_their_ids(self, tmp_path):
+        """Two objects of one class stay two, each under its own id: a
+        re-encoding by class would have merged them."""
+        from medh5.annotations.voxel import InstanceInput
+
+        a = np.zeros((8, 8, 8), bool)
+        a[0:4, 0:4, 0:4] = True
+        b = np.zeros((8, 8, 8), bool)
+        b[4:8, 4:8, 2:8] = True
+        path = annotated(
+            tmp_path / "s.medh5",
+            seg=lambda w: w.add_segmentation(
+                "les",
+                grid="g",
+                instances=[
+                    InstanceInput(class_id=1, instance_id=7, mask=a, score=0.9),
+                    InstanceInput(class_id=1, instance_id=9, mask=b, score=0.4),
+                ],
+            ),
+        )
+        resample(path, "img", onto="half")
+        with medh5.open(path) as s:
+            out = s.annotations["les_on_half"]
+            assert out.kind == "instances"
+            assert out.instance_ids.tolist() == [7, 9]
+            assert out.object_class_ids.tolist() == [1, 1]
+            assert out.scores.tolist() == pytest.approx([0.9, 0.4])
+            # Each box recomputed from its mask, at voxel edges (§8.1).
+            assert out.boxes.tolist() == [
+                [[-0.5, 1.5], [-0.5, 1.5], [-0.5, 1.5]],
+                [[1.5, 3.5], [1.5, 3.5], [0.5, 3.5]],
+            ]
+            assert out.instance(9).slices == (slice(2, 4), slice(2, 4), slice(1, 4))
+            assert out.crop(1).all()
+
+    def test_S7_4_an_object_that_vanishes_is_refused(self, tmp_path):
+        from medh5.annotations.voxel import InstanceInput
+
+        speck = np.zeros((8, 8, 8), bool)
+        speck[0, 0, 0] = True  # no 2 mm voxel samples source voxel 0
+        path = annotated(
+            tmp_path / "s.medh5",
+            seg=lambda w: w.add_segmentation(
+                "les",
+                grid="g",
+                instances=[InstanceInput(class_id=1, instance_id=42, mask=speck)],
+            ),
+        )
+        before = path.read_bytes()
+        with pytest.raises(MEDH5ValidationError, match="object 42 .* never dropped"):
+            resample(path, "img", onto="half")
+        assert path.read_bytes() == before
+
+    def test_S7_5_a_normalized_probmap_stays_normalized_inside_the_source(
+        self, tmp_path
+    ):
+        p = np.random.default_rng(5).random((8, 8, 8))
+        path = self._normalized(tmp_path / "s.medh5", p)
+        report = resample(path, "img", onto="half")
+        (carried,) = report.annotations
+        assert carried.note is None
+        with medh5.open(path) as s:
+            out = s.annotations["soft_on_half"]
+            assert out.normalized and out.threshold == 0.5
+            probabilities = np.asarray(out.probabilities(), np.float64)
+            assert out.dense([1]).dtype == bool
+        # Linear between the four... eight neighbours: 2 mm centres sit midway
+        # between source voxels 2j and 2j + 1 on every axis.
+        expected = p.reshape(4, 2, 4, 2, 4, 2).mean(axis=(1, 3, 5))
+        np.testing.assert_allclose(probabilities[0], expected, atol=1e-3)
+        np.testing.assert_allclose(probabilities.sum(axis=0), 1.0, atol=2e-3)
+        assert "E404" not in validate_file(path, level="integrity").codes
+
+    def test_S7_5_a_filled_probmap_is_written_unnormalized(self, tmp_path):
+        p = np.random.default_rng(5).random((8, 8, 8))
+        path = self._normalized(tmp_path / "s.medh5", p)
+        report = resample(path, "img", onto="wide")
+        (carried,) = report.annotations
+        assert "normalized false" in carried.note
+        assert carried.ignore_mask == "soft_on_wide_ignore"
+        with medh5.open(path) as s:
+            out = s.annotations["soft_on_wide"]
+            assert not out.normalized
+            assert not np.asarray(out.probabilities())[..., 8:].any()
+        assert "E404" not in validate_file(path, level="integrity").codes
+
+    @staticmethod
+    def _normalized(path: Path, p: np.ndarray) -> Path:
+        """A two-class probmap ``soft`` summing to 1, declared normalized: the
+        writer leaves ``normalized`` false, so it is set beside it and the
+        digests re-attested."""
+        path = annotated(
+            path,
+            soft=lambda w: w.add_segmentation(
+                "soft", grid="g", probabilities={1: p, 2: 1 - p}
+            ),
+        )
+        with h5py.File(path, "r+") as f:
+            f["annotations/soft"].attrs["normalized"] = True
+        fix(path, rewrite_digests=True, reason="declare the map normalized")
+        return path
+
+    def test_S8_1_a_box_survives_a_spacing_change_at_its_edges(self, tmp_path):
+        """Voxels 2..5 at 1 mm are voxels 1..2 at 2 mm: the box keeps its
+        edges, so its lower bound moves by half a target voxel, not a
+        whole one."""
+        path = annotated(
+            tmp_path / "s.medh5",
+            boxes=lambda w: w.add_boxes(
+                "dets",
+                np.array([[[1.5, 5.5], [-0.5, 7.5], [3.5, 3.5]]], np.float32),
+                [1],
+                grid="g",
+                slice_index=[4],
+            ),
+        )
+        with pytest.raises(MEDH5ValidationError, match="slice 4"):
+            resample(path, "img", onto="half")
+        path = annotated(
+            tmp_path / "t.medh5",
+            boxes=lambda w: w.add_boxes(
+                "dets",
+                np.array([[[1.5, 5.5], [-0.5, 7.5], [2.5, 6.5]]], np.float32),
+                [1],
+                grid="g",
+            ),
+        )
+        resample(path, "img", onto="half")
+        with medh5.open(path) as s:
+            source, out = s.annotations["dets"], s.annotations["dets_on_half"]
+            assert out.boxes.tolist() == [[[0.5, 2.5], [-0.5, 3.5], [1.0, 3.0]]]
+            assert out.as_slices("half") == [(slice(1, 3), slice(0, 4), slice(1, 3))]
+            np.testing.assert_allclose(
+                out.world_corners("half"), source.world_corners("g")
+            )
+
+    def test_S8_a_rotated_box_is_refused_not_approximated(self, tmp_path):
+        path = registered_pair(tmp_path / "s.medh5")
+        with medh5.amend(path) as w:
+            w.add_boxes(
+                "dets",
+                np.array([[[0, 1], [0, 1], [0, 1]]], np.float32),
+                [1],
+                grid="src",
+            )
+        before = path.read_bytes()
+        with pytest.raises(
+            MEDH5ValidationError, match="'dets'.*rather than approximated"
+        ):
+            resample(path, "img", onto="tgt")
+        assert path.read_bytes() == before
+        report = resample(path, "img", onto="tgt", annotations=False)
+        assert report.annotations == () and report.not_carried == ("dets",)
+        with medh5.open(path) as s:
+            assert "dets_on_tgt" not in s.annotations
+            activity = s.document.provenance.activity(report.activity_id)
+        assert activity.params["annotations"] is False
+
+    def test_S8_points_move_exactly_through_the_transform(self, tmp_path):
+        """Index points ride the composed mapping; world points in the
+        source's frame move into the target's.  Each lands where the
+        transform puts it, read back through the target grid."""
+        path = registered_pair(tmp_path / "s.medh5")
+        index = np.array([[1.0, 2.0, 3.0], [0.25, 4.5, 1.0]], np.float32)
+        with medh5.amend(path) as w:
+            w.add_points("marks", index, grid="src")
+            w.add_points("world", index * 2, space="world", frame_uid="F0")
+        resample(path, "img", onto="tgt")
+        with medh5.open(path) as s:
+            matrix = s.transforms["f1_to_f0"].matrix
+            back = np.linalg.inv(matrix)
+            src, tgt = s.grids["src"], s.grids["tgt"]
+            world = src.index_to_world(index.astype(np.float64))
+            expected = tgt.world_to_index(world @ back[:3, :3].T + back[:3, 3])
+            out = s.annotations["marks_on_tgt"]
+            assert out.grid_id == "tgt"
+            np.testing.assert_allclose(out.points, expected, rtol=1e-5, atol=1e-5)
+            moved = s.annotations["world_on_tgt"]
+            assert moved.frame_uid == "F1" and moved.grid_id is None
+            np.testing.assert_allclose(
+                moved.points,
+                (index * 2) @ back[:3, :3].T + back[:3, 3],
+                rtol=1e-5,
+                atol=1e-5,
+            )
+
+    def test_S3_7_an_annotation_carried_to_another_visit_keeps_its_own(self, tmp_path):
+        path = tmp_path / "s.medh5"
+        with medh5.create(path, codec="portable") as w:
+            w.add_timepoint("tp0", index=0)
+            w.add_timepoint("tp1", index=1)
+            w.add_grid(
+                "base",
+                shape=(4, 4, 4),
+                spacing=(1.0,) * 3,
+                frame_uid="F0",
+                timepoint="tp0",
+            )
+            w.add_grid(
+                "follow",
+                shape=(4, 4, 4),
+                spacing=(1.0,) * 3,
+                frame_uid="F1",
+                timepoint="tp1",
+            )
+            w.add_image(
+                "img", np.ones((4, 4, 4), np.float32), grid="base", modality="CT"
+            )
+            w.add_transform(
+                "t", kind="affine", from_frame="F1", to_frame="F0", matrix=np.eye(4)
+            )
+            w.add_points("marks", np.array([[1.0, 1.0, 1.0]], np.float32), grid="base")
+        resample(path, "img", onto="follow")
+        with medh5.open(path) as s:
+            out = s.annotations["marks_on_follow"]
+            assert out.grid_id == "follow"
+            assert out.timepoints == ("tp0",)
+
+    def test_S8_6_a_contour_keeps_its_plane_only_on_a_plane(self, tmp_path):
+        from medh5.annotations.geometric import Polygon
+
+        square = np.array([[3, 1, 1], [3, 1, 4], [3, 4, 4], [3, 4, 1]], np.float32)
+        path = annotated(
+            tmp_path / "s.medh5",
+            contours=lambda w: w.add_contours(
+                "outline", [Polygon(square, 1, plane=(0, 3))], grid="g"
+            ),
+        )
+        with medh5.amend(path) as w:
+            w.add_grid(
+                "up",
+                shape=(8, 8, 8),
+                spacing=(1.0,) * 3,
+                origin=(1.0, 0, 0),
+                frame_uid="F0",
+            )
+        with pytest.raises(MEDH5ValidationError, match="plane 3 of axis 0"):
+            resample(path, "img", onto="half")
+        resample(path, "img", onto="up")
+        with medh5.open(path) as s:
+            out = s.annotations["outline_on_up"]
+            assert out.planes.tolist() == [[0, 2]]
+            assert out.vertices[:, 0].tolist() == [2.0] * 4
+
+    def test_resampling_back_agrees_with_the_source(self, tmp_path):
+        """A sanity check rather than an equality: up to 0.5 mm and back,
+        nearest, the classes agree with the source."""
+        from medh5.curation.agreement import compare_voxel
+
+        one, two = two_classes()
+        path = annotated(
+            tmp_path / "s.medh5",
+            seg=lambda w: w.add_segmentation(
+                "seg", grid="g", masks={1: one, 2: two}, encoding="layers"
+            ),
+        )
+        resample(path, "img", spacing=(0.5,) * 3, grid_id="fine")
+        resample(path, "img_on_fine", onto="g", suffix="_back")
+        with medh5.open(path) as s:
+            agreement = compare_voxel(
+                s.annotations["seg"], s.annotations["seg_on_fine_back"]
+            )
+        assert min(agreement.per_class.values()) >= 0.99
+
+    def test_without_annotations_they_are_listed_as_left_behind(self, tmp_path):
+        one, _ = two_classes()
+        path = annotated(
+            tmp_path / "s.medh5",
+            seg=lambda w: w.add_segmentation("seg", grid="g", masks={1: one}),
+            marks=lambda w: w.add_points(
+                "marks", np.zeros((1, 3), np.float32), grid="g"
+            ),
+        )
+        report = resample(path, "img", onto="half", annotations=False)
+        assert report.not_carried == ("marks", "seg")
+        assert report.written == ("images/img_on_half",)
+
+    def test_S9_a_scoped_classification_is_carried_only_onto_its_own_voxels(
+        self, tmp_path
+    ):
+        """A slice is still itself on the same voxels; onto other voxels it
+        names no slice there, and the carry refuses."""
+        path = annotated(
+            tmp_path / "s.medh5",
+            dx=lambda w: w.add_classification(
+                "dx", [(1, 1.0, 2)], scope="slice", grid="g"
+            ),
+        )
+        with pytest.raises(MEDH5ValidationError, match="its scope is a slice"):
+            resample(path, "img", onto="half")
+        report = resample(path, "img", onto="g", dtype=np.float64, suffix="_f64")
+        assert [a.annotation_id for a in report.annotations] == ["dx_f64"]
+        with medh5.open(path) as s:
+            source, out = s.annotations["dx"], s.annotations["dx_f64"]
+            assert out.kind == "classification" and out.grid_id == "g"
+            assert out.header.derived_from == ("dx",)
+            assert list(out.scope_ids) == list(source.scope_ids)
+        codes = validate_file(path, level="integrity").codes
+        assert not [c for c in codes if c.startswith("E")]
+
+    def test_S2_an_annotation_may_share_an_image_id(self, tmp_path):
+        """Images and annotations are separate groups, so their outputs are
+        too: resampling both under one suffix writes both."""
+        one, _ = two_classes()
+        path = annotated(
+            tmp_path / "s.medh5",
+            seg=lambda w: w.add_segmentation("img", grid="g", masks={1: one}),
+        )
+        report = resample(path, "img", onto="half")
+        assert "images/img_on_half" in report.written
+        assert "annotations/img_on_half" in report.written
+        with medh5.open(path) as s:
+            assert s.annotations["img_on_half"].dense([1])[0].tolist() == (
+                one[ON_HALF].tolist()
+            )
+
+    def test_S10_an_identity_transform_carries_a_box_exactly(self, tmp_path):
+        path = tmp_path / "s.medh5"
+        box = np.array([[[0, 1], [1, 2], [0, 3]]], np.float32)
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid("src", shape=(4, 4, 4), spacing=(1.0,) * 3, frame_uid="F0")
+            w.add_image(
+                "img", np.zeros((4, 4, 4), np.float32), grid="src", modality="CT"
+            )
+            w.add_grid("tgt", shape=(4, 4, 4), spacing=(1.0,) * 3, frame_uid="F1")
+            w.add_transform("t", kind="identity", from_frame="F1", to_frame="F0")
+            w.add_boxes("dets", box, [1], grid="src")
+        resample(path, "img", onto="tgt")
+        with medh5.open(path) as s:
+            assert s.annotations["dets_on_tgt"].boxes.tolist() == box.tolist()
+
+    def test_S8_a_mesh_off_an_affine_path_is_refused(self, tmp_path):
+        """A displacement curves a face between its vertices: moving the
+        vertices alone would approximate it."""
+        path = tmp_path / "s.medh5"
+        shift = np.array([0.5, -0.25, 0.75])
+        field = np.broadcast_to(shift[:, None, None, None], (3, 3, 4, 5))
+        vertices = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], np.float32)
+        faces = np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]], np.int32)
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid("src", shape=SOURCE_SHAPE, spacing=(1.0,) * 3, frame_uid="F0")
+            w.add_image("img", SOURCE, grid="src", modality="CT")
+            w.add_grid("tgt", shape=(3, 4, 5), spacing=(1.0,) * 3, frame_uid="F1")
+            w.add_transform(
+                "t",
+                kind="displacement",
+                from_frame="F1",
+                to_frame="F0",
+                field=np.ascontiguousarray(field, dtype=np.float32),
+                field_grid="tgt",
+                inverse_id="back",
+            )
+            # And its stored inverse, so the vertices could be moved.
+            w.add_transform(
+                "back",
+                kind="displacement",
+                from_frame="F0",
+                to_frame="F1",
+                field=np.ascontiguousarray(
+                    np.broadcast_to(-shift[:, None, None, None], (3, *SOURCE_SHAPE)),
+                    dtype=np.float32,
+                ),
+                field_grid="src",
+                inverse_id="t",
+            )
+            w.add_mesh("surface", vertices, faces, space="world", frame_uid="F0")
+        with pytest.raises(MEDH5ValidationError, match="not affine"):
+            resample(path, "img", onto="tgt")
+
+    @staticmethod
+    def displaced(path, back_shift, *, paired):
+        """`img` on `src` (F0), sampled onto `tgt` (F1) through a constant
+        displacement, with one transform the other way."""
+        shift = np.array([0.5, -0.25, 0.75])
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid("src", shape=SOURCE_SHAPE, spacing=(1.0,) * 3, frame_uid="F0")
+            w.add_image("img", SOURCE, grid="src", modality="CT")
+            w.add_grid("tgt", shape=(3, 4, 5), spacing=(1.0,) * 3, frame_uid="F1")
+            w.add_transform(
+                "t",
+                kind="displacement",
+                from_frame="F1",
+                to_frame="F0",
+                field=np.ascontiguousarray(
+                    np.broadcast_to(shift[:, None, None, None], (3, 3, 4, 5)),
+                    dtype=np.float32,
+                ),
+                field_grid="tgt",
+                inverse_id="back" if paired else None,
+            )
+            w.add_transform(
+                "back",
+                kind="displacement",
+                from_frame="F0",
+                to_frame="F1",
+                field=np.ascontiguousarray(
+                    np.broadcast_to(
+                        np.asarray(back_shift)[:, None, None, None], (3, *SOURCE_SHAPE)
+                    ),
+                    dtype=np.float32,
+                ),
+                field_grid="src",
+                inverse_id="t" if paired else None,
+            )
+            w.add_points("marks", np.array([[1.0, 2.0, 1.0]], np.float32), grid="src")
+        return shift
+
+    def test_S10_2_points_move_by_the_inverse_of_the_sampling_path(self, tmp_path):
+        """The image is sampled through `t`; the points move by its stored
+        inverse, so they stay on what they marked."""
+        path = tmp_path / "s.medh5"
+        shift = self.displaced(path, [-0.5, 0.25, -0.75], paired=True)
+        resample(path, "img", onto="tgt")
+        with medh5.open(path) as s:
+            moved = s.annotations["marks_on_tgt"].points
+        np.testing.assert_allclose(moved, [[1.0, 2.0, 1.0] - shift], atol=1e-5)
+
+    def test_S10_6_a_landmark_pair_carried_together_stays_a_pair(self, tmp_path):
+        """Each copy names the other's copy; a half carried alone keeps
+        naming its partner, which stays where it was."""
+        path = tmp_path / "s.medh5"
+        with medh5.create(path, codec="portable") as w:
+            for grid, start in (("a", 0.0), ("b", 1.0), ("t", 0.5)):
+                w.add_grid(
+                    grid,
+                    shape=(4, 4, 4),
+                    spacing=(1.0,) * 3,
+                    origin=(start, 0.0, 0.0),
+                    frame_uid="F0",
+                )
+            w.add_image("ia", np.ones((4, 4, 4), np.float32), grid="a", modality="CT")
+            w.add_image("ib", np.ones((4, 4, 4), np.float32), grid="b", modality="CT")
+            marks = np.array([[1.0, 2.0, 1.0]], np.float32)
+            w.add_points("pa", marks, grid="a", correspondence="pb")
+            w.add_points("pb", marks, grid="b", correspondence="pa")
+        resample(path, ["ia", "ib"], onto="t", suffix="_both")
+        resample(path, "ia", onto="t", suffix="_alone")
+        with medh5.open(path) as s:
+            assert s.annotations["pa_both"].correspondence == "pb_both"
+            assert s.annotations["pb_both"].correspondence == "pa_both"
+            assert s.annotations["pa_alone"].correspondence == "pb"
+        assert validate_file(path, level="integrity").ok
+
+    def test_S10_1_a_warp_whose_stored_inverse_is_affine_carries_a_box(self, tmp_path):
+        """The image is sampled through a displacement whose `inverse_id`
+        names an affine: that affine is what moves the box, exactly."""
+        path = tmp_path / "s.medh5"
+        shift = np.array([0.5, -0.25, 0.75])
+        back = np.eye(4)
+        back[:3, 3] = -shift
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid("src", shape=SOURCE_SHAPE, spacing=(1.0,) * 3, frame_uid="F0")
+            w.add_image("img", SOURCE, grid="src", modality="CT")
+            w.add_grid("tgt", shape=(3, 4, 5), spacing=(1.0,) * 3, frame_uid="F1")
+            w.add_transform(
+                "t",
+                kind="displacement",
+                from_frame="F1",
+                to_frame="F0",
+                field=np.ascontiguousarray(
+                    np.broadcast_to(shift[:, None, None, None], (3, 3, 4, 5)),
+                    dtype=np.float32,
+                ),
+                field_grid="tgt",
+                inverse_id="back",
+            )
+            w.add_transform(
+                "back",
+                kind="affine",
+                from_frame="F0",
+                to_frame="F1",
+                matrix=back,
+                inverse_id="t",
+            )
+            w.add_boxes(
+                "dets",
+                np.array([[[1, 2], [1, 3], [0, 2]]], np.float32),
+                [1],
+                grid="src",
+            )
+        resample(path, "img", onto="tgt")
+        with medh5.open(path) as s:
+            moved = s.annotations["dets_on_tgt"].boxes
+        expected = np.array([[[1, 2], [1, 3], [0, 2]]]) - shift[None, :, None]
+        np.testing.assert_allclose(moved, expected, atol=1e-5)
+
+    def test_S10_2_points_refuse_a_path_with_no_inverse(self, tmp_path):
+        """A transform the other way that is not declared `t`'s inverse is
+        another mapping: moving the points by it would put them off the
+        anatomy the resampled image shows."""
+        path = tmp_path / "s.medh5"
+        self.displaced(path, [3.0, 0.0, 0.0], paired=False)
+        before = path.read_bytes()
+        with pytest.raises(MEDH5ValidationError, match="'marks'.*no inverse"):
+            resample(path, "img", onto="tgt")
+        assert path.read_bytes() == before
+
+    def test_S7_7_a_valid_mask_named_as_an_ignore_mask_is_carried(self, tmp_path):
+        """An image's valid mask goes into its output's own; when an
+        annotation also names it as its ignore region, it is carried too."""
+        one, _ = two_classes()
+        ignore = np.zeros((8, 8, 8), bool)
+        ignore[0] = True
+        path = annotated(
+            tmp_path / "s.medh5",
+            seg=lambda w: w.add_segmentation(
+                "seg", grid="g", masks={1: one}, ignore=ignore
+            ),
+        )
+        with medh5.open(path) as s:
+            name = s.annotations["seg"].header.ignore_mask
+        with medh5.amend(path) as w:
+            image = np.ones((8, 8, 8), np.float32)
+            w.add_image("ct", image, grid="g", modality="CT", valid_mask=name)
+        report = resample(path, "ct", onto="half")
+        by_source = {a.source: a for a in report.annotations}
+        assert by_source["seg"].ignore_mask == f"{name}_on_half"
+        with medh5.open(path) as s:
+            carried = s.annotations[f"{name}_on_half"].read()
+        assert carried.tolist() == ignore[ON_HALF].tolist()
+
+    @staticmethod
+    def _boxes_only(path, ignore):
+        """Instances whose objects are boxes alone: their masks dropped."""
+        from medh5.annotations.voxel import InstanceInput
+
+        lesion = np.zeros((8, 8, 8), bool)
+        lesion[2:5, 2:5, 2:5] = True
+        annotated(
+            path,
+            seg=lambda w: w.add_segmentation(
+                "les",
+                grid="g",
+                instances=[InstanceInput(class_id=1, instance_id=5, mask=lesion)],
+                ignore=ignore,
+            ),
+        )
+        with h5py.File(path, "r+") as f:
+            for name in ("mask_offsets", "mask_shapes", "mask_data"):
+                del f["annotations/les"][name]
+        fix(path, rewrite_digests=True, reason="keep the boxes alone")
+        with medh5.open(path) as s:
+            assert not s.annotations["les"].has_masks
+            return s.annotations["les"].header.ignore_mask
+
+    def test_S7_7_instances_carried_as_boxes_keep_their_ignore_region(self, tmp_path):
+        """Coverage is the annotation's whether or not its objects carry
+        masks: the copy still names what was not examined."""
+        ignore = np.zeros((8, 8, 8), bool)
+        ignore[0] = True
+        path = tmp_path / "s.medh5"
+        name = self._boxes_only(path, ignore)
+        resample(path, "img", onto="wide")
+        with medh5.open(path) as s:
+            assert s.annotations["les_on_wide"].header.ignore_mask == f"{name}_on_wide"
+            widened = s.annotations[f"{name}_on_wide"].read()
+        expected = np.zeros((8, 8, 10), bool)
+        expected[0] = True
+        expected[..., 8:] = True
+        assert widened.tolist() == expected.tolist()
+        path = tmp_path / "t.medh5"
+        assert self._boxes_only(path, None) is None
+        resample(path, "img", onto="wide")
+        with medh5.open(path) as s:
+            assert (
+                s.annotations["les_on_wide"].header.ignore_mask == "les_on_wide_ignore"
+            )
+            outside = s.annotations["les_on_wide_ignore"].read()
+        assert outside.sum() == 8 * 8 * 2 and outside[..., 8:].all()
+
+    def test_S8_2_a_world_box_slice_moves_by_the_index_map(self, tmp_path):
+        """A slice is a plane of the grid, whatever space its box is in: at
+        2 mm, source slice 1 lands between target slices 0 and 1."""
+
+        def boxes(z: float):
+            def write(w):
+                w.add_grid("even", shape=(4, 4, 4), spacing=(2.0,) * 3, frame_uid="F0")
+                w.add_boxes(
+                    "dets",
+                    np.array([[[1, 5], [0, 7], [z, z]]], np.float32),
+                    [1],
+                    grid="g",
+                    space="world",
+                    slice_index=[int(z)],
+                )
+
+            return write
+
+        path = annotated(tmp_path / "s.medh5", boxes=boxes(1.0))
+        with pytest.raises(MEDH5ValidationError, match="slice 1 of axis 2"):
+            resample(path, "img", onto="even")
+        path = annotated(tmp_path / "t.medh5", boxes=boxes(2.0))
+        resample(path, "img", onto="even")
+        with medh5.open(path) as s:
+            assert list(s.annotations["dets_on_even"].slice_index) == [1]
+
+    def test_S8_2_a_world_box_slice_is_on_the_grid_axis_along_its_flat_axis(
+        self, tmp_path
+    ):
+        """On a grid whose index axes 0 and 1 run along world axes 1 and 0,
+        a world box flat along world axis 0 is on a slice of grid axis 1."""
+        swap = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+        path = tmp_path / "s.medh5"
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid(
+                "p", shape=(4, 6, 8), spacing=(1.0,) * 3, direction=swap, frame_uid="F0"
+            )
+            w.add_image("img", np.ones((4, 6, 8), np.float32), grid="p", modality="CT")
+            w.add_grid(
+                "q",
+                shape=(6, 4, 8),
+                spacing=(1.0,) * 3,
+                origin=(1.0, 0.0, 0.0),
+                frame_uid="F0",
+            )
+            w.add_boxes(
+                "dets",
+                np.array([[[2, 2], [0, 3], [1, 5]]], np.float32),
+                [1],
+                grid="p",
+                space="world",
+                slice_index=[2],
+            )
+        resample(path, "img", onto="q")
+        with medh5.open(path) as s:
+            carried = s.annotations["dets_on_q"]
+            # Grid axis 1, slice 2, is world 2 along axis 0: q's slice 1.
+            assert list(carried.slice_index) == [1]
+            assert carried.boxes.tolist() == [[[2, 2], [0, 3], [1, 5]]]
+
+    def test_S10_a_stored_affine_composite_carries_a_box_exactly(self, tmp_path):
+        path = tmp_path / "s.medh5"
+        box = np.array([[[0, 1], [1, 2], [0, 3]]], np.float32)
+        shift = np.eye(4)
+        shift[0, 3] = 1.0
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid("src", shape=(4, 4, 4), spacing=(1.0,) * 3, frame_uid="F0")
+            w.add_image(
+                "img", np.zeros((4, 4, 4), np.float32), grid="src", modality="CT"
+            )
+            w.add_grid("tgt", shape=(4, 4, 4), spacing=(1.0,) * 3, frame_uid="F1")
+            w.add_transform(
+                "a", kind="affine", from_frame="F1", to_frame="FM", matrix=shift
+            )
+            w.add_transform("b", kind="identity", from_frame="FM", to_frame="F0")
+            w.add_transform(
+                "c",
+                kind="composite",
+                from_frame="F1",
+                to_frame="F0",
+                components=["a", "b"],
+            )
+            w.add_boxes("dets", box, [1], grid="src")
+        resample(path, "img", onto="tgt")
+        with medh5.open(path) as s:
+            # F1 -> F0 adds 1 along x, so F0 -> F1 takes it away.
+            moved = s.annotations["dets_on_tgt"].boxes
+        assert moved.tolist() == [[[-1, 0], [1, 2], [0, 3]]]
+
+    def test_S8_world_coordinates_of_another_rank_are_refused(self, tmp_path):
+        """Chosen by frame alone, 3-D points in the frame of a 2-D grid have
+        no mapping that moves them."""
+        path = tmp_path / "s.medh5"
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid("src", shape=(4, 4), spacing=(1.0, 1.0), frame_uid="F0")
+            w.add_image("img", np.zeros((4, 4), np.float32), grid="src", modality="CT")
+            w.add_grid("tgt", shape=(4, 4), spacing=(1.0, 1.0), frame_uid="F1")
+            w.add_transform(
+                "t", kind="affine", from_frame="F1", to_frame="F0", matrix=np.eye(3)
+            )
+            w.add_points(
+                "marks", np.zeros((1, 3), np.float32), space="world", frame_uid="F0"
+            )
+        with pytest.raises(MEDH5ValidationError, match="3-D and grid 'src' is 2-D"):
+            resample(path, "img", onto="tgt")
+
+    def test_S8_world_coordinates_on_a_grid_of_another_rank_are_refused(self, tmp_path):
+        """A world mesh bound to a 2-D grid keeps 3-D vertices: refused, not
+        multiplied by the grid's 2-D map."""
+        path = tmp_path / "s.medh5"
+        vertices = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], np.float32)
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid("flat", shape=(6, 6), spacing=(1.0, 1.0), frame_uid="F0")
+            w.add_image("img", np.ones((6, 6), np.float32), grid="flat", modality="XR")
+            w.add_mesh(
+                "surface",
+                vertices,
+                np.array([[0, 1, 2]], np.int32),
+                grid="flat",
+                space="world",
+            )
+        before = path.read_bytes()
+        with pytest.raises(MEDH5ValidationError, match="3-D and grid 'flat' is 2-D"):
+            resample(path, "img", spacing=(2.0, 2.0), grid_id="coarse")
+        assert path.read_bytes() == before
+
+    def test_S2_an_output_id_taken_by_another_output_names_it(self, tmp_path):
+        """`img_valid` carried with suffix `_valid` is the id the image's
+        valid mask takes: refused, saying which output holds it."""
+        path = annotated(
+            tmp_path / "s.medh5",
+            mask=lambda w: w.add_mask("img_valid", np.ones((8, 8, 8), bool), grid="g"),
+        )
+        with pytest.raises(
+            MEDH5ValidationError, match="another output of this resample"
+        ):
+            resample(path, "img", onto="half", suffix="_valid")
+
+    def test_S7_7_a_new_ignore_mask_takes_its_id_only_when_written(self, tmp_path):
+        """Onto a grid inside the source no ignore mask is written, so an
+        annotation already holding its would-be id is no collision; onto
+        one reaching past the source it is."""
+        one, _ = two_classes()
+
+        def write(w):
+            w.add_segmentation("seg", grid="g", masks={1: one})
+            for name in ("seg_on_half_ignore", "seg_on_wide_ignore"):
+                w.add_mask(name, np.zeros((8, 8, 8), bool), grid="g")
+
+        path = annotated(tmp_path / "s.medh5", seg=write)
+        report = resample(path, "img", onto="half")
+        by_source = {a.source: a for a in report.annotations}
+        assert by_source["seg"].ignore_mask is None
+        with pytest.raises(MEDH5ValidationError, match="seg_on_wide_ignore"):
+            resample(path, "img", onto="wide")
+
+    def test_S7_5_a_probmap_keeps_its_plane_order(self, tmp_path):
+        """Planes stored in the order `class_ids` gives, not sorted: each
+        carried plane stays with its class."""
+        p = np.random.default_rng(5).random((8, 8, 8))
+        path = self._normalized(tmp_path / "s.medh5", p)
+        with h5py.File(path, "r+") as f:
+            soft = f["annotations/soft"]
+            data = soft["data"][()]
+            del soft["data"]
+            soft.create_dataset("data", data=data[::-1])
+            soft.attrs["class_ids"] = np.asarray(soft.attrs["class_ids"])[::-1]
+        fix(path, rewrite_digests=True, reason="store the planes as 2, 1")
+        with medh5.open(path) as s:
+            assert s.annotations["soft"].class_ids == (2, 1)
+        resample(path, "img", onto="half")
+        with medh5.open(path) as s:
+            out = s.annotations["soft_on_half"]
+            assert out.class_ids == (2, 1)
+            planes = dict(
+                zip(out.class_ids, np.asarray(out.probabilities()), strict=True)
+            )
+        expected = p.reshape(4, 2, 4, 2, 4, 2).mean(axis=(1, 3, 5))
+        np.testing.assert_allclose(planes[1], expected, atol=1e-3)
+        assert not [
+            c for c in validate_file(path, level="integrity").codes if c[0] == "E"
+        ]

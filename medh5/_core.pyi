@@ -1916,6 +1916,7 @@ def resample(
     fill: float = 0.0,
     dtype: Any | None = None,
     out: str | os.PathLike[str] | None = None,
+    annotations: bool = True,
 ) -> Any:
     """Resample images of a sample onto another grid, recorded as one `resample`
     activity; the report as plain data (`medh5.transforms.resample` builds its

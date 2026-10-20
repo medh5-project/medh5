@@ -1107,6 +1107,7 @@ compiled extension the modules re-export from, not an API of its own.
 | `refuse_outside` | function | Raise `MEDH5ValidationError` if any of the `inside` flags is false: `extrapolation='error'`. |  |
 | `resample` | function | Resample images of the sample at *path* onto another grid, and record it. | [Python API › Resampling](python-api.md#resampling) |
 | `RESAMPLE_INTERPOLATIONS` | constant (`tuple`) |  | [Python API › Resampling](python-api.md#resampling) |
+| `ResampledAnnotation` | class | One annotation a resample carried onto the target. | [Python API › Resampling](python-api.md#resampling) |
 | `ResampledImage` | class | One image a resample wrote. | [Python API › Resampling](python-api.md#resampling) |
 | `ResampleReport` | class | What `resample` wrote. | [Python API › Resampling](python-api.md#resampling) |
 | `resolve_between` | function | The transform relating two frame uids, or `None` when none does. |  |

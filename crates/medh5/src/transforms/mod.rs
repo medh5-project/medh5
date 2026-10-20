@@ -19,5 +19,7 @@ pub use model::{
     can_invert, stored_inverse, Body, Transform, TransformHeader, INTERPOLATIONS, SPEC_TRANSFORM_ATTRS,
     TRANSFORM_KINDS, VECTOR_SPACES,
 };
-pub use resample::{resample, ResamplePlan, ResampleTarget, Resampled, ResampledImage, RESAMPLE_INTERPOLATIONS};
+pub use resample::{
+    resample, ResamplePlan, ResampleTarget, Resampled, ResampledAnnotation, ResampledImage, RESAMPLE_INTERPOLATIONS,
+};
 pub use resolve::{frame_graph, frames_of_timepoint, resolve_between};

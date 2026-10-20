@@ -506,11 +506,33 @@ fn with_slashes(value: Value) -> Value {
     }
 }
 
+/// The refusals of two grids, which name the command that resamples since
+/// W22-10 10.4; every other part of their records is still 2.1.0's.
+const NAMES_THE_COMMAND: &[&str] = &[
+    "import-two-direction",
+    "import-two-origin",
+    "import-two-shape",
+    "masks-no-mapping-assumed",
+    "masks-origin",
+    "masks-shape",
+    "seg-plain-direction",
+    "seg-plain-no-mapping-assumed",
+    "seg-plain-origin",
+    "seg-plain-spacing",
+    "seg-ras",
+];
+
 /// The differences E3 allows beyond its two masks, by case: a Python
-/// exception the engine's error kind cannot name.
-fn allowed(expected: &mut Value, got: &mut Value) {
+/// exception the engine's error kind cannot name, and a refusal of two grids
+/// that now names `medh5 resample`.
+fn allowed(id: &str, expected: &mut Value, got: &mut Value) {
     if expected["error"]["type"] == "HeaderDataError" && got["error"]["type"] == "ValueError" {
         expected["error"]["type"] = json!("ValueError");
+    }
+    if NAMES_THE_COMMAND.contains(&id) {
+        let message = got["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("medh5 resample"), "{id}: {message}");
+        expected["error"]["message"] = got["error"]["message"].clone();
     }
 }
 
@@ -541,7 +563,7 @@ fn e3_the_engine_matches_2_1_0() {
         let mut got = masked(&outcome(case, &root, &out));
         let text = std::fs::read_to_string(root.join("records").join(format!("{id}.json"))).unwrap();
         let mut expected = masked(&serde_json::from_str(&text).unwrap());
-        allowed(&mut expected, &mut got);
+        allowed(id, &mut expected, &mut got);
         if !same(&expected, &got) {
             failures.insert(id.to_string(), first_difference(&expected, &got, ""));
         }

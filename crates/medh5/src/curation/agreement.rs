@@ -780,7 +780,9 @@ fn voxel_with(
         return Err(Error::coded(
             "E101",
             format!(
-                "annotations {} and {} are on different grids ({} vs {}){}; resample before comparing",
+                "annotations {} and {} are on different grids ({} vs {}){}; resample one onto the other's \
+                 grid before comparing (`medh5 resample PATH --image ID --onto GRID` carries the \
+                 annotations with the images)",
                 repr_str(&a.ann_id),
                 repr_str(&b.ann_id),
                 repr_opt(a.grid_id()),
@@ -1052,7 +1054,8 @@ fn check_same_space(a: &Annotation, b: &Annotation) -> Result<()> {
             "E101",
             format!(
                 "annotations {} and {} are on different grids ({} vs {}){}; their index coordinates count \
-                 different voxels, so resample or convert before comparing",
+                 different voxels, so resample one onto the other's grid before comparing (`medh5 \
+                 resample PATH --image ID --onto GRID` carries the annotations with the images)",
                 repr_str(&a.ann_id),
                 repr_str(&b.ann_id),
                 repr_opt(a.grid_id()),

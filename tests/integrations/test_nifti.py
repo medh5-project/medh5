@@ -458,7 +458,7 @@ class TestNifti:
     ):
         odd = tmp_path / "odd.nii.gz"
         nib.save(nib.Nifti1Image(np.zeros((4, 4, 4), np.int16), AFFINE), str(odd))
-        with pytest.raises(MEDH5ValidationError, match="resample"):
+        with pytest.raises(MEDH5ValidationError, match="medh5 resample"):
             from_nifti({"CT": volumes["ct"], "PET": odd}, tmp_path / "x.medh5")
         shifted = np.array(AFFINE)
         shifted[0, 3] += 3.0

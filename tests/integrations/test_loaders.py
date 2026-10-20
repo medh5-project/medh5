@@ -394,8 +394,9 @@ class TestPatchGrids:
         spanning = PatchDataset(
             [path], PatchSampler(8), annotations={"organs_tp0": [1]}
         )
-        with pytest.raises(MEDH5ValidationError, match="one grid"):
+        with pytest.raises(MEDH5ValidationError, match="one grid") as caught:
             spanning[0]
+        assert "medh5 resample" in str(caught.value)
 
         scoped = PatchDataset(
             [path],
