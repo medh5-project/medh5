@@ -3,9 +3,13 @@
 Every importer and exporter lives in `medh5.io` and behind `medh5 convert`.
 
 ```bash
-pip install "medh5[nifti,dicom]"        # reading
+pip install "medh5[dicom]"              # reading DICOM, DICOM SEG and RTSTRUCT
 pip install "medh5[dicomseg]"           # writing DICOM SEG (highdicom)
 ```
+
+NIfTI needs neither: the engine reads and writes it, so `medh5.io.nifti`, the
+ITK displacement fields and the nnU-Net exporter run with the package alone,
+and the standalone `medh5` binary converts NIfTI without Python.
 
 ## Conversion reports
 
@@ -197,8 +201,17 @@ DICOM](../guides/import-dicom.md#3-expect-refusals-and-read-them) sets out the
 policy.
 
 **Modality LUT is stored, not applied.** `RescaleSlope` and `RescaleIntercept`
-become the image's `rescale`, so `read(physical=True)` gives HU and `read()`
-gives what the scanner stored.
+become the image's `rescale`, so `read(physical=True)` gives the rescaled
+values, in the image's `value_units`, and `read()` gives what the scanner
+stored; the `value_scale` decision names those units. A CT's `value_units` is HU unless its
+`RescaleType` names another quantity — a derived or multi-energy CT may hold
+`MGML` or `Z_EFF` — and then it is that; `US` (unspecified) makes the image
+`intensity` with no units. A classic CT omits its type only when it is HU,
+so an omitted one is `HU`. An enhanced CT must state it, and it must be HU only
+for an original, non-localizer, single-energy frame: an omitted type is `HU`
+there, and anywhere else unknown, so the image is `intensity` with no units. A
+CT's slices or frames whose types still differ are refused; other modalities'
+types are not read.
 
 **A per-slice rescale is refused, or applied when asked.** An image stores one
 modality LUT (§4.2), and a PET series often states one per slice; taking the
@@ -219,17 +232,63 @@ report = from_dicom("/pet", "pet.medh5", per_slice_rescale="apply")
 ```
 
 **Tags are an explicit allow-list.** Imaging physics goes to `acquisition`;
-everything else stays out (§11.4). The importer does not de-identify, and
-writes no de-identification record: the report says so, and the validator
-reports such a file (`W903`).
+everything else stays out (§11.4). An attribute is recorded only when every
+slice states the same value: under tube-current modulation each slice has its
+own `XRayTubeCurrent`, and one value would misdescribe the rest, so the image
+records none and the report warns (`acquisition`). The importer does not
+de-identify, and writes no de-identification record: the report says so, and
+the validator reports such a file (`W903`).
 
-**Enhanced multi-frame objects are reported, not read.** The importer reads
-classic single-frame series. An Enhanced CT/MR/PET object keeps its geometry
-in per-frame functional groups it does not read, so such files are skipped
-and named in the report as a warning — an import that found nothing says
-why. Convert them to classic instances first. Other multi-frame objects are
-skipped with a warning too, and an object that carries a patient position
-but is not an image — an RT Dose grid — with a note.
+**Enhanced multi-frame objects are read as their stacks.** Enhanced and
+legacy-converted CT, MR and PET objects (PS3.3 C.7.6.16) are split into stacks
+by `StackID` and by the dimensions of `DimensionIndexSequence` that tell
+acquisitions apart. A temporal position, a cardiac or respiratory phase, an
+echo time, a diffusion weighting, a flip angle or repetition time, a flow
+encoding, a spin labelling, a complex component or a contrast phase always
+does, even when each of its values holds one plane, and so does any dimension
+taken from a functional group that is the same for all of an acquisition's
+planes: temporal position, cardiac or respiratory synchronization, the MR
+echo, diffusion, timing, modifier, velocity encoding, spin labelling,
+metabolite, receive coil and frame type groups, the CT and PET frame type
+groups and contrast usage. A dimension pointer may name such a group itself.
+Any other dimension, such as a CT's modulated exposure, splits only planes
+that repeat: it does when, within one acquisition, it tells apart frames at
+the same position and a value of it is shared by frames at different
+positions. So a dimension that numbers frames or planes
+(`FrameAcquisitionNumber`) splits nothing, and nor does a value that a
+plane-varying attribute repeats over distinct planes (a tube current
+alternating between two values). Frames at one position that nothing else
+tells apart are split by the one dimension that does, if only one does: a
+single-plane time series indexed by `FrameReferenceDateTime`, a frame's time,
+which in one volume may as well be each slice's own. An acquisition indexed
+only by such a dimension, whose planes motion has shifted so that none
+repeats, is read with the others as one stack, which is refused unless its
+planes still form a regular grid. Each stack becomes a series, with
+`Series.frames` naming its `(file, frame index)` pairs and `Series.stack` the
+stack where an object holds several, and is imported as a classic series would
+be: every frame read as a slice whose position, orientation, pixel spacing,
+rescale and acquisition attributes come from its own functional groups, else
+the shared ones, else the object's top level (an enhanced MR's
+`EffectiveEchoTime` is its `EchoTime`). Frames are decoded one at a time. A
+frame that states no position, a stack that is not a regular grid, and a stack
+whose `InStackPositionNumber` runs against its positions or skips a number (it
+counts a stack's frames from 1, so a gap is a missing plane) are refused with
+the reason. Frames with different rescales follow `per_slice_rescale`. A
+concatenation's instances are joined by `ConcatenationUID` in
+`InConcatenationNumber` order, and one missing a part is refused: the parts
+are counted against `InConcatenationTotalNumber`, and where that optional
+total is absent their numbers must run from 1 without a gap. Each part that
+states `ConcatenationFrameOffsetNumber` must start where the frames of the
+parts before it end, or frames between them are missing. An instance with no
+`ConcatenationUID` whose markers make it a part (a number or total above 1, or
+a frame offset) is refused rather than read as the whole object, and so is an
+instance whose `NumberOfFrames` is absent or disagrees with its per-frame
+functional groups, which hold one item per frame. One instance found at two
+paths is refused rather than read twice, and so is a frame whose position,
+orientation or pixel spacing is not numbers. Enhanced ultrasound volumes and
+other multi-frame objects are skipped with a warning, and an object that
+carries a patient position but is not an image — an RT Dose grid — with a
+note.
 
 **One series does not stop the tree.** A series the importer refuses is left
 out with a warning (`series`) naming it and the reason, and the rest are

@@ -1,10 +1,8 @@
 # Import from NIfTI and nnU-Net
 
 You have volumes and masks as separate files. This turns them into one sample.
-
-```bash
-pip install "medh5[nifti]"
-```
+The package reads NIfTI itself, so nothing beyond `pip install medh5` is
+needed, and the standalone `medh5` binary converts NIfTI without Python.
 
 ## Images and masks as separate files
 
@@ -67,9 +65,9 @@ the importer will not resample one onto the other to make the import work.
 Resample deliberately, in your own code, and say so.
 
 **A file declaring no geometry is refused.** `sform_code == qform_code == 0` is
-NIfTI saying it has voxel indices and no spatial mapping. nibabel still returns
-an affine rebuilt from `pixdim`, and importing that mints a world grid nobody
-measured:
+NIfTI saying it has voxel indices and no spatial mapping. A reader can still
+rebuild an affine from `pixdim`, as nibabel does, and importing that mints a
+world grid nobody measured:
 
 ```bash
 medh5 convert from-nifti case.medh5 --image CT=ct.nii.gz --assume-geometry

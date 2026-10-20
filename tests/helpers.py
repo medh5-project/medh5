@@ -538,3 +538,24 @@ def crash_save_as(monkeypatch: Any, before: bytes) -> list[Path]:
 
     monkeypatch.setattr(Dataset, "save_as", crashed)
     return asked
+
+
+def disk_full_while(monkeypatch, owner: object, name: str) -> None:
+    """Make *owner*'s *name* run on a disk with room for 8 bytes a file: the
+    write fails part way through, as on a full disk (POSIX only)."""
+    import resource
+    import signal
+
+    real = getattr(owner, name)
+
+    def limited(*args, **kwargs):
+        limit = resource.getrlimit(resource.RLIMIT_FSIZE)
+        handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (8, limit[1]))
+        try:
+            return real(*args, **kwargs)
+        finally:
+            resource.setrlimit(resource.RLIMIT_FSIZE, limit)
+            signal.signal(signal.SIGXFSZ, handler)
+
+    monkeypatch.setattr(owner, name, limited)

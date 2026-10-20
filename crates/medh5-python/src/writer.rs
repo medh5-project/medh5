@@ -84,7 +84,7 @@ fn quality_arg(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<QualityArg>> {
 }
 
 /// `"all_given"`, `"all"`, or the classes looked for (§11.3).
-fn annotated_arg(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Annotated> {
+pub(crate) fn annotated_arg(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Annotated> {
     let Some(o) = is_given(obj) else { return Ok(Annotated::AllGiven) };
     if let Ok(s) = o.cast::<PyString>() {
         return Ok(match s.to_str()? {

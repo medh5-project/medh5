@@ -136,6 +136,7 @@ __all__ = [
     "META_DATASET",
     "MIN_CHUNK_BYTES",
     "MM_PER_UNIT",
+    "NIFTI_SUFFIXES",
     "ORTHONORMAL_TOL",
     "OVERSHOOT_LIMIT",
     "Observation",
@@ -465,6 +466,14 @@ __all__ = [
     "lossless_as_int16",
     "masks_equal",
     "new_document",
+    "nifti_for_export",
+    "nifti_from",
+    "nifti_import_seg",
+    "nifti_read",
+    "nifti_read_stored",
+    "nifti_to",
+    "nifti_write",
+    "nifti_write_field",
     "normalize_masks",
     "occupancy",
     "open_any",
@@ -662,6 +671,7 @@ MAX_CHUNK_BYTES: float
 MAX_CLASS_ID: int
 META_DATASET: str
 MIN_CHUNK_BYTES: float
+NIFTI_SUFFIXES: tuple[str, ...]
 ORTHONORMAL_TOL: float
 OVERSHOOT_LIMIT: float
 PARTITIONS: tuple[str, ...]
@@ -1700,6 +1710,106 @@ def new_document(
     timepoints: Timeline | Sequence[str] | None = None,
     **identity_fields: Any,
 ) -> SampleDocument: ...
+def nifti_for_export(
+    grid: Grid, data: Any
+) -> tuple[npt.NDArray[Any], npt.NDArray[np.float64]]:
+    """An array and affine in MEDH5 conventions as NIfTI wants them."""
+    ...
+
+def nifti_from(
+    images: list[tuple[str, str]],
+    out: str | os.PathLike[str],
+    *,
+    report: Any,
+    masks: list[tuple[str, str]] = ...,
+    sample_id: str | None = None,
+    subject_id: str | None = None,
+    modalities: list[tuple[str, str]] = ...,
+    coord_system: str = ...,
+    transpose: bool = ...,
+    fourth_axis: str = ...,
+    value_units: list[tuple[str, str]] = ...,
+    codec: str = ...,
+    annotated_classes: Any = None,
+    assume_geometry: bool = ...,
+    plane_as_volume: bool = ...,
+    label_set: Any = None,
+) -> None:
+    """Write one sample from NIfTI volumes; the caller's report is updated."""
+    ...
+
+def nifti_import_seg(
+    path: str | os.PathLike[str],
+    masks: list[tuple[str, str]],
+    *,
+    report: Any,
+    ann_id: str = ...,
+    grid: str | None = None,
+    coord_system: str | None = None,
+    transpose: bool = ...,
+    annotated_classes: Any = None,
+    assume_aligned: bool = ...,
+    assume_geometry: bool = ...,
+    plane_as_volume: bool = ...,
+) -> None:
+    """Add NIfTI masks to a sample; the caller's report is updated."""
+    ...
+
+def nifti_read(
+    path: str | os.PathLike[str],
+    *,
+    coord_system: str = ...,
+    transpose: bool = ...,
+    fourth_axis: str = ...,
+    assume_geometry: bool = ...,
+    plane_as_volume: bool = ...,
+) -> tuple[bytearray, Any, list[int], dict[str, Any]]:
+    """One file as `(bytes, dtype, shape, geometry)`: the voxels in C order in
+    the returned shape and the file's byte order, and the geometry as JSON."""
+    ...
+
+def nifti_read_stored(
+    path: str | os.PathLike[str],
+) -> tuple[bytearray, Any, list[int], dict[str, Any]]:
+    """One file as it is stored (`engine::read_stored`): `(bytes, dtype, shape,
+    fields)`, the voxels first axis fastest in the header's shape."""
+    ...
+
+def nifti_to(
+    path: str | os.PathLike[str],
+    image_id: str,
+    out: str | os.PathLike[str],
+    *,
+    report: Any,
+    physical: bool = ...,
+    annotation: str | None = None,
+    class_key: Any = None,
+) -> str:
+    """Export one image, or one annotation or class of it; the file written."""
+    ...
+
+def nifti_write(
+    array: Any,
+    affine: npt.NDArray[np.float64],
+    path: str | os.PathLike[str],
+    *,
+    report: Any = None,
+    rescale: tuple[float, float] | None = None,
+    units: str = ...,
+    time_values: list[float] | None = None,
+    time_units: str | None = None,
+    leading: str | None = None,
+    channels: Any = None,
+) -> str:
+    """Write one array as a NIfTI file; the file written."""
+    ...
+
+def nifti_write_field(
+    array: Any, affine: npt.NDArray[np.float64], path: str | os.PathLike[str]
+) -> None:
+    """An ITK displacement field, `(x, y, z, 1, 3)` under the DISPVECT intent."""
+    ...
+
 def normalize_masks(masks: Any, spatial_shape: Any = None) -> tuple[Any, ...]: ...
 def occupancy(mask: Any, factor: int) -> npt.NDArray[np.bool_]:
     """The occupancy map of a mask: one bit per `factor`-cube of voxels

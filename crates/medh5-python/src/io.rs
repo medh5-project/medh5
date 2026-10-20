@@ -47,7 +47,7 @@ fn note_arg(obj: &Bound<'_, PyAny>) -> PyResult<Note> {
 }
 
 /// The engine value of a `ConversionReport` dataclass.
-fn report_arg(obj: &Bound<'_, PyAny>) -> PyResult<ConversionReport> {
+pub(crate) fn report_arg(obj: &Bound<'_, PyAny>) -> PyResult<ConversionReport> {
     let mut notes = Vec::new();
     for note in obj.getattr("notes")?.try_iter()? {
         notes.push(note_arg(&note?)?);
@@ -78,7 +78,7 @@ fn notes_fields<'py>(py: Python<'py>, notes: &[Note]) -> PyResult<Bound<'py, PyL
 }
 
 /// A `ConversionReport`'s fields, notes as field dicts.
-fn report_fields<'py>(py: Python<'py>, r: &ConversionReport) -> PyResult<Bound<'py, PyDict>> {
+pub(crate) fn report_fields<'py>(py: Python<'py>, r: &ConversionReport) -> PyResult<Bound<'py, PyDict>> {
     let out = PyDict::new(py);
     out.set_item("source", &r.source)?;
     out.set_item("converter", &r.converter)?;

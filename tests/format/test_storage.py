@@ -1124,12 +1124,6 @@ def _report(path: Path, text: str) -> None:
     cli._write_report(path, text)
 
 
-def _sidecar(path: Path, text: str) -> None:
-    from medh5.io import nifti
-
-    nifti._replace_text(path, text)
-
-
 def _files_write_text(path: Path, text: str) -> None:
     from medh5._files import write_text
 
@@ -1138,20 +1132,6 @@ def _files_write_text(path: Path, text: str) -> None:
 
 def _write_atomic(path: Path, text: str) -> None:
     medh5._core.write_atomic(path, text)
-
-
-def _nifti_image(path: Path, text: str) -> None:
-    """`write_nifti`, with nibabel writing *text* as the image."""
-    from unittest import mock
-
-    nibabel = pytest.importorskip("nibabel")
-    from medh5.io.nifti import write_nifti
-
-    def save(image: Any, filename: str) -> None:
-        Path(filename).write_bytes(text.encode())
-
-    with mock.patch.object(nibabel, "save", save):
-        write_nifti(np.zeros((1, 1, 1), np.uint8), np.eye(4), path)
 
 
 def _dicom_object(path: Path, text: str) -> None:
@@ -1168,13 +1148,13 @@ def _dicom_object(path: Path, text: str) -> None:
 # Every Python site that writes a file through the engine's replace so far,
 # with the suffix its file takes.  Each owner that moves a site
 # (tests/project/test_layers.py) adds it here.  nnU-Net's `dataset.json` is
-# `files.write_text`'s.
+# `files.write_text`'s.  A NIfTI export and its sidecars are the engine's
+# own writes since 2.2.0 (its staged file and `replace_text`), so no longer
+# Python sites.
 _SITES = {
     "write_atomic": (_write_atomic, ".json"),
     "files.write_text": (_files_write_text, ".json"),
     "convert --report": (_report, ".json"),
-    "nifti sidecar": (_sidecar, ".json"),
-    "nifti image": (_nifti_image, ".nii.gz"),
     "dicom seg, rtstruct": (_dicom_object, ".dcm"),
 }
 

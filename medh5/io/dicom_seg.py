@@ -38,7 +38,7 @@ from medh5.errors import MEDH5ValidationError
 from medh5.io import _codes
 from medh5.io._codes import same_concept
 from medh5.io._common import examined_classes, sanitize_key, save_dicom
-from medh5.io._frames import _direction, _frame_placement
+from medh5.io._frames import _direction, _first_item, _frame_placement, _groups
 
 # Where it was defined, and is still imported from.
 from medh5.io._frames import _lattice as _lattice
@@ -117,13 +117,14 @@ def read_dicom_seg_frames(
         pixels = pixels[None]
     rows, columns = int(dataset.Rows), int(dataset.Columns)
     placement = _frame_placement(dataset, pixels.shape[0])
+    numbers = _frame_segments(dataset, pixels.shape[0])
     fractional = kind == FRACTIONAL
     scale = float(getattr(dataset, "MaximumFractionalValue", 255) or 255)
 
     frames = [
         {
             "index": index,
-            "segment": placement["segments"][index],
+            "segment": numbers[index],
             "position": placement["positions"][index],
             "orientation": placement["orientations"][index],
             "pixel_spacing": placement["pixel_spacings"][index],
@@ -359,6 +360,32 @@ def _seg_notes(report: ConversionReport, geometry: Mapping[str, Any]) -> None:
             "`probmap` rather than being thresholded",
             {"scale": float(geometry.get("scale", 255))},
         )
+
+
+def _frame_segments(dataset: Any, n_frames: int) -> list[int]:
+    """The segment each frame holds, by frame."""
+    shared, per_frame = _groups(dataset)
+    return [
+        _segment_number(
+            per_frame[index] if index < len(per_frame) else None, shared, index
+        )
+        for index in range(n_frames)
+    ]
+
+
+def _segment_number(group: Any, shared: Any, index: int) -> int:
+    """The segment a frame holds, from its own functional groups or the
+    shared ones; a frame that names none is refused, not read as segment 1."""
+    for holder in (group, shared):
+        identification = _first_item(holder, "SegmentIdentificationSequence")
+        number = getattr(identification, "ReferencedSegmentNumber", None)
+        if number is not None:
+            return int(number)
+    raise MEDH5ValidationError(
+        f"SEG frame {index} names no segment: no SegmentIdentificationSequence "
+        "with a ReferencedSegmentNumber, in its own functional groups or the "
+        "shared ones"
+    )
 
 
 def _segments(dataset: Any) -> dict[int, dict[str, Any]]:

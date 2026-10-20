@@ -765,9 +765,8 @@ def to_nnunetv2(
     it.  An export interrupted part way leaves the dataset a mix of the old
     and the new until it is run again, which completes it.
     """
-    from medh5.io.nifti import NIFTI_SUFFIXES, require_nibabel
+    from medh5.io.nifti import NIFTI_SUFFIXES
 
-    require_nibabel()
     if unlabeled not in UNLABELED:
         raise MEDH5ValidationError(
             f"unlabeled= is one of {list(UNLABELED)}, not {unlabeled!r}"

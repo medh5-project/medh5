@@ -60,16 +60,23 @@ and says so when the flag is missing. The release binaries are built with it.
 
 ## Converters
 
-`medh5 convert …` (NIfTI, DICOM, DICOM SEG, RTSTRUCT, nnU-Net) is an
-integration with Python libraries — nibabel, pydicom, highdicom — and lives
-in the Python package, as does the dataloader row of `medh5 bench` (PyTorch).
-The binary hands them to a Python interpreter that has the package installed
+The NIfTI converters are native: the binary reads and writes NIfTI itself,
+with no Python.
+
+```bash
+medh5 convert from-nifti case.medh5 --image CT=ct.nii.gz
+```
+
+The other converters (DICOM, DICOM SEG, RTSTRUCT, ITK, nnU-Net) are
+integrations with Python libraries — pydicom, highdicom — and live in the
+Python package, as does the dataloader row of `medh5 bench` (PyTorch). The
+binary hands them to a Python interpreter that has the package installed
 (`python3` — `python` on Windows — or `MEDH5_PYTHON`), and says what to install
 when there is none:
 
 ```bash
-pip install "medh5[nifti,dicom]"
-medh5 convert from-nifti case.medh5 --image CT=ct.nii.gz
+pip install "medh5[dicom]"
+medh5 convert from-dicom series/ case.medh5
 ```
 
 `medh5 migrate`, which reads 0.x files, is native.

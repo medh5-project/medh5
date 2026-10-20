@@ -53,13 +53,13 @@ Add an extra for each tool you connect medh5 to:
 |---|---|
 | train with PyTorch | `pip install "medh5[torch]"` |
 | load samples into MONAI | `pip install "medh5[monai]"` |
-| import or export NIfTI and nnU-Net | `pip install "medh5[nifti]"` |
 | import DICOM series, SEG and RTSTRUCT | `pip install "medh5[dicom]"` |
 | export DICOM SEG | `pip install "medh5[dicomseg]"` |
 | import a clinical history from MEDS | `pip install "medh5[meds]"` |
 | open files directly with `h5py` | `pip install "medh5[h5py]"` |
 
-Extras combine: `pip install "medh5[torch,nifti,dicom]"`.
+Extras combine: `pip install "medh5[torch,dicom]"`. NIfTI and nnU-Net need
+none: the engine reads and writes NIfTI itself.
 
 **Only the command line, without Python?** `brew install medh5-project/medh5/medh5`, or
 download it from the [latest release](https://github.com/medh5-project/medh5/releases/latest).

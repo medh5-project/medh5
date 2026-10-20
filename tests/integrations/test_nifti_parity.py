@@ -20,7 +20,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
-import sys
 import tempfile
 from pathlib import Path
 from types import ModuleType
@@ -37,41 +36,23 @@ CASES = {case["id"]: case for case in TABLE["cases"]}
 
 ALLOWED: dict[str, tuple[tuple[str, ...], str]] = {}
 """Case id → the record's keys that may differ from 2.1.0's beyond the two
-masks, and the change that made them differ.  Empty: the converter is still
-2.1.0's."""
+masks, and the change that made them differ.  Empty: the engine's converter
+gives 2.1.0's record for every case."""
+
+RENAMED = {"HeaderDataError": "ValueError"}
+"""The one exception type E3 lets change: nibabel's ``HeaderDataError``,
+which the engine raises as the ``ValueError`` it means (a type NIfTI cannot
+hold), with nibabel's text."""
 
 
-SHORT_DATA = frozenset(
-    {
-        "import-pair-short-hdr",
-        "import-truncated-data-nii",
-        "import-vox-offset-far-nii",
-        "read-pair-short.hdr",
-        "read-truncated-data.nii",
-        "read-vox-offset-far.nii",
-    }
-)
-"""Cases whose data block is shorter than the header says.  2.1.0 reads the
-data through nibabel's memory map, and Windows refuses a map past the end of
-a file (``[WinError 8]``) before nibabel can say the file is short, so there
-2.1.0 refused these with the same type and the system's text.  The records
-are Linux's; the engine reads without a map."""
-
-
-def _windows_map(record: dict[str, Any], case_id: str) -> dict[str, Any]:
-    """*record* with Windows's refusal of a short memory map spelled as the
-    record spells the refusal (see ``SHORT_DATA``)."""
-    error = record.get("error")
+def _renamed(expected: dict[str, Any], got: dict[str, Any]) -> None:
+    error, fresh = expected.get("error"), got.get("error")
     if (
-        sys.platform == "win32"
-        and case_id in SHORT_DATA
-        and error is not None
-        and error["type"] == "OSError"
-        and error["message"].startswith("[WinError ")
-    ):  # pragma: no cover - Windows
-        recorded = _record(case_id)["error"]["message"]
-        return {**record, "error": {**error, "message": recorded}}
-    return record
+        error is not None
+        and fresh is not None
+        and RENAMED.get(error["type"]) == fresh["type"]
+    ):
+        error["type"] = fresh["type"]
 
 
 def _harness() -> ModuleType:
@@ -204,12 +185,6 @@ class TestTheCorpus:
         missing = {p for p in named - inputs if not p.endswith("missing.nii")}
         assert not missing
 
-    def test_the_short_data_cases_are_recorded_refusals(self) -> None:
-        for case_id in SHORT_DATA:
-            error = _record(case_id)["error"]
-            assert error["type"] == "OSError", case_id
-            assert "could the file be damaged?" in error["message"], case_id
-
     def test_the_cases_cover_every_call(self) -> None:
         calls = {case["call"] for case in TABLE["cases"]}
         assert calls == {"from_nifti", "import_seg_nifti", "to_nifti", "read_nifti"}
@@ -229,8 +204,8 @@ def test_E3_the_converter_matches_2_1_0(case_id: str, harness: ModuleType) -> No
         out = Path(scratch).resolve() / "out"
         out.mkdir()
         fresh = _respelled(harness.outcome(CASES[case_id], out), out)
-    fresh = _windows_map(fresh, case_id)
     expected, got = masked(_record(case_id)), masked(fresh)
+    _renamed(expected, got)
     for key in ALLOWED.get(case_id, ((), ""))[0]:  # pragma: no cover - none yet
         expected.pop(key, None)
         got.pop(key, None)

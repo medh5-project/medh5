@@ -1,9 +1,9 @@
 //! The NIfTI parity corpus (`tests/data/nifti-parity`), run through the
-//! engine's converter: every `read_nifti` and `from_nifti` case must give
-//! what medh5 2.1.0 gave (2.2.0 decision E3) --- the same geometry and
-//! voxels, the same objects with the same digests, the same `/meta` but for
-//! the version its software agent records, the same report but for the
-//! paths it names, and the same refusals with the same words.
+//! engine's converter: every case must give what medh5 2.1.0 gave (2.2.0
+//! decision E3) --- the same geometry and voxels, the same objects with the
+//! same digests, the same `/meta` but for the version its software agent
+//! records, the same report but for the paths it names, the same exported
+//! header fields and voxel bytes, and the same refusals with the same words.
 //!
 //! The records are Python's: a refusal is named by the exception 2.1.0
 //! raised, which the Python layer raises from the engine's error kind.
@@ -11,7 +11,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use medh5::convert::nifti::{from_nifti, read_nifti, ImportOptions, ReadOptions};
+use medh5::convert::nifti::header::{strip_nuls, Header, Version};
+use medh5::convert::nifti::{
+    from_nifti, import_seg_nifti, read_nifti, to_nifti, ExportOptions, ImportOptions, ReadOptions, SegOptions,
+};
 use medh5::convert::ConversionReport;
 use medh5::h5::attrs;
 use medh5::h5::ops::{visit, Node};
@@ -104,21 +107,43 @@ fn import_options(case: &Value, root: &Path) -> ImportOptions {
             "label_set" => {
                 out.with_label_set(medh5::labels::registry::load_file(&root.join(value.as_str().unwrap())).unwrap())
             }
-            "annotated_classes" => out.with_annotated_classes(match value {
-                Value::String(s) if s == "all" => Annotated::All,
-                Value::String(s) if s == "all_given" => Annotated::AllGiven,
-                Value::Array(items) => Annotated::Classes(
-                    items
-                        .iter()
-                        .map(|i| match i {
-                            Value::String(s) => ClassKey::Key(s.clone()),
-                            other => ClassKey::Id(other.as_i64().unwrap()),
-                        })
-                        .collect(),
-                ),
-                other => panic!("annotated_classes {other}"),
-            }),
+            "annotated_classes" => out.with_annotated_classes(annotated(value)),
             other => panic!("unknown import option {other}"),
+        };
+    }
+    out
+}
+
+fn annotated(value: &Value) -> Annotated {
+    match value {
+        Value::String(s) if s == "all" => Annotated::All,
+        Value::String(s) if s == "all_given" => Annotated::AllGiven,
+        Value::Array(items) => Annotated::Classes(
+            items
+                .iter()
+                .map(|i| match i {
+                    Value::String(s) => ClassKey::Key(s.clone()),
+                    other => ClassKey::Id(other.as_i64().unwrap()),
+                })
+                .collect(),
+        ),
+        other => panic!("annotated_classes {other}"),
+    }
+}
+
+fn seg_options(options: &Map<String, Value>) -> SegOptions {
+    let mut out = SegOptions::default();
+    for (key, value) in options {
+        out = match key.as_str() {
+            "ann_id" => out.with_ann_id(value.as_str().unwrap()),
+            "grid" => out.with_grid(value.as_str().unwrap()),
+            "coord_system" => out.with_coord_system(value.as_str().unwrap()),
+            "transpose" => out.with_transpose(value.as_bool().unwrap()),
+            "annotated_classes" => out.with_annotated_classes(annotated(value)),
+            "assume_aligned" => out.with_assume_aligned(value.as_bool().unwrap()),
+            "assume_geometry" => out.with_assume_geometry(value.as_bool().unwrap()),
+            "plane_as_volume" => out.with_plane_as_volume(value.as_bool().unwrap()),
+            other => panic!("unknown import_seg_nifti option {other}"),
         };
     }
     out
@@ -186,6 +211,121 @@ fn array_record(read: &medh5::convert::nifti::NiftiRead) -> Value {
     })
 }
 
+fn export_options(options: &Map<String, Value>) -> ExportOptions {
+    let mut out = ExportOptions::default();
+    for (key, value) in options {
+        out = match key.as_str() {
+            "physical" => out.with_physical(value.as_bool().unwrap()),
+            "annotation" => out.with_annotation(value.as_str().unwrap()),
+            "class_key" => out.with_class_key(match value {
+                Value::String(s) => ClassKey::Key(s.clone()),
+                other => ClassKey::Id(other.as_i64().unwrap()),
+            }),
+            other => panic!("unknown export option {other}"),
+        };
+    }
+    out
+}
+
+/// A float field as `record.py` writes it: a non-finite one as its `repr`.
+fn float(value: f64) -> Value {
+    if value.is_finite() {
+        json!(value)
+    } else {
+        Value::String(medh5::json::py_float(value))
+    }
+}
+
+fn text(bytes: &[u8]) -> Value {
+    Value::String(String::from_utf8_lossy(strip_nuls(bytes)).into_owned())
+}
+
+/// A NIfTI file as stored, as `record.py`'s `nifti_record` decodes it: its
+/// header fields, and a digest of its voxels.
+fn nifti_record(path: &Path) -> Value {
+    use std::io::Read;
+    let mut raw = std::fs::read(path).unwrap();
+    let compressed = raw.starts_with(&[0x1f, 0x8b]);
+    if compressed {
+        let mut out = Vec::new();
+        flate2::read::MultiGzDecoder::new(&raw[..]).read_to_end(&mut out).unwrap();
+        raw = out;
+    }
+    let version = if raw[..4] == [0x1c, 2, 0, 0] || raw[..4] == [0, 0, 2, 0x1c] { Version::Two } else { Version::One };
+    let h = Header::decode(&raw[..version.size()], version).unwrap();
+    let floats = |values: &[f64]| Value::Array(values.iter().map(|v| float(*v)).collect());
+    let fields: Vec<(&str, Value)> = vec![
+        ("sizeof_hdr", json!(h.sizeof_hdr)),
+        ("data_type", text(&h.data_type)),
+        ("db_name", text(&h.db_name)),
+        ("extents", json!(h.extents)),
+        ("session_error", json!(h.session_error)),
+        ("regular", text(&[h.regular])),
+        ("dim_info", json!(h.dim_info)),
+        ("dim", json!(h.dim)),
+        ("intent_p1", float(h.intent_p1)),
+        ("intent_p2", float(h.intent_p2)),
+        ("intent_p3", float(h.intent_p3)),
+        ("intent_code", json!(h.intent_code)),
+        ("datatype", json!(h.datatype)),
+        ("bitpix", json!(h.bitpix)),
+        ("slice_start", json!(h.slice_start)),
+        ("pixdim", floats(&h.pixdim)),
+        ("vox_offset", float(h.vox_offset.as_f64())),
+        ("scl_slope", float(h.scl_slope)),
+        ("scl_inter", float(h.scl_inter)),
+        ("slice_end", json!(h.slice_end)),
+        ("slice_code", json!(h.slice_code)),
+        ("xyzt_units", json!(h.xyzt_units)),
+        ("cal_max", float(h.cal_max)),
+        ("cal_min", float(h.cal_min)),
+        ("slice_duration", float(h.slice_duration)),
+        ("toffset", float(h.toffset)),
+        ("glmax", json!(h.glmax)),
+        ("glmin", json!(h.glmin)),
+        ("descrip", text(&h.descrip)),
+        ("aux_file", text(&h.aux_file)),
+        ("qform_code", json!(h.qform_code)),
+        ("sform_code", json!(h.sform_code)),
+        ("quatern_b", float(h.quatern_b)),
+        ("quatern_c", float(h.quatern_c)),
+        ("quatern_d", float(h.quatern_d)),
+        ("qoffset_x", float(h.qoffset_x)),
+        ("qoffset_y", float(h.qoffset_y)),
+        ("qoffset_z", float(h.qoffset_z)),
+        ("srow_x", floats(&h.srow_x)),
+        ("srow_y", floats(&h.srow_y)),
+        ("srow_z", floats(&h.srow_z)),
+        ("intent_name", text(&h.intent_name)),
+        ("magic", text(&h.magic)),
+    ];
+    let header: Map<String, Value> = fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    let element = h.element().unwrap();
+    let shape: Vec<usize> = h.data_shape().unwrap().iter().map(|v| *v as usize).collect();
+    let offset = h.vox_offset.as_i64() as usize;
+    let size = shape.iter().product::<usize>() * element.itemsize();
+    let voxels = &raw[offset..offset + size];
+    let order = if !element.has_byte_order() {
+        '|'
+    } else if h.big_endian {
+        '>'
+    } else {
+        '<'
+    };
+    json!({
+        "gzip": compressed,
+        "endianness": if h.big_endian { ">" } else { "<" },
+        "header": header,
+        "data": {
+            "dtype": format!("{order}{}", element.numpy_code()),
+            "shape": shape,
+            "bytes": voxels.len(),
+            "trailing": raw.len() - offset - size,
+            "sha256": hex::encode(Sha256::digest(voxels)),
+        },
+    })
+}
+
 /// One case, as `record.py`'s `outcome` records it.
 fn outcome(case: &Value, root: &Path, out: &Path) -> Value {
     let mut record = Map::new();
@@ -209,6 +349,58 @@ fn outcome(case: &Value, root: &Path, out: &Path) -> Value {
             done.map(|()| {
                 record.insert("report".into(), report.to_json());
                 record.insert("sample".into(), sample_record(&target));
+            })
+        }
+        "import_seg_nifti" => {
+            let sample = root.join(case["sample"].as_str().unwrap());
+            let target = out.join(sample.file_name().unwrap());
+            std::fs::copy(&sample, &target).unwrap();
+            let masks: Vec<(String, PathBuf)> = case["masks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| (p[0].as_str().unwrap().into(), root.join(p[1].as_str().unwrap())))
+                .collect();
+            let mut report = ConversionReport::new("import-seg-nifti", "");
+            import_seg_nifti(&target, &masks, &seg_options(options_of(case)), &mut report).map(|()| {
+                record.insert("report".into(), report.to_json());
+                record.insert("sample".into(), sample_record(&target));
+            })
+        }
+        "to_nifti" => {
+            let sample = root.join(case["sample"].as_str().unwrap());
+            let source = out.join(sample.file_name().unwrap());
+            std::fs::copy(&sample, &source).unwrap();
+            for (name, beside) in case["beside"].as_object().unwrap() {
+                match beside.as_str() {
+                    None => std::fs::create_dir(out.join(name)).unwrap(),
+                    Some(from) => {
+                        std::fs::copy(root.join(from), out.join(name)).unwrap();
+                    }
+                }
+            }
+            let mut report = ConversionReport::new("to-nifti", "");
+            let target = out.join(case["out"].as_str().unwrap());
+            let options = export_options(options_of(case));
+            to_nifti(&source, case["image"].as_str().unwrap(), &target, &options, Some(&mut report)).map(|written| {
+                record.insert("returned".into(), json!(medh5::pyval::py_path(&written)));
+                record.insert("report".into(), report.to_json());
+                let mut files = Map::new();
+                let mut names: Vec<PathBuf> = std::fs::read_dir(out).unwrap().map(|e| e.unwrap().path()).collect();
+                names.sort();
+                for path in names {
+                    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                    if path == source || path.is_dir() {
+                        continue;
+                    }
+                    let entry = if name.ends_with(".nii") || name.ends_with(".nii.gz") {
+                        nifti_record(&path)
+                    } else {
+                        json!({"text": std::fs::read_to_string(&path).unwrap()})
+                    };
+                    files.insert(name, entry);
+                }
+                record.insert("export".into(), Value::Object(files));
             })
         }
         other => panic!("not an engine call yet: {other}"),
@@ -341,10 +533,6 @@ fn e3_the_engine_matches_2_1_0() {
     let mut failures: BTreeMap<String, String> = BTreeMap::new();
     let mut ran = 0;
     for case in table["cases"].as_array().unwrap() {
-        let call = case["call"].as_str().unwrap();
-        if call != "read_nifti" && call != "from_nifti" {
-            continue;
-        }
         ran += 1;
         let id = case["id"].as_str().unwrap();
         let scratch = tempfile::tempdir().unwrap();
@@ -358,7 +546,7 @@ fn e3_the_engine_matches_2_1_0() {
             failures.insert(id.to_string(), first_difference(&expected, &got, ""));
         }
     }
-    assert_eq!(ran, 270, "every read_nifti and from_nifti case ran");
+    assert_eq!(ran, 348, "every case ran");
     assert!(failures.is_empty(), "{} of {ran} cases differ:\n{failures:#?}", failures.len());
 }
 

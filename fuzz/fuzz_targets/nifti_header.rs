@@ -99,7 +99,7 @@ fuzz_target!(|input: Input| {
         // What was read is what the shape says: never more.
         let count: usize = read.voxels.shape.iter().product();
         assert_eq!(read.voxels.bytes.len(), count * read.voxels.element.itemsize());
-        let _ = read.voxels.to_ndarray();
+        let _ = read.voxels.into_ndarray();
         let _ = read.geometry.to_json();
     }
     let _ = std::fs::remove_dir_all(&dir);

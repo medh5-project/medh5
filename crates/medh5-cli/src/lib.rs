@@ -345,6 +345,57 @@ mod tests {
     }
 
     #[test]
+    fn w22_02_the_nifti_converters_run_without_python() {
+        use medh5::array::NdArray;
+        use medh5::sample::{create, GridOptions, ImageOptions};
+        use std::path::Path;
+
+        let dir = tempfile::tempdir().unwrap();
+        let at = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+        let ct = NdArray::from_vec(&[4, 5, 6], (0..120).map(|v| v as i16).collect()).unwrap();
+        let mut w = create(Path::new(&at("source.medh5")), Some("s"), None, "portable", &[]).unwrap();
+        w.add_grid("g", &[4, 5, 6], &[2.0, 1.0, 1.0], GridOptions::default()).unwrap();
+        w.add_image("CT", &ct, "g", "CT", ImageOptions::default()).unwrap();
+        w.commit(true).unwrap();
+        // No Python: a command handed over would fail, and be recorded.
+        let host = Recording { runs: false, handed: Default::default() };
+        let run = |args: &[&str]| -> (i32, String, String) {
+            let argv: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let code = run_with(&argv, &mut out, &mut err, &host);
+            (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
+        };
+        let (code, out, err) = run(&["convert", "to-nifti", &at("source.medh5"), "CT", &at("ct.nii.gz")]);
+        assert_eq!(code, EXIT_OK, "{err}");
+        assert_eq!(out.trim_end(), at("ct.nii.gz"), "an export prints the file it wrote");
+        let image = format!("CT={}", at("ct.nii.gz"));
+        let back = at("back.medh5");
+        let (code, _, err) = run(&["convert", "from-nifti", &back, "--image", &image, "--report", &at("r.json")]);
+        assert_eq!(code, EXIT_OK, "{err}");
+        let report: Value = serde_json::from_str(&std::fs::read_to_string(at("r.json")).unwrap()).unwrap();
+        assert_eq!(report["converter"], "from-nifti");
+        let organ = format!("organ={}", at("ct.nii.gz"));
+        let (code, _, err) = run(&["convert", "import-seg-nifti", &back, "--mask", &organ]);
+        assert_eq!(code, EXIT_OK, "{err}");
+        assert!(medh5::sample::open_sample(Path::new(&back)).unwrap().annotation("seg").is_ok());
+        // The checks the Python package made before reading anything.
+        let (code, _, err) = run(&["convert", "from-nifti", &at("x.medh5"), "--image", "CT"]);
+        assert_eq!((code, err.trim_end()), (EXIT_ERROR, "medh5: --image expects NAME=VALUE, got 'CT'"));
+        let (code, _, err) =
+            run(&["convert", "from-nifti", &at("x.medh5"), "--image", &image, "--report", &at("ct.nii.gz")]);
+        let clash = format!(
+            "medh5: --report {} is image 'CT', which this command reads; name another file for the report",
+            at("ct.nii.gz")
+        );
+        assert_eq!((code, err.trim_end()), (EXIT_ERROR, clash.as_str()));
+        let (code, _, err) =
+            run(&["convert", "to-nifti", &at("source.medh5"), "CT", &at("x.nii.gz"), "--report", &at("")]);
+        assert_eq!(code, EXIT_ERROR);
+        assert!(err.ends_with("is a directory; name the file to write\n"), "{err}");
+        assert!(host.handed.take().is_empty(), "nothing was handed to Python");
+    }
+
+    #[test]
     fn s10_the_importers_are_handed_to_python() {
         let argv = |rest: &[&str]| -> Vec<String> {
             ["clinical", "augment", "s.medh5"].iter().chain(rest).map(|a| a.to_string()).collect()
@@ -518,12 +569,12 @@ mod tests {
         assert!(missing.starts_with("/nonexistent/python3 could not be run: "), "{missing}");
 
         // Handed over: the command line as given, and its exit code.
-        let argv = ["convert".to_string(), "from-nifti".to_string(), "out.medh5".to_string()];
+        let argv = ["convert".to_string(), "from-dicom".to_string(), "out.medh5".to_string()];
         let mut err = Vec::new();
         assert_eq!(hand_over(&current, &argv, &mut err), Some(3));
         assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
         let handed = std::fs::read_to_string(dir.path().join("handed")).unwrap();
-        assert_eq!(handed.trim_end(), "convert from-nifti out.medh5");
+        assert_eq!(handed.trim_end(), "convert from-dicom out.medh5");
         // Refused: nothing run, and why on stderr.
         std::fs::remove_file(dir.path().join("handed")).unwrap();
         assert_eq!(hand_over(&old, &argv, &mut err), None);

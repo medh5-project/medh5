@@ -12,6 +12,7 @@ runs in CI's `test-itk` job, where SimpleITK is installed.
 from __future__ import annotations
 
 import struct
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,7 @@ from medh5.io.itk import (
     write_itk_transform,
 )
 from medh5.validate import validate_file
-from tests.helpers import ROOT
+from tests.helpers import ROOT, disk_full_while
 
 DATA = ROOT / "tests" / "data" / "itk"
 
@@ -526,13 +527,13 @@ class TestWrite:
         assert np.allclose(np.asarray(image.dataobj)[2, 3, 1, 0], expected)
         assert np.allclose(image.affine, np.diag([-1.0, -1.0, 1.0, 1.0]))
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="a file size limit")
     def test_S14_4_an_interrupted_write_leaves_the_previous_files(
         self, tmp_path, monkeypatch
     ):
         """The transform and its field go through the engine's replace: a
-        write that fails leaves each previous file as it was, and no
-        temporary beside it."""
-        nib = pytest.importorskip("nibabel")
+        write that fails part way leaves each previous file as it was, and
+        no temporary beside it."""
         path = _pair(tmp_path / "p.medh5")
         warp = _warp(tmp_path / "warp.nii.gz", (1.0, 0.5, -0.25))
         from_itk_transform(
@@ -550,11 +551,8 @@ class TestWrite:
         out.write_bytes(b"previous transform")
         field.write_bytes(b"previous field")
 
-        def interrupted(*args: Any, **kwargs: Any) -> None:
-            raise OSError("disk full")
-
-        monkeypatch.setattr(nib, "save", interrupted)
-        with pytest.raises(OSError, match="disk full"):
+        disk_full_while(monkeypatch, medh5._core, "nifti_write_field")
+        with pytest.raises(OSError):
             to_itk_transform(
                 path, out, transform_id="reg", warp_out=field, vectors="lps"
             )

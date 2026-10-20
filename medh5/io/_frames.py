@@ -1,11 +1,13 @@
 """Where a multi-frame DICOM object's frames lie: the functional groups.
 
-A multi-frame object --- a Segmentation now, an enhanced image series in
-2.2.0 --- places each frame through functional groups that may sit in the
-shared item or in the frame's own (PS3.3 C.7.6.16).  These read them: each
-frame's position, orientation, pixel spacing and segment, and the regular
-stack the frames' planes sit on.  They were :mod:`medh5.io.dicom_seg`'s own;
-one copy serves every reader that places frames.
+A multi-frame object --- a Segmentation, an enhanced CT, MR or PET image ---
+places each frame through functional groups that may sit in the shared item
+or in the frame's own (PS3.3 C.7.6.16).  These read them: each frame's
+position, orientation and pixel spacing, any other attribute a group holds,
+and the regular stack the frames' planes sit on.  They were
+:mod:`medh5.io.dicom_seg`'s own; one copy serves every reader that places
+frames, and what only a SEG has --- the segment a frame holds --- stays with
+the SEG reader.
 """
 
 from __future__ import annotations
@@ -29,18 +31,16 @@ def _frame_placement(dataset: Any, n_frames: int) -> dict[str, Any]:
     every frame: a frame turned in plane was placed as the first one was, and
     spacing kept in the frames read as 1 mm.
     """
-    shared = _first_item(dataset, "SharedFunctionalGroupsSequence")
-    per_frame = list(getattr(dataset, "PerFrameFunctionalGroupsSequence", []))
+    shared, per_frame = _groups(dataset)
     positions: list[npt.NDArray[np.float64]] = []
-    segments: list[int] = []
     orientations: list[npt.NDArray[np.float64]] = []
     pixels: list[npt.NDArray[np.float64]] = []
     for index in range(n_frames):
         group = per_frame[index] if index < len(per_frame) else None
-        positions.append(_position(group, shared))
-        segments.append(_segment_number(group, shared, index))
-        orientations.append(_orientation(group, shared, index))
-        pixels.append(_pixel_spacing(group, shared, index))
+        frame = f"SEG frame {index}"
+        positions.append(_position(group, shared, frame))
+        orientations.append(_orientation(group, shared, frame))
+        pixels.append(_pixel_spacing(group, shared, frame))
     _congruent(orientations, pixels)
     orientation = orientations[0]
     normal = np.cross(orientation[:3], orientation[3:])
@@ -70,7 +70,6 @@ def _frame_placement(dataset: Any, n_frames: int) -> dict[str, Any]:
         "regular": regular is not None,
         "spacing_source": source,
         "indices": indices,
-        "segments": segments,
         # Each frame's own `ImagePositionPatient`, kept rather than collapsed
         # into a plane index: placing a frame on the grid it is being imported
         # onto needs the position, and the index is only meaningful among the
@@ -94,40 +93,65 @@ def _direction(orientation: npt.NDArray[np.float64]) -> list[list[float]]:
     ]
 
 
-def _orientation(group: Any, shared: Any, index: int) -> npt.NDArray[np.float64]:
+def _groups(dataset: Any) -> tuple[Any, list[Any]]:
+    """An object's shared functional group item and its per-frame items."""
+    shared = _first_item(dataset, "SharedFunctionalGroupsSequence")
+    return shared, list(getattr(dataset, "PerFrameFunctionalGroupsSequence", []))
+
+
+def _numbers(
+    value: Any, count: int, frame: str, keyword: str
+) -> npt.NDArray[np.float64]:
+    """*value*, which *frame* states as *keyword*, as *count* finite numbers,
+    or a refusal naming the frame: a component that is not a number would
+    otherwise escape as a ``ValueError`` and stop every series in the tree."""
+    try:
+        numbers = np.asarray([float(v) for v in value], dtype=np.float64)
+    except (TypeError, ValueError):
+        numbers = None
+    if numbers is None or numbers.shape != (count,) or not np.isfinite(numbers).all():
+        raise MEDH5ValidationError(
+            f"{frame} states {keyword} as {value!r}, which is not {count} "
+            "finite numbers, so it cannot be placed"
+        )
+    return numbers
+
+
+def _orientation(group: Any, shared: Any, frame: str) -> npt.NDArray[np.float64]:
     for holder in (group, shared):
         plane = _first_item(holder, "PlaneOrientationSequence")
         if plane is not None and hasattr(plane, "ImageOrientationPatient"):
-            return np.asarray(
-                [float(v) for v in plane.ImageOrientationPatient], dtype=np.float64
+            return _numbers(
+                plane.ImageOrientationPatient, 6, frame, "ImageOrientationPatient"
             )
     raise MEDH5ValidationError(
-        f"SEG frame {index} carries no ImageOrientationPatient, in its own "
-        "functional groups or the shared ones, so it cannot be placed"
+        f"{frame} carries no ImageOrientationPatient, in its own functional "
+        "groups or the shared ones, so it cannot be placed"
     )
 
 
-def _position(group: Any, shared: Any) -> npt.NDArray[np.float64]:
+def _position(group: Any, shared: Any, frame: str) -> npt.NDArray[np.float64]:
     for holder in (group, shared):
         plane = _first_item(holder, "PlanePositionSequence")
         if plane is not None and hasattr(plane, "ImagePositionPatient"):
-            return np.asarray(
-                [float(v) for v in plane.ImagePositionPatient], dtype=np.float64
+            return _numbers(
+                plane.ImagePositionPatient, 3, frame, "ImagePositionPatient"
             )
-    raise MEDH5ValidationError("a SEG frame carries no ImagePositionPatient")
+    raise MEDH5ValidationError(
+        f"{frame} carries no ImagePositionPatient, in its own functional groups "
+        "or the shared ones, so it cannot be placed"
+    )
 
 
-def _pixel_spacing(group: Any, shared: Any, index: int) -> npt.NDArray[np.float64]:
+def _pixel_spacing(group: Any, shared: Any, frame: str) -> npt.NDArray[np.float64]:
     for holder in (group, shared):
         measures = _first_item(holder, "PixelMeasuresSequence")
         if measures is not None and getattr(measures, "PixelSpacing", None):
-            return np.asarray(
-                [float(v) for v in measures.PixelSpacing], dtype=np.float64
-            )
+            return _numbers(measures.PixelSpacing, 2, frame, "PixelSpacing")
     raise MEDH5ValidationError(
-        f"SEG frame {index} carries no PixelSpacing, in its own functional "
-        "groups or the shared ones; where its pixels lie is not stated, and "
-        "it is refused rather than read as 1 mm"
+        f"{frame} carries no PixelSpacing, in its own functional groups or the "
+        "shared ones; where its pixels lie is not stated, and it is refused "
+        "rather than read as 1 mm"
     )
 
 
@@ -135,7 +159,11 @@ def _between(group: Any, shared: Any) -> float | None:
     for holder in (group, shared):
         measures = _first_item(holder, "PixelMeasuresSequence")
         if measures is not None and getattr(measures, "SpacingBetweenSlices", None):
-            return float(measures.SpacingBetweenSlices)
+            try:
+                between = float(measures.SpacingBetweenSlices)
+            except (TypeError, ValueError):
+                return None
+            return between if np.isfinite(between) else None
     return None
 
 
@@ -178,21 +206,6 @@ def _congruent(
             )
 
 
-def _segment_number(group: Any, shared: Any, index: int) -> int:
-    """The segment a frame holds, from its own functional groups or the
-    shared ones; a frame that names none is refused, not read as segment 1."""
-    for holder in (group, shared):
-        identification = _first_item(holder, "SegmentIdentificationSequence")
-        number = getattr(identification, "ReferencedSegmentNumber", None)
-        if number is not None:
-            return int(number)
-    raise MEDH5ValidationError(
-        f"SEG frame {index} names no segment: no SegmentIdentificationSequence "
-        "with a ReferencedSegmentNumber, in its own functional groups or the "
-        "shared ones"
-    )
-
-
 def _lattice(
     planes: Sequence[float], between: float | None
 ) -> tuple[float, list[int]] | None:
@@ -232,6 +245,43 @@ def _lattice(
         if np.max(np.abs(along - indices * step)) <= _position_tolerance(step):
             return step, indices.astype(int).tolist()
     return None
+
+
+_GROUP_ALIASES: dict[str, tuple[str, ...]] = {
+    "EchoTime": ("EffectiveEchoTime",),
+    "ExposureTime": ("ExposureTimeInms",),
+    "XRayTubeCurrent": ("XRayTubeCurrentInmA",),
+}
+"""The names an enhanced object's functional groups give an attribute a
+classic slice states at its top level: an enhanced MR's echo time is the
+``EffectiveEchoTime`` of its ``MREchoSequence``."""
+
+
+def _group_value(group: Any, shared: Any, dataset: Any, keyword: str) -> Any:
+    """*keyword* as a frame states it: in an item of its own functional groups,
+    else of the shared ones, else at the object's top level; ``None`` where
+    none does.
+
+    A functional group is a sequence of one item holding the attributes it
+    groups, so the attributes of a group are one item down
+    (``PixelMeasuresSequence`` → ``SliceThickness``); a legacy-converted
+    object keeps the classic attributes no group defines in its
+    ``Unassigned…ConvertedAttributesSequence``, one item down too.
+    """
+    names = (keyword, *_GROUP_ALIASES.get(keyword, ()))
+    for holder in (group, shared):
+        if holder is None:
+            continue
+        for element in holder:
+            if element.VR != "SQ":
+                continue
+            for item in element.value:
+                for name in names:
+                    value = getattr(item, name, None)
+                    if value is not None and value != "":
+                        return value
+    value = getattr(dataset, keyword, None)
+    return None if value == "" else value
 
 
 def _first_item(holder: Any, name: str) -> Any:

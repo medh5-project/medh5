@@ -740,7 +740,8 @@ class TestRepositoryGates:
     def test_every_declared_floor_is_installed_by_ci(self):
         """The extras declared PyTorch 2.0, MONAI 1.3, nibabel 5, pydicom 3.0
         and highdicom 0.23 as their floors, and no job installed any of them;
-        only NumPy's, and the test suite's HDF5 tools', were tested."""
+        only NumPy's, and the test suite's HDF5 tools', were tested.  nibabel
+        is the suite's own since 2.2.0, as h5py is."""
         text = PYPROJECT.read_text(encoding="utf-8")
         requirement = r'"([A-Za-z0-9_.-]+)>=([\d.]+)"'
         runtime = text.split("\ndependencies = [", 1)[1].split("]", 1)[0]
@@ -748,7 +749,8 @@ class TestRepositoryGates:
         for extra, body in _extras().items():
             found = dict(re.findall(requirement, body))
             if extra == "dev":  # of the tools, the ones the suite reads files with
-                found = {k: v for k, v in found.items() if k in ("h5py", "hdf5plugin")}
+                tools = ("h5py", "hdf5plugin", "nibabel")
+                found = {k: v for k, v in found.items() if k in tools}
             floors.update(found)
         assert set(floors) == {
             "numpy", "torch", "monai", "nibabel", "pydicom", "highdicom", "h5py",

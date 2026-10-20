@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,7 @@ import pytest
 import medh5
 from medh5.errors import MEDH5ValidationError
 from medh5.validate import validate_file
+from tests.helpers import ROOT, disk_full_while
 from tests.kits import Organs
 
 nib = pytest.importorskip("nibabel")
@@ -21,7 +24,9 @@ from medh5.io.nifti import (  # noqa: E402
     from_nifti,
     import_seg_nifti,
     read_nifti,
+    require_nibabel,
     to_nifti,
+    write_nifti,
 )
 
 SHAPE_XYZ = (24, 20, 12)
@@ -1365,6 +1370,15 @@ class TestGridsAgreeInTimeAndUnits:
         (taken,) = [n for n in report.of_kind("time_values") if "takes them" in str(n)]
         assert taken.detail["from"] == "B"
 
+    def test_S3_2_times_one_volume_states_bind_the_next(self, tmp_path):
+        """B states the frame indices A assumed; C states others. B's times are
+        stated, so C conflicts with them rather than replacing them."""
+        a = self._series(tmp_path / "a.nii.gz", step=None)
+        b = self._series(tmp_path / "b.nii.gz", step=1.0, offset=0.0)
+        c = self._series(tmp_path / "c.nii.gz", step=2.0, offset=0.0)
+        with pytest.raises(MEDH5ValidationError, match="'C' states frame times"):
+            from_nifti({"A": a, "B": b, "C": c}, tmp_path / "s.medh5")
+
     def test_S3_2_an_export_states_its_units_and_frame_times(self, tmp_path):
         source = self._series(tmp_path / "a.nii.gz", step=2.5, offset=10.0)
         from_nifti({"A": source}, tmp_path / "s.medh5")
@@ -1376,6 +1390,27 @@ class TestGridsAgreeInTimeAndUnits:
         _, geometry = read_nifti(out)
         assert geometry["time_values"] == pytest.approx([10.0, 12.5, 15.0])
         assert geometry["time_measured"]
+
+    def test_an_affine_with_a_zero_column_is_refused_and_nothing_written(
+        self, tmp_path
+    ):
+        flat = np.diag([1.0, 0.0, 1.0, 1.0])
+        with pytest.raises(
+            ValueError, match=r"^Could not decompose affine:\n\[\[1\. 0\."
+        ):
+            write_nifti(np.zeros((2, 2, 2), np.int16), flat, tmp_path / "f.nii")
+        assert list(tmp_path.iterdir()) == []
+
+    def test_S3_2_a_time_axis_of_no_frames_states_no_times(self, tmp_path):
+        out = write_nifti(
+            np.zeros((2, 2, 2, 0), np.int16),
+            np.eye(4),
+            tmp_path / "e.nii",
+            time_values=[],
+        )
+        header = nib.load(str(out)).header
+        assert header.get_data_shape() == (2, 2, 2, 0)
+        assert float(header["toffset"]) == 0.0
 
     def test_S3_2_uneven_frames_go_to_a_sidecar_and_come_back(self, tmp_path):
         path = tmp_path / "s.medh5"
@@ -1504,32 +1539,7 @@ class TestExportsOwnTheirVolumeStatements:
             sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(".")) == []
         )
 
-    def test_an_interrupted_overwrite_never_reads_another_timeline(
-        self, tmp_path, monkeypatch
-    ):
-        """The old timing is withdrawn before the image is replaced: an export
-        that fails between them leaves the old image with its timing
-        unmeasured, not the new one with the old image's."""
-        from medh5.io import nifti
-
-        out = tmp_path / "dce.nii.gz"
-        to_nifti(self._series(tmp_path / "a.medh5", [0.0, 1.0, 3.0]), "DCE", out)
-        withdraw = nifti._withdraw_volume_statements
-
-        def interrupted(*args: Any) -> Any:
-            """Withdrawn, and the export stops before its image is renamed."""
-            withdraw(*args)
-            raise OSError("interrupted")
-
-        monkeypatch.setattr(nifti, "_withdraw_volume_statements", interrupted)
-        with pytest.raises(OSError, match="interrupted"):
-            to_nifti(self._series(tmp_path / "b.medh5", [0.0, 5.0, 6.0]), "DCE", out)
-        monkeypatch.undo()
-        _, geometry = read_nifti(out)
-        assert not geometry["time_measured"]
-        assert not (tmp_path / "dce.json").exists()
-        assert not [p for p in tmp_path.iterdir() if p.name.startswith(".")]
-
+    @pytest.mark.skipif(sys.platform == "win32", reason="a file size limit")
     @pytest.mark.parametrize("old", ["series", "dwi"])
     def test_an_export_that_cannot_write_its_image_changes_nothing(
         self, tmp_path, monkeypatch, old
@@ -1538,8 +1548,10 @@ class TestExportsOwnTheirVolumeStatements:
         serialised, so an export that failed to write it --- a full disk, a
         type NIfTI cannot hold --- left the old image with its timing or its
         b-values gone.  The image is written first;
-        until it is whole, nothing beside the file is touched."""
-        import nibabel
+        until it is whole, nothing beside the file is touched.  (That an
+        export interrupted after the old statements are withdrawn leaves the
+        old image unmeasured is the engine's test,
+        `s3_2_an_interrupted_overwrite_never_reads_another_timeline`.)"""
 
         out = tmp_path / "old.nii.gz"
         if old == "series":
@@ -1554,11 +1566,8 @@ class TestExportsOwnTheirVolumeStatements:
         stated = ("leading_kind", "time_values", "time_measured")
         expected = {k: read_nifti(out)[1][k] for k in stated}
 
-        def full(*args: Any, **kwargs: Any) -> None:
-            raise OSError("disk full")
-
-        monkeypatch.setattr(nibabel, "save", full)
-        with pytest.raises(OSError, match="disk full"):
+        disk_full_while(monkeypatch, medh5._core, "nifti_to")
+        with pytest.raises(OSError):
             to_nifti(self._series(tmp_path / "b.medh5", [0.0, 5.0, 6.0]), "DCE", out)
         monkeypatch.undo()
         assert {p.name: p.read_bytes() for p in beside} == before
@@ -1658,32 +1667,22 @@ class TestExportsOwnTheirVolumeStatements:
 
 class TestExportsAreWrittenWhole:
     """A NIfTI export replaces its file through the engine's replace
-    (§14.4): nibabel writes a staged temporary, renamed over the file only
-    once it is whole."""
+    (§14.4): the image is written to a staged temporary, renamed over the
+    file only once it is whole."""
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="a file size limit")
     def test_S14_4_an_interrupted_save_leaves_the_previous_file(
         self, tmp_path, monkeypatch
     ):
-        import nibabel
-
         from medh5.io.nifti import write_nifti
 
         out = tmp_path / "ct.nii.gz"
         write_nifti(np.zeros((4, 3, 2), np.int16), np.eye(4), out)
         before = out.read_bytes()
-        written: list[Path] = []
-
-        def crashed(image: Any, filename: Any, *args: Any, **kwargs: Any) -> None:
-            """nibabel stopped half way through the file."""
-            written.append(Path(filename))
-            Path(filename).write_bytes(before[: len(before) // 2])
-            raise OSError("interrupted")
-
-        monkeypatch.setattr(nibabel, "save", crashed)
-        with pytest.raises(OSError, match="interrupted"):
+        disk_full_while(monkeypatch, medh5._core, "nifti_write")
+        with pytest.raises(OSError):
             write_nifti(np.ones((4, 3, 2), np.int16), np.eye(4), out)
         monkeypatch.undo()
-        assert written and written[0] != out, "nibabel wrote a temporary"
         assert out.read_bytes() == before
         assert [p.name for p in tmp_path.iterdir()] == ["ct.nii.gz"]
 
@@ -1871,3 +1870,82 @@ class TestNiftiInputs:
         assert _os_error(IsADirectoryError(21, "Is a directory", "out")) == (
             "out: Is a directory"
         )
+
+
+# Every converter that reads or writes NIfTI, run where nibabel cannot be
+# imported: a ``None`` in ``sys.modules`` makes ``import nibabel`` raise.
+_WITHOUT_NIBABEL = """
+import sys
+from pathlib import Path
+
+sys.modules["nibabel"] = None
+
+import numpy as np
+
+import medh5
+from medh5.io.itk import from_itk_transform, to_itk_transform
+from medh5.io.nifti import from_nifti, import_seg_nifti, read_nifti, to_nifti
+from medh5.io.nnunetv2 import to_nnunetv2
+from tests.integrations.test_itk import DATA, _pair
+
+work, warp = Path(sys.argv[1]), Path(sys.argv[2])
+shape = (4, 5, 6)
+source = work / "source.medh5"
+with medh5.create(source, sample_id="s", codec="portable") as w:
+    w.add_grid("g", shape=shape, spacing=(2.0, 1.0, 1.0))
+    ct = np.arange(np.prod(shape), dtype=np.int16).reshape(shape)
+    w.add_image("CT", ct, grid="g", modality="CT")
+    mask = np.zeros(shape, bool)
+    mask[1:3, 1:3, 1:3] = True
+    w.add_segmentation("seg", grid="g", masks={1: mask})
+
+image = to_nifti(source, "CT", work / "ct.nii.gz")
+organ = to_nifti(source, "CT", work / "organ.nii", annotation="seg", class_key=1)
+assert np.array_equal(read_nifti(image)[0], ct)
+back = work / "back.medh5"
+assert from_nifti({"CT": image}, back).ok
+assert import_seg_nifti(back, {"organ": organ}).ok
+assert to_nnunetv2([source], work / "nn", dataset_name="Dataset001_s").ok
+
+pair = _pair(work / "pair.medh5")
+report = from_itk_transform(
+    DATA / "ants_affine.mat", pair, transform_id="reg", fixed="fixed",
+    moving="moving", warp=warp, vectors="lps",
+)
+assert report.ok, report.format(verbose=True)
+written = to_itk_transform(
+    pair, work / "out.mat", transform_id="reg", warp_out=work / "out_warp.nii.gz",
+    vectors="lps",
+)
+assert written.ok, written.format(verbose=True)
+assert (work / "out_warp.nii.gz").is_file()
+assert sys.modules["nibabel"] is None
+print("converted without nibabel")
+"""
+
+
+def test_every_nifti_converter_runs_without_nibabel(tmp_path: Path) -> None:
+    """2.2.0 reads and writes NIfTI in the engine: nibabel is a test
+    dependency, and no converter imports it.  The one input made here with
+    nibabel is the ANTs warp the ITK import reads."""
+    from tests.integrations.test_itk import _warp
+
+    warp = _warp(tmp_path / "warp.nii.gz", (1.0, 0.5, -0.25))
+    work = tmp_path / "work"
+    work.mkdir()
+    done = subprocess.run(
+        [sys.executable, "-c", _WITHOUT_NIBABEL, str(work), str(warp)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "converted without nibabel"
+
+
+def test_require_nibabel_says_medh5_no_longer_needs_it(monkeypatch) -> None:
+    assert require_nibabel() is nib
+    monkeypatch.setitem(sys.modules, "nibabel", None)
+    with pytest.raises(ImportError, match="pip install nibabel"):
+        require_nibabel()

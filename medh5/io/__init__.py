@@ -1,8 +1,9 @@
 """Converters.
 
-Every converter is lazy: ``import medh5`` never pulls in nibabel, pydicom,
-highdicom or pyarrow, and a missing one produces a message naming the extra to
-install rather than an ``ImportError`` from three frames down.
+Every converter is lazy: ``import medh5`` never pulls in pydicom, highdicom or
+pyarrow, and a missing one produces a message naming the extra to install
+rather than an ``ImportError`` from three frames down.  NIfTI needs nothing:
+the engine reads and writes it.
 
 Each returns a :class:`~medh5.io.report.ConversionReport` recording what the
 source did not determine --- the encoding chosen, the class ids minted, the

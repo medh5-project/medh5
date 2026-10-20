@@ -61,8 +61,8 @@ keeps its position.
 
 **A file that declares no geometry is refused.** `sform_code == qform_code == 0`
 is NIfTI stating that it carries no spatial mapping — voxel indices and nothing
-else. nibabel still hands back an affine, rebuilt from `pixdim`, and importing
-that mints a world grid nobody measured. `--assume-geometry` takes the fallback
+else. A reader can still rebuild an affine from `pixdim`, as nibabel does, and
+importing that mints a world grid nobody measured. `--assume-geometry` takes the fallback
 deliberately, and it is then recorded as a **guess** in the report.
 
 **An sform/qform disagreement is recorded, not resolved in silence.** When both
@@ -169,13 +169,23 @@ TR/TE — goes to `acquisition`; everything else stays out (§11.4). A wholesale
 tag copy is how a "de-identified" export carries a patient name into a training
 set.
 
-**Enhanced multi-frame objects are skipped and reported, not refused.** They
-are not malformed; they are a different object model, with geometry in
-per-frame functional groups this importer does not read. Refusing the whole
-tree for one such series would block the classic series beside it, so the
-enhanced ones are left out and the report says so as a warning, which fails
-the command's exit status. Before 1.3.0 they were skipped silently, and a
-modern MR export could import as nothing with no word why.
+**Enhanced frames are placed by their functional groups, or refused.** An
+enhanced CT, MR or PET object states each frame's position in its functional
+groups, so its frames are held to exactly the checks a classic series'
+slices are: ordered by geometry, measured, and refused when they do not form
+a grid. `InStackPositionNumber` is checked against the positions rather than
+trusted or overruled — a stack whose numbering its geometry contradicts is a
+broken object, and re-sorting it by either would be a guess. A number skipped
+is a plane missing, and is refused though the positions left are regular.
+The same holds of an object's frame count and its parts: an instance whose
+`NumberOfFrames` its per-frame groups contradict, or that says it is part of
+a concatenation it cannot be joined to, would import a fraction of the
+object as all of it.
+Objects this importer still does not read — an ultrasound volume, other
+multi-frame objects — are skipped and reported as a warning rather than refused, so the
+classic series beside them still import; before 1.3.0 such objects were
+skipped silently, and before 2.2.0 that included every enhanced CT, MR and
+PET object.
 
 ## DICOM SEG
 

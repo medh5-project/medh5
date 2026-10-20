@@ -17,9 +17,9 @@ Check that it worked:
 medh5 --version
 ```
 
-The rest of this page is for when you need more: an extra for PyTorch, MONAI,
-DICOM or NIfTI, the command line without Python, the Rust crate, or a system
-that pip has no ready-built package for.
+The rest of this page is for when you need more: an extra for PyTorch, MONAI
+or DICOM, the command line without Python, the Rust crate, or a system that
+pip has no ready-built package for.
 
 ## Add what you connect it to
 
@@ -30,7 +30,6 @@ modules use to talk to other tools; install the ones you use.
 |---|---|---|
 | train with PyTorch (`medh5.torch`) | `pip install "medh5[torch]"` | PyTorch |
 | load samples into MONAI (`medh5.monai`) | `pip install "medh5[monai]"` | MONAI, PyTorch |
-| import or export NIfTI files and nnU-Net datasets | `pip install "medh5[nifti]"` | nibabel |
 | import DICOM series, DICOM SEG and RTSTRUCT; export RTSTRUCT | `pip install "medh5[dicom]"` | pydicom |
 | export DICOM SEG | `pip install "medh5[dicomseg]"` | highdicom, pydicom |
 | open files directly with `h5py` | `pip install "medh5[h5py]"` | h5py, hdf5plugin |
@@ -38,10 +37,14 @@ modules use to talk to other tools; install the ones you use.
 Extras combine in one command:
 
 ```bash
-pip install "medh5[torch,nifti,dicom]"
+pip install "medh5[torch,dicom]"
 ```
 
 If you use a module without its extra, the error names the one to install.
+
+NIfTI files and nnU-Net datasets need no extra: since 2.2.0 the engine reads
+and writes NIfTI itself, and nibabel is no longer installed or imported. The
+`nifti` extra is kept, empty, so `pip install "medh5[nifti]"` still works.
 
 ## Where it runs
 
@@ -148,9 +151,10 @@ cargo install --locked medh5-cli --config 'profile.release.lto="thin"' \
   --config profile.release.codegen-units=4 --config 'profile.release.strip="symbols"'
 ```
 
-The binary does everything itself except the converters (`medh5 convert …`,
-for DICOM, NIfTI and nnU-Net) and the dataloader row of `medh5 bench`, which
-are built on Python libraries. For those it runs a Python that has medh5 installed:
+The binary does everything itself, NIfTI conversion included, except the
+other converters (`medh5 convert …` for DICOM, DICOM SEG, RTSTRUCT, ITK and
+nnU-Net) and the dataloader row of `medh5 bench`, which are built on Python
+libraries. For those it runs a Python that has medh5 installed:
 `python3` (`python` on Windows), or the interpreter named by the
 `MEDH5_PYTHON` environment variable. When there is none, it says what to
 install.
@@ -189,7 +193,7 @@ There is no wheel for your system or your Python version; see
 [Where it runs](#where-it-runs).
 
 **An `ImportError` names an extra.** Install it, for example
-`pip install "medh5[nifti]"` for NIfTI conversion; see
+`pip install "medh5[dicom]"` for DICOM conversion; see
 [the table of extras](#add-what-you-connect-it-to).
 
 **`medh5 convert` says the converters are part of the Python package.** You

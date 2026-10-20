@@ -671,7 +671,7 @@ compiled extension the modules re-export from, not an API of its own.
 | `read_meds` | function | The rows of MEDS subject *subject_id* in *source*, as clinical records on *clock*, and what the conversion decided. | [Converters › MEDS and FHIR R4](converters.md#meds-and-fhir-r4) |
 | `read_nifti` | function | One NIfTI file as `(array, geometry)` in MEDH5 conventions. | [Converters › NIfTI](converters.md#nifti) |
 | `scan_dicom` | function | Walk a directory tree and collect its image series. | [Converters › DICOM](converters.md#dicom) |
-| `Series` | class | One DICOM series, resolved into a volume and its geometry. |  |
+| `Series` | class | One DICOM series, resolved into a volume and its geometry. | [Converters › DICOM](converters.md#dicom) |
 | `SubjectGroup` | class | Occasions belonging to one subject, in timepoint order. |  |
 | `SubjectImport` | class | One subject of a cohort import: the sample its records went into, or why they did not. | [Converters › MEDS and FHIR R4](converters.md#meds-and-fhir-r4) |
 | `to_dicom_seg` | function | Export one voxel annotation as a DICOM SEG against its source slices. | [Converters › DICOM SEG](converters.md#dicom-seg) |
@@ -690,7 +690,7 @@ compiled extension the modules re-export from, not an API of its own.
 | `require_pydicom` | function | Import pydicom, or raise an `ImportError` naming the extra to install. |  |
 | `scan_dicom` | function | Walk a directory tree and collect its image series. | [Converters › DICOM](converters.md#dicom) |
 | `select_series` | function | One series per modality — the thinnest, or the first seen. | [Converters › DICOM](converters.md#dicom) |
-| `Series` | class | One DICOM series, resolved into a volume and its geometry. |  |
+| `Series` | class | One DICOM series, resolved into a volume and its geometry. | [Converters › DICOM](converters.md#dicom) |
 | `SPACING_TOLERANCE` | constant (`float`) | How far a slice may sit from where the regular stack puts it, as a fraction of the slice spacing, and never less than 0.01 mm. |  |
 | `STORED_TAGS` | constant (`tuple`) | Acquisition parameters copied to `/meta → acquisition` (§4.5). |  |
 
@@ -787,7 +787,7 @@ compiled extension the modules re-export from, not an API of its own.
 | `import_seg_nifti` | function | Add NIfTI masks to an existing sample, checking they sit on its grid. | [Converters › NIfTI](converters.md#nifti) |
 | `RAS_TO_LPS` | constant (`ndarray`) | World-axis sign flip. |  |
 | `read_nifti` | function | One NIfTI file as `(array, geometry)` in MEDH5 conventions. | [Converters › NIfTI](converters.md#nifti) |
-| `require_nibabel` | function | Import nibabel, or raise an `ImportError` naming the extra to install. |  |
+| `require_nibabel` | function | Import nibabel, or raise an `ImportError` saying how to install it. |  |
 | `to_nifti` | function | Export one image, or one class of one annotation, as a NIfTI file. | [Converters › NIfTI](converters.md#nifti) |
 
 ## `medh5.io.nnunetv2` { #medh5-io-nnunetv2 }

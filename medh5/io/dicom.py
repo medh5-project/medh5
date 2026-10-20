@@ -19,7 +19,8 @@ otherwise puts every label at the wrong depth.
 
 **Values.**  ``RescaleSlope``/``RescaleIntercept`` are stored, not applied
 (§4.2), so ``read()`` returns what the file stored and ``read(physical=True)``
-returns HU.  A converter that bakes the rescale in makes the two indistinguishable
+returns the rescaled values --- HU, for a CT whose ``RescaleType`` names no
+other quantity.  A converter that bakes the rescale in makes the two indistinguishable
 afterwards.  The one exception is asked for: a series whose slices each state
 their own rescale (ordinary in PET) has no one modality LUT to store, and
 ``per_slice_rescale="apply"`` stores its physical values instead, saying so.
@@ -29,9 +30,11 @@ from __future__ import annotations
 
 import os
 from collections import Counter
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -41,6 +44,14 @@ from medh5._optional import require
 from medh5.curation import ID_SOURCE
 from medh5.errors import MEDH5ValidationError
 from medh5.io._common import sanitize_ascii_stem
+from medh5.io._frames import (
+    _first_item,
+    _group_value,
+    _groups,
+    _orientation,
+    _pixel_spacing,
+    _position,
+)
 from medh5.io.grouping import (
     FALLBACK_PREFIX,
     Occasion,
@@ -157,10 +168,18 @@ class Series:
     never written to the file (§11.4)."""
     sex: str | None = None
     """``PatientSex``, compared the same way."""
+    frames: list[tuple[str, int]] = field(default_factory=list)
+    """For a multi-frame object, each slice as ``(file, frame index)``, the
+    index 0-based within its file, in the order the object holds them; empty
+    for a classic series, a file per slice."""
+    stack: str | None = None
+    """Which stack of its multi-frame object this series is, where the object
+    holds several --- its ``StackID``, and the values of any other dimension
+    that tells the stacks apart --- and ``None`` otherwise."""
 
     @property
     def n_slices(self) -> int:
-        return len(self.paths)
+        return len(self.frames) if self.frames else len(self.paths)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -172,7 +191,7 @@ class Series:
             "slices": self.n_slices,
             "description": self.description,
             "frame_uid": self.frame_uid,
-        }
+        } | ({"stack": self.stack} if self.stack is not None else {})
 
     def __repr__(self) -> str:
         return (
@@ -188,15 +207,85 @@ _ENHANCED_SOP_CLASSES = (
     "LegacyConvertedEnhancedCTImageStorage",
     "LegacyConvertedEnhancedMRImageStorage",
     "LegacyConvertedEnhancedPETImageStorage",
-    "EnhancedUSVolumeStorage",
 )
 """Multi-frame image objects whose geometry lives in per-frame functional groups.
 
-This importer reads classic single-frame series.  An enhanced object carries
-`ImagePositionPatient` per frame rather than at the top level, so the scan used
-to skip it as if it were not an image at all --- silently, which for a modern
-MR export means an empty import and no word why.
+An enhanced object carries every slice as a frame, and each frame's
+`ImagePositionPatient` in its functional groups rather than at the top level
+(PS3.3 C.7.6.16).  Its frames are split into stacks, and each stack is
+imported as the classic series it would have been.
 """
+
+
+_UNSUPPORTED_SOP_CLASSES = ("EnhancedUSVolumeStorage",)
+"""Enhanced objects a user would expect to be images that this importer does
+not read: an ultrasound volume places its frames through a volume transform,
+not a plane position per frame.  Skipped with a warning naming them."""
+
+
+_STACK_ID = 0x00209056
+"""``StackID``: the stack a frame belongs to (C.7.6.16.2.2)."""
+
+
+_ACQUISITIONS = frozenset(
+    {
+        0x00209128,  # TemporalPositionIndex
+        0x0020930D,  # TemporalPositionTimeOffset
+        0x00209153,  # NominalCardiacTriggerDelayTime
+        0x00209154,  # NominalCardiacTriggerTimePriorToRPeak
+        0x00209241,  # NominalPercentageOfCardiacPhase
+        0x00189236,  # CardiacCyclePosition
+        0x00209255,  # NominalRespiratoryTriggerDelayTime
+        0x00189214,  # RespiratoryCyclePosition
+        0x00189082,  # EffectiveEchoTime
+        0x00189087,  # DiffusionBValue
+        0x00189089,  # DiffusionGradientOrientation
+        0x00181314,  # FlipAngle
+        0x00180080,  # RepetitionTime
+        0x00189079,  # InversionTimes
+        0x00189090,  # VelocityEncodingDirection
+        0x00189257,  # ASLContext
+        0x00089208,  # ComplexImageComponent
+        0x00189344,  # ContrastBolusAgentPhase
+    }
+)
+"""Dimensions each of whose values is one acquisition of the planes --- a
+time point, a cardiac or respiratory phase, an echo, a diffusion weighting,
+a flip angle or repetition time, a flow encoding, a labelling, a complex
+component, a contrast phase --- so they tell stacks apart however many
+planes a value holds (C.7.6.16.2.2)."""
+
+
+_ACQUISITION_GROUPS = frozenset(
+    {
+        0x00209310,  # TemporalPositionSequence
+        0x00189118,  # CardiacSynchronizationSequence
+        0x00209253,  # RespiratorySynchronizationSequence
+        0x00189114,  # MREchoSequence
+        0x00189117,  # MRDiffusionSequence
+        0x00189112,  # MRTimingAndRelatedParametersSequence
+        0x00189115,  # MRModifierSequence
+        0x00189197,  # MRVelocityEncodingSequence
+        0x00189251,  # MRArterialSpinLabelingSequence
+        0x00189152,  # MRMetaboliteMapSequence
+        0x00189042,  # MRReceiveCoilSequence
+        0x00189226,  # MRImageFrameTypeSequence
+        0x00189329,  # CTImageFrameTypeSequence
+        0x00189751,  # PETFrameTypeSequence
+        0x00189341,  # ContrastBolusUsageSequence
+    }
+)
+"""Functional groups whose every attribute times, weights, encodes or types
+one acquisition, and is the same for all of its planes: a dimension pointing
+into one is an acquisition whatever attribute it names, so an attribute
+:data:`_ACQUISITIONS` does not list still splits. Groups that can vary plane
+by plane within one acquisition --- frame content, plane position, a CT's
+modulated exposure --- are left to the positions to judge."""
+
+
+_POSITIONAL = frozenset({0x00209057, 0x00200032})
+"""Dimensions that order frames within a stack --- ``InStackPositionNumber``
+and ``ImagePositionPatient`` --- rather than tell stacks apart."""
 
 
 _NON_IMAGE_SOP_CLASSES = (
@@ -251,8 +340,10 @@ def scan_dicom(
     """
     pydicom = require_pydicom()
     enhanced = _enhanced_sop_classes(pydicom)
+    unsupported_classes = _sop_classes(pydicom, _UNSUPPORTED_SOP_CLASSES)
     non_image = _sop_classes(pydicom, _NON_IMAGE_SOP_CLASSES)
     found: dict[str, Series] = {}
+    objects: dict[str, list[tuple[str, Any]]] = {}
     unsupported: dict[str, list[str]] = {}
     multiframe: dict[str, list[str]] = {}
     others: dict[str, list[str]] = {}
@@ -264,8 +355,22 @@ def scan_dicom(
         except Exception:
             continue
         sop_class = str(getattr(header, "SOPClassUID", ""))
-        if sop_class in enhanced:
+        if sop_class in unsupported_classes:
             unsupported.setdefault(sop_class, []).append(str(path))
+            continue
+        if sop_class in enhanced:
+            if getattr(header, "SeriesInstanceUID", None) is not None:
+                # A concatenation is one object split across instances
+                # (C.7.6.16.2.2.4): its parts are joined by their UID, and
+                # any other object by its own, so a copy of it at a second
+                # path joins it (and is refused) rather than becoming a
+                # second acquisition.
+                key = (
+                    _text(getattr(header, "ConcatenationUID", None))
+                    or _text(getattr(header, "SOPInstanceUID", None))
+                    or str(path)
+                )
+                objects.setdefault(key, []).append((str(path), header))
             continue
         uid = getattr(header, "SeriesInstanceUID", None)
         if uid is None or not hasattr(header, "ImagePositionPatient"):
@@ -293,23 +398,25 @@ def scan_dicom(
             )
             found[uid] = series
         series.paths.append(str(path))
+    stacks = [stack for parts in objects.values() for stack in _object_series(parts)]
     if report is not None:
         if unsupported:
             report.warn(
                 "unsupported",
                 f"{_count(unsupported)} enhanced multi-frame instance(s) were "
-                "skipped: this importer reads classic single-frame series, and an "
-                "enhanced CT/MR/PET object carries its geometry in per-frame "
-                "functional groups it does not read; convert them to classic "
-                "instances first",
+                f"skipped ({', '.join(_sop_name(s) for s in sorted(unsupported))}): "
+                "this importer reads classic series and enhanced CT, MR and PET "
+                "objects, whose frames each state a plane position; these place "
+                "their frames otherwise",
                 _skipped(unsupported),
             )
         if multiframe:
             report.warn(
                 "unsupported",
                 f"{_count(multiframe)} multi-frame instance(s) were skipped: this "
-                "importer reads classic single-frame series, a file per slice, "
-                "and a multi-frame object's frames are not such slices",
+                "importer reads classic series, a file per slice, and enhanced "
+                "CT, MR and PET objects, and these multi-frame objects' frames "
+                "are neither",
                 _skipped(multiframe),
             )
         if others:
@@ -322,7 +429,221 @@ def scan_dicom(
                 "info",
                 _skipped(others),
             )
-    return sorted(found.values(), key=lambda s: (s.study_uid, s.series_uid))
+    # Stable: the stacks of one object keep the order the object holds them in.
+    return sorted([*found.values(), *stacks], key=lambda s: (s.study_uid, s.series_uid))
+
+
+def _object_series(parts: Sequence[tuple[str, Any]]) -> list[Series]:
+    """One enhanced object's frames as series, a stack each.
+
+    *parts* are the object's instances --- one, or a concatenation's ---
+    as ``(path, header)``, joined in ``InConcatenationNumber`` order.  Frames
+    are told apart by ``StackID`` and by the dimensions of the object's
+    ``DimensionIndexSequence`` whose values each span several planes (a
+    temporal position, an echo: :func:`_separating`); a stack is ordered
+    later, by geometry.
+    """
+    parts = sorted(parts, key=lambda part: _number(part[1], "InConcatenationNumber"))
+    header = parts[0][1]
+    items = list(getattr(header, "DimensionIndexSequence", []))
+    pointers = [int(getattr(item, "DimensionIndexPointer", 0) or 0) for item in items]
+    groups = [int(getattr(item, "FunctionalGroupPointer", 0) or 0) for item in items]
+    dimensions = [
+        index
+        for index, pointer in enumerate(pointers)
+        if pointer not in (_POSITIONAL | {_STACK_ID})
+    ]
+    acquisitions = {
+        d
+        for d, index in enumerate(dimensions)
+        if pointers[index] in _ACQUISITIONS
+        or groups[index] in _ACQUISITION_GROUPS
+        # A pointer may name the functional group itself (C.7.6.17.1).
+        or pointers[index] in _ACQUISITION_GROUPS
+    }
+    found: list[tuple[str, int, tuple[Any, ...], tuple[float, ...] | None]] = []
+    for path, part in parts:
+        shared, per_frame = _groups(part)
+        for index in range(_frames(part)):
+            group = per_frame[index] if index < len(per_frame) else None
+            found.append(
+                (path, index, _stack_key(group, dimensions), _placed(group, shared))
+            )
+    by_id: dict[Any, list[int]] = {}
+    for n, (_, _, key, _) in enumerate(found):
+        by_id.setdefault(key[0], []).append(n)
+    stacks: dict[tuple[Any, ...], list[tuple[str, int]]] = {}
+    for members in by_id.values():
+        keep = _separating(
+            [found[n][2][1:] for n in members],
+            [found[n][3] for n in members],
+            acquisitions,
+        )
+        for n in members:
+            path, index, key, _ = found[n]
+            stack = (key[0], *(key[1 + d] for d in keep))
+            stacks.setdefault(stack, []).append((path, index))
+    labels = [
+        "-".join(str(v) for v in key if v is not None) or str(n)
+        for n, key in enumerate(stacks, start=1)
+    ]
+    if len(set(labels)) != len(labels):
+        labels = [str(n) for n in range(1, len(labels) + 1)]
+    return [
+        Series(
+            series_uid=str(header.SeriesInstanceUID),
+            study_uid=str(getattr(header, "StudyInstanceUID", "")),
+            modality=str(getattr(header, "Modality", "OT")),
+            patient_id=_text(getattr(header, "PatientID", None)),
+            study_date=_text(getattr(header, "StudyDate", None)),
+            description=_text(getattr(header, "SeriesDescription", "")) or "",
+            frame_uid=_text(getattr(header, "FrameOfReferenceUID", None)),
+            birth_date=_text(getattr(header, "PatientBirthDate", None)),
+            sex=_text(getattr(header, "PatientSex", None)),
+            # Every part, though a stack's frames may lie in some of them:
+            # a concatenation is checked whole (``_check_concatenation``).
+            paths=[path for path, _ in parts],
+            frames=frames,
+            stack=label if len(stacks) > 1 else None,
+        )
+        for label, frames in zip(labels, stacks.values(), strict=True)
+    ]
+
+
+def _placed(group: Any, shared: Any) -> tuple[float, ...] | None:
+    """A frame's ``ImagePositionPatient``, rounded to a micrometre, or
+    ``None`` where it states none (refused later, when the frame is read)."""
+    for holder in (group, shared):
+        plane = _first_item(holder, "PlanePositionSequence")
+        position = getattr(plane, "ImagePositionPatient", None) if plane else None
+        if position is not None:
+            try:
+                return tuple(round(float(v), 3) for v in position)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _separating(
+    values: Sequence[tuple[Any, ...]],
+    positions: Sequence[tuple[float, ...] | None],
+    acquisitions: Collection[int] = (),
+) -> list[int]:
+    """Which of the dimensions in *values* (one tuple per frame of a
+    ``StackID``) tell its stacks apart.
+
+    The *acquisitions* --- dimensions whose pointer names one acquisition
+    of the planes (:data:`_ACQUISITIONS`), or whose functional group does
+    (:data:`_ACQUISITION_GROUPS`), named by the pointer itself or by
+    ``FunctionalGroupPointer`` --- always do, a single-plane time series
+    too.  Any other dimension does only where the planes repeat: when,
+    within one acquisition, it tells apart frames at the same position, and
+    a value of it is shared by frames at different positions.  So a
+    per-frame or per-plane number (``FrameAcquisitionNumber``) splits
+    nothing, and nor does a value a plane-varying attribute repeats --- a
+    tube current alternating between two values --- where no position
+    repeats.  Frames at one position that no dimension kept so far tells
+    apart are told apart by the one other dimension that does, if only one
+    does: a single-plane time series indexed by ``FrameReferenceDateTime``,
+    a frame's time, which may as well be each slice's own in one volume and
+    so names no acquisition by itself.  Where two would do it, neither is
+    chosen, and the frames are refused as coincident.  With a position
+    unknown, every dimension is kept, as before positions were read.
+    """
+    count = len(values[0]) if values else 0
+    if any(position is None for position in positions):
+        return list(range(count))
+    chosen = sorted(d for d in acquisitions if d < count)
+    # Frames at one position within one acquisition: the repeats any other
+    # dimension must tell apart before it may split.
+    at: dict[Any, list[int]] = {}
+    for n, (value, position) in enumerate(zip(values, positions, strict=True)):
+        at.setdefault((tuple(value[d] for d in chosen), position), []).append(n)
+    repeats = [frames for frames in at.values() if len(frames) > 1]
+    keep = []
+    for d in range(count):
+        if d in acquisitions:
+            keep.append(d)
+            continue
+        places: dict[Any, set[Any]] = {}
+        for value, position in zip(values, positions, strict=True):
+            places.setdefault(value[d], set()).add(position)
+        spans = any(len(where) > 1 for where in places.values())
+        tells = any(len({values[n][d] for n in frames}) > 1 for frames in repeats)
+        if spans and tells:
+            keep.append(d)
+    for frames in repeats:
+        if any(len({values[n][d] for n in frames}) > 1 for d in keep):
+            continue
+        telling = [d for d in range(count) if len({values[n][d] for n in frames}) > 1]
+        if len(telling) == 1:
+            keep.append(telling[0])
+    return sorted(set(keep))
+
+
+def _stack_key(group: Any, dimensions: Sequence[int]) -> tuple[Any, ...]:
+    """What tells a frame's stack from the others: its ``StackID`` and its
+    index values in *dimensions*."""
+    content = _first_item(group, "FrameContentSequence")
+    stack = _text(getattr(content, "StackID", None)) if content is not None else None
+    values = getattr(content, "DimensionIndexValues", None) if content else None
+    if values is None:
+        values = []
+    elif isinstance(values, (int, str)):
+        values = [values]
+    values = list(values)
+    return (stack, *(values[i] if i < len(values) else None for i in dimensions))
+
+
+def _number(header: Any, keyword: str) -> int:
+    """An integer attribute of *header*, 0 where it is absent or unreadable."""
+    try:
+        return int(getattr(header, keyword, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _ct_rescale_type(slice_: Any, *, enhanced: bool) -> str:
+    """The ``RescaleType`` of a CT slice or frame, read where it is omitted.
+
+    A classic CT omits it only when it is HU (C.8.2.1, Type 1C).  An enhanced
+    CT must state it, and it must be HU only for an original, non-localizer,
+    single-energy frame (C.8.15.3.10): omitted there, HU is what it had to
+    be; omitted anywhere else, it is unknown, read as ``US`` (no units)
+    rather than as a unit the values may not have.
+    """
+    stated = _text(getattr(slice_, "RescaleType", None))
+    if stated is not None:
+        return stated
+    if not enhanced:
+        return "HU"
+    # The frame's own type, else the object's (a legacy-converted object
+    # need not carry the frame type group).
+    stated_kind = getattr(slice_, "FrameType", None) or getattr(
+        slice_, "ImageType", None
+    )
+    kind = [str(v).upper() for v in (stated_kind or [])]
+    multienergy = _text(getattr(slice_, "MultienergyCTAcquisition", None))
+    original = bool(kind) and kind[0] == "ORIGINAL"
+    localizer = len(kind) > 2 and kind[2] == "LOCALIZER"
+    if original and not localizer and (multienergy or "").upper() != "YES":
+        return "HU"
+    return "US"
+
+
+def _values(modality: str, rescale_type: str | None) -> dict[str, Any]:
+    """An image's ``value_type`` and ``value_units`` from its modality and
+    ``RescaleType``.
+
+    A CT's rescale gives HU unless ``RescaleType`` names another quantity
+    (C.8.15.3.10): a derived or multi-energy CT may hold mg/ml or Z_eff, and
+    ``US`` (unspecified) names none.  Other modalities' values are intensity.
+    """
+    if modality != "CT":
+        return {"value_type": "intensity", "value_units": None}
+    if rescale_type == "US":
+        return {"value_type": "intensity", "value_units": None}
+    return {"value_type": "quantitative", "value_units": rescale_type or "HU"}
 
 
 def _count(skipped: dict[str, list[str]]) -> int:
@@ -391,6 +712,9 @@ class _Planned:
     rescales: list[tuple[float, float]] | None = None
     """Each slice's ``(slope, intercept)``, when they differ and are applied
     as the slices are decoded; ``None`` when the series has one."""
+    frames: list[int | None] = field(default_factory=list)
+    """Each slice's frame in its file, for a multi-frame object; empty for a
+    classic series, whose files are its slices."""
 
 
 def _plan_series(
@@ -400,7 +724,12 @@ def _plan_series(
     will not decode --- without decoding a pixel."""
     if not series.paths:
         raise MEDH5ValidationError(f"series {series.series_uid} has no files")
-    slices = [_dcmread(p, stop_before_pixels=True) for p in series.paths]
+    if series.frames:
+        slices = _frame_headers(series)
+        sources: list[tuple[str, int | None]] = list(series.frames)
+    else:
+        slices = [_dcmread(p, stop_before_pixels=True) for p in series.paths]
+        sources = [(p, None) for p in series.paths]
     orientation = np.asarray(
         _agreed(
             slices,
@@ -420,7 +749,8 @@ def _plan_series(
     # only ordering the files themselves define.
     order = np.argsort(positions @ normal, kind="stable")
     slices = [slices[i] for i in order]
-    paths = [series.paths[i] for i in order]
+    paths = [sources[i][0] for i in order]
+    frames = [sources[i][1] for i in order] if series.frames else []
     positions = positions[order]
     uids = [str(getattr(s, "SOPInstanceUID", "?")) for s in slices]
 
@@ -432,6 +762,8 @@ def _plan_series(
         _scalar(getattr(slices[0], "SliceThickness", None)),
         uids=uids,
     )
+    if series.frames:
+        _check_stack_order(slices, series)
     pixel_spacing = _agreed(
         slices,
         # No default: a series whose slices all omit `PixelSpacing` used to fall
@@ -476,6 +808,19 @@ def _plan_series(
             {"series_uid": series.series_uid},
         )
     rescale, rescales = _series_rescale(slices, uids, series, report, per_slice_rescale)
+    # What the rescale gives: one quantity for the volume, so one type.  Only
+    # a CT's is read (:func:`_values`), and one omitted is read as what DICOM
+    # makes it (:func:`_ct_rescale_type`) before the slices are compared.
+    rescale_type = (
+        _agreed(
+            slices,
+            lambda s: _ct_rescale_type(s, enhanced=bool(series.frames)),
+            "RescaleType",
+            series,
+        )
+        if series.modality == "CT"
+        else None
+    )
     direction = np.stack([normal, column, row], axis=1)
     geometry = {
         "shape": (len(slices), int(rows), int(columns)),
@@ -486,11 +831,8 @@ def _plan_series(
         "units": "mm",
         "frame_uid": series.frame_uid,
         "rescale": rescale,
-        "acquisition": {
-            tag: _scalar(getattr(slices[0], tag, None))
-            for tag in STORED_TAGS
-            if getattr(slices[0], tag, None) is not None
-        },
+        "rescale_type": rescale_type,
+        "acquisition": _acquisition(slices, series, report),
         "gaps": gaps,
     }
     return _Planned(
@@ -499,6 +841,236 @@ def _plan_series(
         geometry=geometry,
         samples=int(samples),
         rescales=rescales,
+        frames=frames,
+    )
+
+
+def _acquisition(
+    slices: Sequence[Any], series: Series, report: ConversionReport | None
+) -> dict[str, Any]:
+    """The :data:`STORED_TAGS` every slice of *series* agrees on (§4.5).
+
+    One value per volume is a claim about every slice, so an attribute the
+    slices state differently --- tube-current modulation's per-slice current,
+    an enhanced MR's per-frame echo time with no echo dimension to split on
+    --- is left out, with a warning, rather than recorded as the first
+    slice's.  It is not refused: the voxels do not depend on it.
+    """
+    out: dict[str, Any] = {}
+    varying = []
+    for tag in STORED_TAGS:
+        values = [_scalar(getattr(s, tag, None)) for s in slices]
+        if all(value is None for value in values):
+            continue
+        # Stated by some slices and not others is a disagreement too,
+        # whichever slice sorts first.
+        if any(_differs(values[0], value) for value in values[1:]):
+            varying.append(tag)
+            continue
+        out[tag] = values[0]
+    if varying and report is not None:
+        report.warn(
+            "acquisition",
+            f"series {series.series_uid}: its slices state different values of "
+            f"{', '.join(varying)}, so the image records none of them",
+            {"series_uid": series.series_uid, "tags": varying},
+        )
+    return out
+
+
+def _frame_headers(series: Series) -> list[Any]:
+    """Each frame of a multi-frame series, read as the header of a classic
+    slice: what a classic slice states at its top level, a frame states in
+    its functional groups (:func:`~medh5.io._frames._group_value`), so the
+    checks a classic series passes are the checks its frames pass.
+
+    A frame is named in a refusal as ``frame N of instance UID``, *N*
+    1-based as DICOM numbers frames.
+    """
+    headers = {path: _dcmread(path, stop_before_pixels=True) for path in series.paths}
+    _check_concatenation(series, list(headers.values()))
+    groups = {path: _groups(header) for path, header in headers.items()}
+    for path, header in headers.items():
+        _check_frame_count(series, header, len(groups[path][1]))
+    out = []
+    for path, index in series.frames:
+        dataset = headers[path]
+        shared, per_frame = groups[path]
+        group = per_frame[index] if index < len(per_frame) else None
+        sop = str(getattr(dataset, "SOPInstanceUID", "?"))
+        name = f"frame {index + 1} of instance {sop}"
+        attributes: dict[str, Any] = {
+            "SOPInstanceUID": name,
+            "file_meta": getattr(dataset, "file_meta", None),
+            "ImagePositionPatient": list(_position(group, shared, name)),
+            "ImageOrientationPatient": list(_orientation(group, shared, name)),
+            "PixelSpacing": list(_pixel_spacing(group, shared, name)),
+        }
+        for keyword in (
+            "Rows",
+            "Columns",
+            "SamplesPerPixel",
+            "RescaleSlope",
+            "RescaleIntercept",
+            "RescaleType",
+            "FrameType",
+            "ImageType",
+            "MultienergyCTAcquisition",
+            *STORED_TAGS,
+        ):
+            value = _group_value(group, shared, dataset, keyword)
+            if value is not None:
+                attributes[keyword] = value
+        content = _first_item(group, "FrameContentSequence")
+        number = getattr(content, "InStackPositionNumber", None) if content else None
+        if number is not None:
+            attributes["InStackPositionNumber"] = int(number)
+        out.append(SimpleNamespace(**attributes))
+    return out
+
+
+def _check_frame_count(series: Series, header: Any, items: int) -> None:
+    """Refuse an instance whose ``NumberOfFrames`` is absent or disagrees
+    with its per-frame functional groups, one item per frame (C.7.6.16.1):
+    either count would leave frames unread, or read frames that are not."""
+    stated = _number(header, "NumberOfFrames")
+    if stated != items:
+        sop = str(getattr(header, "SOPInstanceUID", "?"))
+        said = (
+            f"states NumberOfFrames {stated}" if stated else "states no NumberOfFrames"
+        )
+        raise MEDH5ValidationError(
+            f"series {series.series_uid}: instance {sop} {said}, but holds "
+            f"{items} per-frame functional group item(s), one per frame; which "
+            "frames it holds cannot be told"
+        )
+
+
+def _check_not_a_part(series: Series, header: Any) -> None:
+    """Refuse an instance with no ``ConcatenationUID`` whose concatenation
+    markers say it is a part of a larger object: read alone, its frames
+    would be imported as the whole.  Markers that describe a whole object
+    (part 1 of 1, from frame 0) are harmless and pass."""
+    number = _number(header, "InConcatenationNumber")
+    total = _number(header, "InConcatenationTotalNumber")
+    offset = _number(header, "ConcatenationFrameOffsetNumber")
+    if number > 1 or total > 1 or offset > 0:
+        sop = str(getattr(header, "SOPInstanceUID", "?"))
+        raise MEDH5ValidationError(
+            f"series {series.series_uid}: instance {sop} states no "
+            f"ConcatenationUID, but is part {number or '?'} of "
+            f"{total or 'an unstated number'} from frame offset {offset}; the "
+            "concatenation it belongs to cannot be joined"
+        )
+
+
+def _check_concatenation(series: Series, headers: Sequence[Any]) -> None:
+    """Refuse a concatenation some of whose instances are missing or repeated:
+    its frames are one object's, and a part of them is not a volume."""
+    uid = _text(getattr(headers[0], "ConcatenationUID", None))
+    if uid is None:
+        if len(headers) > 1:
+            sop = _text(getattr(headers[0], "SOPInstanceUID", None))
+            raise MEDH5ValidationError(
+                f"series {series.series_uid}: instance {sop} is in "
+                f"{len(headers)} files ({', '.join(series.paths)}); its frames "
+                "would be read twice, so remove the duplicate files"
+            )
+        _check_not_a_part(series, headers[0])
+        return
+    # Optional, and any part may state it: every stated total must agree.
+    totals = sorted({_number(h, "InConcatenationTotalNumber") for h in headers} - {0})
+    if len(totals) > 1:
+        raise MEDH5ValidationError(
+            f"series {series.series_uid}: concatenation {uid} states its total "
+            f"as {totals} in different instances; which instances are missing "
+            "cannot be told"
+        )
+    total = totals[0] if totals else 0
+    numbers = sorted(_number(h, "InConcatenationNumber") for h in headers)
+    if len(set(numbers)) != len(numbers):
+        raise MEDH5ValidationError(
+            f"series {series.series_uid}: concatenation {uid} holds instance "
+            f"number(s) {sorted({n for n in numbers if numbers.count(n) > 1})} "
+            "more than once; remove the duplicate files"
+        )
+    # InConcatenationTotalNumber is optional; without it, the numbers must
+    # still run from 1 without a gap, and only a missing last part goes unseen.
+    expected = list(range(1, (total or len(numbers)) + 1))
+    if numbers != expected:
+        found = (
+            f"{len(numbers)} of its {total} instances"
+            if total
+            else f"{len(numbers)} instance(s), with no total stated"
+        )
+        raise MEDH5ValidationError(
+            f"series {series.series_uid}: concatenation {uid} was found as "
+            f"{found}, numbered {numbers}. The frames of one object are split "
+            "across them, and the missing ones' are not here to place; import "
+            "the complete concatenation"
+        )
+    # Each part's ConcatenationFrameOffsetNumber is where its first frame sits
+    # in the object, which the frames of the parts before it fix: so the
+    # parts' frames follow on with none between.  Every part that states one
+    # is held to it (it is required, but not always set); what one part omits
+    # leaves the others' checked, since each follows from the frames alone.
+    ordered = sorted(headers, key=lambda h: _number(h, "InConcatenationNumber"))
+    expected = [0]
+    for header in ordered[:-1]:
+        expected.append(expected[-1] + _frames(header))
+    stated = [getattr(h, "ConcatenationFrameOffsetNumber", None) for h in ordered]
+    if any(
+        s is not None and int(s) != e for s, e in zip(stated, expected, strict=True)
+    ):
+        offsets = [None if s is None else int(s) for s in stated]
+        raise MEDH5ValidationError(
+            f"series {series.series_uid}: concatenation {uid} states its "
+            f"parts' frame offsets as {offsets}, but their frames put them "
+            f"at {expected}: frames between the parts are missing, or the "
+            "offsets are wrong, and either way the frames cannot be placed"
+        )
+
+
+def _check_stack_order(slices: Sequence[Any], series: Series) -> None:
+    """Refuse a stack whose ``InStackPositionNumber`` its positions contradict,
+    or that skips a number.
+
+    *slices* are in geometric order.  The number is an ordinal from 1 that
+    orders a frame within its stack (C.7.6.16.2.2.4), so along the slice
+    normal it runs 1 to N one way or the other: the frame *i* places must
+    be numbered ``i + 1``, or ``N - i``.  One that is not is a broken object
+    --- a plane missing, or a numbering its geometry contradicts --- and
+    re-sorting it by either would be a guess.  Frames that state no number
+    are left out, and the numbers the others state are still held to that.
+    """
+    stated = [getattr(s, "InStackPositionNumber", None) for s in slices]
+    known = [(i, int(n)) for i, n in enumerate(stated) if n is not None]
+    count = len(slices)
+    if all(n == i + 1 for i, n in known) or all(n == count - i for i, n in known):
+        return
+    numbers = [n for _, n in known]
+    missing = sorted(set(range(1, count + 1)) - set(numbers))
+    if len(known) == count and len(set(numbers)) == count:
+        raise MEDH5ValidationError(
+            f"series {series.series_uid}: its frames' InStackPositionNumber are "
+            f"{sorted(numbers)}, which count a stack from 1 without a gap, so "
+            f"the frame(s) numbered {missing} are missing; a stack with a plane "
+            "missing is not a volume"
+        )
+    beyond = sorted({n for n in numbers if not 1 <= n <= count})
+    if beyond:
+        raise MEDH5ValidationError(
+            f"series {series.series_uid}: its frames' InStackPositionNumber "
+            f"include {beyond}, beyond the {count} frames of its stack, which "
+            "the number counts from 1; frames of the stack are missing, and a "
+            "stack with a plane missing is not a volume"
+        )
+    raise MEDH5ValidationError(
+        f"series {series.series_uid}: in the order their positions put them "
+        f"along the slice normal, its frames' InStackPositionNumber run "
+        f"{[None if n is None else int(n) for n in stated]}, not one way. A "
+        "stack whose numbering its geometry contradicts is a broken object, and "
+        "re-sorting it by either would be a guess"
     )
 
 
@@ -601,26 +1173,18 @@ def _decode(planned: _Planned, series: Series) -> npt.NDArray[Any]:
     """The planned slices' pixels, decoded one at a time into one volume.
 
     Reading every slice's pixel data and stacking the decoded arrays held the
-    series three times over before the first check ran.  A slice that does not
-    decode, or decodes to another shape than its header states, is refused by
-    name.
+    series three times over before the first check ran.  A multi-frame
+    object's frames are decoded one at a time too, never its whole pixel
+    array.  A slice that does not decode, or decodes to another shape than
+    its header states, is refused by name.
     """
     expected = tuple(planned.geometry["shape"][1:]) + (
         (planned.samples,) if planned.samples != 1 else ()
     )
     rescales = planned.rescales
     volume: npt.NDArray[Any] | None = None
-    for k, (path, uid) in enumerate(zip(planned.paths, planned.uids, strict=True)):
-        dataset = _dcmread(path)
-        try:
-            plane = np.asarray(dataset.pixel_array)
-        except MemoryError:  # pragma: no cover - not a property of the file
-            raise
-        except Exception as exc:  # a decoder raises whatever it raises
-            raise MEDH5ValidationError(
-                f"series {series.series_uid}: instance {uid} ({path}) could not be "
-                f"decoded ({type(exc).__name__}: {exc})"
-            ) from exc
+    for k, plane in _planes(planned, series):
+        path, uid = planned.paths[k], planned.uids[k]
         if plane.shape != expected:
             raise MEDH5ValidationError(
                 f"series {series.series_uid}: instance {uid} ({path}) decodes to a "
@@ -638,6 +1202,48 @@ def _decode(planned: _Planned, series: Series) -> npt.NDArray[Any]:
         volume[k] = plane
     assert volume is not None  # a plan has at least one file
     return volume
+
+
+def _planes(
+    planned: _Planned, series: Series
+) -> Iterable[tuple[int, npt.NDArray[Any]]]:
+    """``(slice index, decoded plane)`` for every planned slice, each once.
+
+    A classic slice is its file's pixel array; a frame is decoded alone, with
+    the frames of each file read in file order.
+    """
+    if not planned.frames:
+        for k, path in enumerate(planned.paths):
+            read = partial(getattr, _dcmread(path), "pixel_array")
+            yield k, _decoded(read, planned, k, series)
+        return
+    from pydicom.pixels import iter_pixels
+
+    files: dict[str, list[tuple[int, int]]] = {}
+    for k, (path, frame) in enumerate(zip(planned.paths, planned.frames, strict=True)):
+        assert frame is not None
+        files.setdefault(path, []).append((frame, k))
+    for path, entries in files.items():
+        entries.sort()
+        planes = iter(iter_pixels(path, indices=[frame for frame, _ in entries]))
+        for _, k in entries:
+            yield k, _decoded(partial(next, planes), planned, k, series)
+
+
+def _decoded(
+    read: Callable[[], Any], planned: _Planned, k: int, series: Series
+) -> npt.NDArray[Any]:
+    """``read()`` as an array, or a refusal naming slice *k*."""
+    try:
+        return np.asarray(read())
+    except MemoryError:  # pragma: no cover - not a property of the file
+        raise
+    except Exception as exc:  # a decoder raises whatever it raises
+        raise MEDH5ValidationError(
+            f"series {series.series_uid}: instance {planned.uids[k]} "
+            f"({planned.paths[k]}) could not be decoded "
+            f"({type(exc).__name__}: {exc})"
+        ) from exc
 
 
 def _slice_spacing(
@@ -928,6 +1534,8 @@ def _differs(first: Any, other: Any) -> bool:
         return True
     if first is None:
         return False
+    if isinstance(first, str) or isinstance(other, str):
+        return bool(first != other)
     return not np.allclose(
         np.asarray(first, dtype=np.float64),
         np.asarray(other, dtype=np.float64),
@@ -1174,6 +1782,7 @@ def _write_subject(
             writer.identity(**{ID_SOURCE: {"sample_id": source, "subject_id": source}})
             tool = writer.software("medh5", medh5.__version__)
             written = 0
+            units: set[str] = set()
             for index, occasion in enumerate(group.occasions):
                 written += _write_occasion(
                     writer,
@@ -1185,14 +1794,18 @@ def _write_subject(
                     planned[index],
                     log,
                     refused,
+                    units,
                 )
             if not written:
                 raise _NothingWritten
+            # What the rescale gives is each written image's value_units: HU
+            # for a CT unless its RescaleType names another quantity.
             log.decision(
                 "value_scale",
                 "RescaleSlope/Intercept were stored, not applied; "
-                "read(physical=True) returns HU and read() returns stored values "
-                "(§4.2)"
+                "read(physical=True) returns the rescaled values, in each image's "
+                f"value_units ({', '.join(sorted(units))}), and read() returns stored "
+                "values (§4.2)"
                 + (
                     f"; except in series {', '.join(applied)}, whose per-slice "
                     "rescale was applied (per_slice_rescale)"
@@ -1251,14 +1864,24 @@ def _refuse(
     log.warn(
         "series",
         f"{entry.modality} series {entry.series_uid} "
-        f"({entry.description or 'no description'}, {entry.n_slices} file(s)) "
+        f"({entry.description or 'no description'}, {_extent(entry)}) "
         f"was left out: {exc}",
         {
             "series_uid": entry.series_uid,
             "modality": entry.modality,
-            "files": entry.n_slices,
-        },
+            "files": len(entry.paths),
+        }
+        | ({"frames": entry.n_slices} if entry.frames else {})
+        | ({"stack": entry.stack} if entry.stack is not None else {}),
     )
+
+
+def _extent(entry: Series) -> str:
+    """How much of the source a series is, for a message."""
+    if entry.frames:
+        stack = f" (stack {entry.stack})" if entry.stack is not None else ""
+        return f"{entry.n_slices} frame(s) in {len(entry.paths)} file(s){stack}"
+    return f"{entry.n_slices} file(s)"
 
 
 def _no_sample(group: SubjectGroup, path: Path, log: ConversionReport) -> None:
@@ -1280,13 +1903,17 @@ def _write_occasion(
     planned: Sequence[tuple[Series, _Planned]],
     log: ConversionReport,
     refused: list[MEDH5ValidationError],
+    units: set[str],
 ) -> int:
-    """Write one visit's series and then its timepoint; how many were written."""
+    """Write one visit's series and then its timepoint; how many were written.
+
+    The ``value_units`` of each image written are added to *units*."""
     tp = f"tp{index}"
-    plans = {entry.series_uid: plan for entry, plan in planned}
     written: dict[str, Series] = {}
-    for entry, grid_id, image_id in _series_names([e for e, _ in planned], tp):
-        plan = plans[entry.series_uid]
+    # By position, not by SeriesInstanceUID: the stacks of one enhanced object
+    # share it.
+    names = _series_names([e for e, _ in planned], tp)
+    for (entry, plan), (_, grid_id, image_id) in zip(planned, names, strict=True):
         geometry = plan.geometry
         try:
             volume = _decode(plan, entry)
@@ -1294,6 +1921,8 @@ def _write_occasion(
             _refuse(entry, exc, log, refused)
             continue
         params: dict[str, Any] = {"slices": entry.n_slices, "modality": entry.modality}
+        if entry.stack is not None:
+            params["stack"] = entry.stack
         if plan.rescales is not None:
             params["per_slice_rescale"] = "applied"
         activity = writer.activity(
@@ -1315,13 +1944,13 @@ def _write_occasion(
             frame_uid=geometry["frame_uid"],
         )
         rescale = geometry["rescale"]
+        values = _values(entry.modality, geometry["rescale_type"])
         writer.add_image(
             image_id,
             volume,
             grid=grid_id,
             modality=entry.modality,
-            value_type="quantitative" if entry.modality == "CT" else "intensity",
-            value_units="HU" if entry.modality == "CT" else None,
+            **values,
             rescale_slope=None if rescale is None else rescale[0],
             rescale_intercept=None if rescale is None else rescale[1],
             prov=activity,
@@ -1329,6 +1958,7 @@ def _write_occasion(
         if geometry["acquisition"]:
             writer.acquisition(image_id, **geometry["acquisition"])
         written[image_id] = entry
+        units.add(values["value_units"] or "no units")
     writer.add_timepoint(
         tp,
         index=index,

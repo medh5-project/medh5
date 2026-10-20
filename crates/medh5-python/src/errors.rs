@@ -144,12 +144,16 @@ fn io_error(message: String) -> PyErr {
             let filename = filename.and_then(|literal| {
                 py.import("ast").and_then(|ast| ast.call_method1("literal_eval", (literal,))).ok().map(Bound::unbind)
             });
-            // Windows numbers its errors otherwise: the code is a Win32
-            // error, which Python maps to its errno (and subclass) when it is
-            // given as `winerror`, as Python's own `OSError` there carries it.
+            // Windows numbers its errors otherwise: a code the system worded
+            // is a Win32 error, which Python maps to its errno (and subclass)
+            // when it is given as `winerror`, as Python's own `OSError` there
+            // carries it.  A reason the system did not word is Python's own
+            // (`[Errno 2] No such file or directory`, as `open` raises it
+            // there too), and its code is already an errno.
+            let win32 = cfg!(windows) && system_worded(errno, &reason);
             match filename {
-                Some(f) if cfg!(windows) => PyOSError::new_err((errno, reason, f, errno)),
-                None if cfg!(windows) => PyOSError::new_err((errno, reason, py.None(), errno)),
+                Some(f) if win32 => PyOSError::new_err((errno, reason, f, errno)),
+                None if win32 => PyOSError::new_err((errno, reason, py.None(), errno)),
                 Some(f) => PyOSError::new_err((errno, reason, f)),
                 None => PyOSError::new_err((errno, reason)),
             }
@@ -164,10 +168,17 @@ fn io_error(message: String) -> PyErr {
     })
 }
 
+/// Whether `reason` is the system's own wording of error `code`, as
+/// [`medh5::error::os_error`] and `std::io::Error` give it.
+fn system_worded(code: i32, reason: &str) -> bool {
+    let full = std::io::Error::from_raw_os_error(code).to_string();
+    full.strip_suffix(&format!(" (os error {code})")).unwrap_or(&full) == reason
+}
+
 /// `(errno, reason, the path as a Python literal)` from `[Errno N] reason:
 /// 'path'` ([`medh5::error::os_error`]'s words), or `(errno, reason, None)`
 /// from `reason (os error N)` (an `std::io::Error`'s).
-fn errno_message(message: &str) -> Option<(i32, String, Option<String>)> {
+pub(crate) fn errno_message(message: &str) -> Option<(i32, String, Option<String>)> {
     if let Some(rest) = message.strip_prefix("[Errno ") {
         let (number, rest) = rest.split_once("] ")?;
         let errno = number.parse().ok()?;

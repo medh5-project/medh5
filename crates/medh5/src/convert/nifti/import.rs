@@ -13,8 +13,8 @@ use serde_json::{json, Map, Value};
 use super::header::Header;
 use super::read::{self, Image, LoadError, Loaded};
 use super::{
-    convert_world, float_list, Geometry, GeometryNote, ImportOptions, NiftiRead, Plane, ReadOptions, Voxels,
-    FOURTH_AXES,
+    convert_world, float_list, Geometry, GeometryNote, ImportOptions, NiftiRead, Plane, ReadOptions, SegOptions,
+    Voxels, FOURTH_AXES,
 };
 use crate::convert::grouping::{sanitize_key, sanitize_stem};
 use crate::convert::ConversionReport;
@@ -253,7 +253,7 @@ fn sidecar(path: &Path, suffix: &str) -> Option<PathBuf> {
 /// `name` less its last `cut` bytes, an ASCII suffix, then `suffix`.  On Unix
 /// the stem keeps the name's own bytes, so a name that is not UTF-8 finds its
 /// own sidecars, as 2.1.0 did through `surrogateescape`.
-fn swap_suffix(name: &OsStr, cut: usize, suffix: &str) -> OsString {
+pub(super) fn swap_suffix(name: &OsStr, cut: usize, suffix: &str) -> OsString {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -1275,7 +1275,7 @@ fn write_sample(
         }
         let value_units = lookup(&options.value_units, &name).filter(|u| !u.is_empty());
         let modality = lookup(&options.modalities, &name).unwrap_or_else(|| "OT".into());
-        let array = voxels.to_ndarray()?;
+        let array = voxels.into_ndarray()?;
         writer.add_image(
             &name,
             &array,
@@ -1336,6 +1336,213 @@ fn write_sample(
         }
     }
     Ok(())
+}
+
+/// One NIfTI file as it is stored, for a caller with conventions of its own
+/// (ITK displacement fields): the voxels in NIfTI's order, first axis
+/// fastest, in the shape the header gives; the affine a reader takes from
+/// the header (RAS, in the file's unit); the spatial unit; and the scaling
+/// the voxels are read through.  The refusals are [`read_nifti`]'s.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredNifti {
+    pub header: Header,
+    pub voxels: Voxels,
+    pub affine: [[f64; 4]; 4],
+    /// The spatial unit in the §3.5 vocabulary (millimetres where the
+    /// header states none of it).
+    pub units: String,
+    /// What the header said, where that is no unit of the vocabulary.
+    pub units_stated: Option<String>,
+    /// `scl_slope` and `scl_inter`, where they scale.
+    pub rescale: Option<(f64, f64)>,
+}
+
+/// Read one NIfTI file as it is stored (see [`StoredNifti`]).
+pub fn read_stored(path: &Path) -> Result<StoredNifti> {
+    let image = load(path)?;
+    let affine = best_affine(&image.header, &shown(path))?;
+    let voxels = image.read_voxels()?;
+    let (units, units_stated) = units(&image.header);
+    let rescale = rescale(&image);
+    Ok(StoredNifti { header: image.header, voxels, affine, units, units_stated, rescale })
+}
+
+/// Add NIfTI masks to an existing sample, checking they sit on its grid.
+///
+/// A mask must match the grid in shape *and* geometry (spacing, origin and
+/// direction, lengths compared in millimetres); a mismatch is refused unless
+/// `assume_aligned`, which takes the voxels as the grid's and records that
+/// as a guess.  The comparison is in the grid's coordinate system, which
+/// `coord_system` may only repeat.  A class `annotated_classes` names that no
+/// mask supplies was examined and found absent (§11.3).
+pub fn import_seg_nifti(
+    path: &Path,
+    masks: &[(String, PathBuf)],
+    options: &SegOptions,
+    report: &mut ConversionReport,
+) -> Result<()> {
+    report.source = masks.iter().map(|(_, p)| shown(p)).collect::<Vec<_>>().join(", ");
+    let (grid_id, target, existing) = {
+        let sample = crate::sample::reader::open_sample(path)?;
+        let grid_id = match options.grid.as_deref().filter(|g| !g.is_empty()) {
+            Some(g) => g.to_string(),
+            None => sample.reference_grid()?.grid_id,
+        };
+        let target = sample.grids()?.get(&grid_id).cloned().ok_or_else(|| Error::Key(grid_id.clone()))?;
+        (grid_id, target, sample.label_set()?.cloned())
+    };
+    let system = target.coord_system.clone();
+    if let Some(cs) = options.coord_system.as_deref().filter(|cs| *cs != system) {
+        return Err(Error::invalid(format!(
+            "grid {} is in {system}, and masks are compared with it there; coord_system={} cannot apply",
+            repr_str(&grid_id),
+            repr_str(cs)
+        )));
+    }
+    let read = ReadOptions {
+        coord_system: system.clone(),
+        transpose: options.transpose,
+        assume_geometry: options.assume_geometry,
+        plane_as_volume: options.plane_as_volume,
+        ..ReadOptions::default()
+    };
+    let spatial = target.spatial_shape();
+    let mut arrays: Vec<(String, ArrayD<bool>)> = Vec::new();
+    let mut reshaped = false;
+    for (name, mask_path) in masks {
+        let NiftiRead { voxels, geometry: geo } = read_nifti(mask_path, &read)?;
+        replay_notes(report, name, &geo);
+        reshaped = note_plane(report, name, &geo) || reshaped;
+        if geo.shape != spatial {
+            return Err(Error::coded(
+                "E405",
+                format!(
+                    "mask {} has shape {}, but grid {} is {}",
+                    repr_str(name),
+                    repr_int_tuple(&geo.shape),
+                    repr_str(&grid_id),
+                    repr_int_tuple(&spatial)
+                ),
+            ));
+        }
+        let mut reference = geo.clone();
+        reference.spacing = target.spacing.clone();
+        reference.origin = target.origin.clone();
+        reference.direction = target.direction.rows().into_iter().map(|r| r.to_vec()).collect();
+        reference.units = target.units.clone();
+        if let Some(key) = geometry_mismatch(&reference, &geo) {
+            if !options.assume_aligned {
+                return Err(Error::invalid(format!(
+                    "mask {} disagrees with grid {} on {key}: it was drawn on another grid, and taking its voxels \
+                     as this one's would put the labels where nobody drew them --- resample it onto the grid first, \
+                     or pass assume_aligned=True if its header is what is wrong",
+                    repr_str(name),
+                    repr_str(&grid_id)
+                )));
+            }
+            report.guess(
+                "geometry",
+                format!(
+                    "mask {} disagrees with grid {} on {key}; its voxels were taken as the grid's because \
+                     assume_aligned=True",
+                    repr_str(name),
+                    repr_str(&grid_id)
+                ),
+                json!({
+                    "mask": name,
+                    "field": key,
+                    "mask_value": geo.to_json()[key],
+                    "grid_value": reference.to_json()[key],
+                }),
+            );
+        }
+        let mask = voxels.nonzero(geo.rescale)?;
+        // A name given twice is one mask, the later, where the first stood.
+        match arrays.iter_mut().find(|(n, _)| n == name) {
+            Some(slot) => slot.1 = mask,
+            None => arrays.push((name.clone(), mask)),
+        }
+    }
+
+    let label_set = match &existing {
+        Some(set) => set.clone(),
+        None => {
+            let mut names: Vec<&str> = arrays.iter().map(|(n, _)| n.as_str()).collect();
+            names.sort_unstable();
+            mint_label_set(&names, report)?
+        }
+    };
+    let missing: Vec<&str> =
+        arrays.iter().map(|(n, _)| n.as_str()).filter(|n| class_of(&label_set, n).is_none()).collect();
+    if !missing.is_empty() {
+        return Err(Error::coded(
+            "E402",
+            format!(
+                "the sample's label set has no class(es) {}; add them or convert without an existing label set",
+                repr_list(&missing)
+            ),
+        ));
+    }
+    let (label_set, examined) =
+        examined_classes(&options.annotated_classes, label_set, existing.is_none(), report, "the masks")?;
+    let mut resolved: Vec<(i64, ArrayD<bool>)> = Vec::new();
+    for (name, mask) in arrays {
+        let id = class_of(&label_set, &name).expect("every mask has a class").id;
+        match resolved.iter_mut().find(|(k, _)| *k == id) {
+            Some(slot) => slot.1 = mask,
+            None => resolved.push((id, mask)),
+        }
+    }
+
+    let mut writer = crate::sample::writer::amend(path, None)?;
+    let written = (|| -> Result<String> {
+        if existing.is_none() {
+            writer.label_set(label_set);
+        }
+        let tool = writer.software("medh5", Some(crate::VERSION), Map::new())?;
+        let mut fields = Map::new();
+        fields.insert("tool".into(), json!("medh5.io.nifti.import_seg_nifti"));
+        // Params only when a plane was reshaped: an import that reshaped
+        // none records the activity it always did.
+        if reshaped {
+            fields.insert("params".into(), json!({"plane_as_volume": true}));
+        }
+        let activity = writer.activity("import", Some(&tool.id), None, fields)?;
+        let source = SegmentationSource::Masks(resolved.into_iter().map(|(id, m)| (ClassKey::Id(id), m)).collect());
+        let (kind, _) = writer.add_segmentation(
+            &options.ann_id,
+            &grid_id,
+            source,
+            SegmentationOptions {
+                encoding: Some("auto".into()),
+                common: AnnotationOptions {
+                    annotated_classes: examined,
+                    closure: Some("explicit".into()),
+                    prov: Some(activity.id.clone()),
+                    task: Some("segmentation".into()),
+                    ..AnnotationOptions::default()
+                },
+                ..SegmentationOptions::default()
+            },
+        )?;
+        Ok(kind)
+    })();
+    match written {
+        Ok(kind) => {
+            report.decision("encoding", format!("masks were stored as {}", repr_str(&kind)), json!({"kind": kind}));
+            if let Err(err) = writer.commit(true) {
+                writer.abort();
+                return Err(err);
+            }
+            report.outputs.push(shown(path));
+            Ok(())
+        }
+        Err(err) => {
+            writer.abort();
+            Err(err)
+        }
+    }
 }
 
 #[cfg(test)]

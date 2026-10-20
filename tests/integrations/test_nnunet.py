@@ -12,7 +12,7 @@ import pytest
 
 import medh5
 from medh5.errors import MEDH5ValidationError
-from tests.helpers import group_contents
+from tests.helpers import disk_full_while, group_contents
 from tests.kits import Numbered, Organs
 
 nib = pytest.importorskip("nibabel")
@@ -1544,31 +1544,10 @@ class TestTestCases:
         assert written.exists()
 
 
-def _disk_full_while(monkeypatch, owner: object, name: str) -> None:
-    """Make *owner*'s *name* run on a disk with room for 8 bytes a file: the
-    write fails part way through, as on a full disk (POSIX only)."""
-    import resource
-    import signal
-
-    real = getattr(owner, name)
-
-    def limited(*args, **kwargs):
-        limit = resource.getrlimit(resource.RLIMIT_FSIZE)
-        handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
-        resource.setrlimit(resource.RLIMIT_FSIZE, (8, limit[1]))
-        try:
-            return real(*args, **kwargs)
-        finally:
-            resource.setrlimit(resource.RLIMIT_FSIZE, limit)
-            signal.signal(signal.SIGXFSZ, handler)
-
-    monkeypatch.setattr(owner, name, limited)
-
-
 def _dataset_json_disk_full(monkeypatch) -> None:
     """The writes of `dataset.json`, whichever writes it, fail part way."""
-    _disk_full_while(monkeypatch, medh5._core, "write_atomic")
-    _disk_full_while(monkeypatch, Path, "write_text")
+    disk_full_while(monkeypatch, medh5._core, "write_atomic")
+    disk_full_while(monkeypatch, Path, "write_text")
 
 
 def _temporaries(top: Path) -> list[str]:
@@ -1726,13 +1705,12 @@ class TestReplace:
         assert self._tree(tmp_path) == before, "nothing was written"
         assert self._hidden(out) == []
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="a file size limit")
     def test_S14_4_an_interrupted_replace_leaves_each_file_whole(
         self, tmp_path: Path, monkeypatch
     ):
-        """Stopped on its first file, a replace leaves the old dataset as it
-        was; no temporary is left either way."""
-        import nibabel
-
+        """Stopped part way through its first file, a replace leaves the old
+        dataset as it was; no temporary is left either way."""
         from medh5.io.nnunetv2 import to_nnunetv2
 
         a, b = (TestReexport._case(tmp_path / f"s/{n}.medh5", n) for n in "ab")
@@ -1740,13 +1718,8 @@ class TestReplace:
         to_nnunetv2([a, b], out, dataset_name="D1")
         (out / "D1" / "splits_final.json").write_text("[]", encoding="utf-8")
         before = TestReexport._files(out / "D1")
-
-        def crashed(image, filename, *args, **kwargs):
-            Path(filename).write_bytes(b"half")
-            raise OSError("interrupted")
-
-        monkeypatch.setattr(nibabel, "save", crashed)
-        with pytest.raises(OSError, match="interrupted"):
+        disk_full_while(monkeypatch, medh5._core, "nifti_write")
+        with pytest.raises(OSError):
             to_nnunetv2([a], out, dataset_name="D1", replace=True)
         monkeypatch.undo()
         assert TestReexport._files(out / "D1") == before

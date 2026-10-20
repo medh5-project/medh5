@@ -19,14 +19,20 @@
 
 pub mod header;
 mod import;
+mod qform;
 mod read;
+mod write;
 
 use ndarray::Array2;
 use serde_json::{json, Value};
 
 pub use header::{Element, Header, Version, VoxOffset};
-pub use import::{from_nifti, grid_axes, read_nifti};
+pub use import::{from_nifti, grid_axes, import_seg_nifti, read_nifti, read_stored, StoredNifti};
 pub use read::Voxels;
+pub use write::{
+    embed_plane, for_export, nifti_target, sidecar_path, to_nifti, write_field, write_nifti, ExportOptions,
+    WriteOptions, NIFTI_SUFFIXES,
+};
 
 use crate::array::NdArray;
 use crate::json::{num, repr_str};
@@ -223,6 +229,83 @@ impl ImportOptions {
     }
 }
 
+/// How [`import_seg_nifti`] adds masks to a sample.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct SegOptions {
+    /// The annotation's id.
+    pub ann_id: String,
+    /// The grid the masks sit on; by default the reference grid.
+    pub grid: Option<String>,
+    /// May only repeat the grid's coordinate system.
+    pub coord_system: Option<String>,
+    pub transpose: bool,
+    /// Which classes were looked for (§11.3).
+    pub annotated_classes: Annotated,
+    /// Take a mask's voxels as the grid's when their geometries disagree,
+    /// recording that as a guess: for a header known to be wrong.
+    pub assume_aligned: bool,
+    pub assume_geometry: bool,
+    pub plane_as_volume: bool,
+}
+
+impl Default for SegOptions {
+    fn default() -> Self {
+        SegOptions {
+            ann_id: "seg".into(),
+            grid: None,
+            coord_system: None,
+            transpose: true,
+            annotated_classes: Annotated::AllGiven,
+            assume_aligned: false,
+            assume_geometry: false,
+            plane_as_volume: false,
+        }
+    }
+}
+
+impl SegOptions {
+    pub fn with_ann_id(mut self, value: impl Into<String>) -> Self {
+        self.ann_id = value.into();
+        self
+    }
+
+    pub fn with_grid(mut self, value: impl Into<String>) -> Self {
+        self.grid = Some(value.into());
+        self
+    }
+
+    pub fn with_coord_system(mut self, value: impl Into<String>) -> Self {
+        self.coord_system = Some(value.into());
+        self
+    }
+
+    pub fn with_transpose(mut self, value: bool) -> Self {
+        self.transpose = value;
+        self
+    }
+
+    pub fn with_annotated_classes(mut self, value: Annotated) -> Self {
+        self.annotated_classes = value;
+        self
+    }
+
+    pub fn with_assume_aligned(mut self, value: bool) -> Self {
+        self.assume_aligned = value;
+        self
+    }
+
+    pub fn with_assume_geometry(mut self, value: bool) -> Self {
+        self.assume_geometry = value;
+        self
+    }
+
+    pub fn with_plane_as_volume(mut self, value: bool) -> Self {
+        self.plane_as_volume = value;
+        self
+    }
+}
+
 /// What the reader had to decide from an ambiguous header.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
@@ -368,35 +451,34 @@ impl Voxels {
         format!("{order}{}", self.element.numpy_code())
     }
 
-    /// The bytes in this machine's byte order.
-    pub fn native_bytes(&self) -> Vec<u8> {
-        if !self.swapped() {
-            return self.bytes.clone();
-        }
-        let unit = self.element.swap_unit();
-        let mut out = self.bytes.clone();
-        for chunk in out.chunks_exact_mut(unit) {
-            chunk.reverse();
-        }
-        out
+    /// Each `N`-byte unit in this machine's byte order, read from the stored
+    /// bytes as it is asked for, not from a swapped copy of them all.
+    fn units<const N: usize>(&self) -> impl Iterator<Item = [u8; N]> + '_ {
+        let swap = self.swapped();
+        self.bytes.chunks_exact(N).map(move |c| {
+            let mut unit: [u8; N] = c.try_into().expect("a whole unit");
+            if swap {
+                unit.reverse();
+            }
+            unit
+        })
     }
 
     /// The voxels as an engine array, or the refusal the writer gives a
-    /// type it cannot store (complex, RGB).
-    pub fn to_ndarray(&self) -> Result<NdArray> {
+    /// type it cannot store (complex, RGB). Consumed: the stored bytes are
+    /// decoded straight into the array and freed, so an image is held
+    /// twice at most, while it is decoded.
+    pub fn into_ndarray(self) -> Result<NdArray> {
         use header::Element as E;
         let shape = ndarray::IxDyn(&self.shape);
-        let bytes = self.native_bytes();
         macro_rules! typed {
             ($t:ty, $variant:ident) => {{
-                let size = std::mem::size_of::<$t>();
-                let values: Vec<$t> =
-                    bytes.chunks_exact(size).map(|c| <$t>::from_ne_bytes(c.try_into().expect("an element"))).collect();
+                let values: Vec<$t> = self.units().map(<$t>::from_ne_bytes).collect();
                 NdArray::$variant(ndarray::ArrayD::from_shape_vec(shape, values)?)
             }};
         }
         Ok(match self.element {
-            E::U8 => typed!(u8, U8),
+            E::U8 => NdArray::U8(ndarray::ArrayD::from_shape_vec(shape, self.bytes)?),
             E::I8 => typed!(i8, I8),
             E::I16 => typed!(i16, I16),
             E::U16 => typed!(u16, U16),
@@ -415,53 +497,48 @@ impl Voxels {
         })
     }
 
-    /// Each voxel as a number: the real part of a complex one.
-    fn values(&self) -> Vec<f64> {
+    /// Each voxel's parts as numbers: one for a real voxel, the real and
+    /// imaginary parts of a complex one.
+    fn parts(&self) -> Box<dyn Iterator<Item = (f64, f64)> + '_> {
         use header::Element as E;
-        let bytes = self.native_bytes();
-        let size = self.element.itemsize();
-        bytes
-            .chunks_exact(size)
-            .map(|c| match self.element {
-                E::U8 => f64::from(c[0]),
-                E::I8 => f64::from(c[0] as i8),
-                E::I16 => f64::from(i16::from_ne_bytes([c[0], c[1]])),
-                E::U16 => f64::from(u16::from_ne_bytes([c[0], c[1]])),
-                E::I32 => f64::from(i32::from_ne_bytes(c[..4].try_into().unwrap())),
-                E::U32 => f64::from(u32::from_ne_bytes(c[..4].try_into().unwrap())),
-                E::I64 => i64::from_ne_bytes(c[..8].try_into().unwrap()) as f64,
-                E::U64 => u64::from_ne_bytes(c[..8].try_into().unwrap()) as f64,
-                E::F32 | E::C64 => f64::from(f32::from_ne_bytes(c[..4].try_into().unwrap())),
-                E::F64 | E::C128 => f64::from_ne_bytes(c[..8].try_into().unwrap()),
-                E::Rgb24 | E::Rgba32 => f64::from(u8::from(c.iter().any(|b| *b != 0))),
-            })
-            .collect()
+        let real = |v: f64| (v, 0.0);
+        match self.element {
+            E::U8 => Box::new(self.bytes.iter().map(move |b| real(f64::from(*b)))),
+            E::I8 => Box::new(self.bytes.iter().map(move |b| real(f64::from(*b as i8)))),
+            E::I16 => Box::new(self.units().map(move |u| real(f64::from(i16::from_ne_bytes(u))))),
+            E::U16 => Box::new(self.units().map(move |u| real(f64::from(u16::from_ne_bytes(u))))),
+            E::I32 => Box::new(self.units().map(move |u| real(f64::from(i32::from_ne_bytes(u))))),
+            E::U32 => Box::new(self.units().map(move |u| real(f64::from(u32::from_ne_bytes(u))))),
+            E::I64 => Box::new(self.units().map(move |u| real(i64::from_ne_bytes(u) as f64))),
+            E::U64 => Box::new(self.units().map(move |u| real(u64::from_ne_bytes(u) as f64))),
+            E::F32 => Box::new(self.units().map(move |u| real(f64::from(f32::from_ne_bytes(u))))),
+            E::F64 => Box::new(self.units().map(move |u| real(f64::from_ne_bytes(u)))),
+            // Each part is swapped on its own: the swap unit is a part.
+            E::C64 => {
+                let mut it = self.units().map(|u| f64::from(f32::from_ne_bytes(u)));
+                Box::new(std::iter::from_fn(move || Some((it.next()?, it.next()?))))
+            }
+            E::C128 => {
+                let mut it = self.units().map(f64::from_ne_bytes);
+                Box::new(std::iter::from_fn(move || Some((it.next()?, it.next()?))))
+            }
+            E::Rgb24 | E::Rgba32 => Box::new(
+                self.bytes
+                    .chunks_exact(self.element.itemsize())
+                    .map(move |c| real(f64::from(u8::from(c.iter().any(|b| *b != 0))))),
+            ),
+        }
     }
 
     /// The non-zero **physical** voxels: stored values, or under a rescale
-    /// the values it gives (stored `1` under intercept `-1` is `0`).
+    /// the values it gives (stored `1` under intercept `-1` is `0`). A
+    /// complex voxel is non-zero when either part is, scaled or not.
     pub fn nonzero(&self, rescale: Option<(f64, f64)>) -> Result<ndarray::ArrayD<bool>> {
-        use header::Element as E;
-        let set: Vec<bool> = match (rescale, self.element) {
-            (None, E::C64 | E::C128) => {
-                let half = self.element.itemsize() / 2;
-                let bytes = self.native_bytes();
-                bytes
-                    .chunks_exact(self.element.itemsize())
-                    .map(|c| {
-                        let part = |at: usize| {
-                            if half == 4 {
-                                f64::from(f32::from_ne_bytes(c[at..at + 4].try_into().unwrap()))
-                            } else {
-                                f64::from_ne_bytes(c[at..at + 8].try_into().unwrap())
-                            }
-                        };
-                        part(0) != 0.0 || part(half) != 0.0
-                    })
-                    .collect()
+        let set: Vec<bool> = match rescale {
+            None => self.parts().map(|(re, im)| re != 0.0 || im != 0.0).collect(),
+            Some((slope, inter)) => {
+                self.parts().map(|(re, im)| re * slope + inter != 0.0 || im * slope != 0.0).collect()
             }
-            (None, _) => self.values().into_iter().map(|v| v != 0.0).collect(),
-            (Some((slope, inter)), _) => self.values().into_iter().map(|v| v * slope + inter != 0.0).collect(),
         };
         Ok(ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&self.shape), set)?)
     }
@@ -508,4 +585,42 @@ pub fn convert_world(affine: &Array2<f64>, source: &str, target: &str) -> Result
 pub(crate) fn float_list(values: &[f64]) -> String {
     let items: Vec<String> = values.iter().map(|v| crate::json::py_float(*v)).collect();
     format!("[{}]", items.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn voxels(element: Element, big_endian: bool, bytes: Vec<u8>) -> Voxels {
+        let n = bytes.len() / element.itemsize();
+        Voxels { element, big_endian, shape: vec![n], bytes }
+    }
+
+    #[test]
+    fn s02_5_voxels_decode_in_either_byte_order() {
+        let values = [1i16, -2, 300];
+        for big in [false, true] {
+            let bytes = values.iter().flat_map(|v| if big { v.to_be_bytes() } else { v.to_le_bytes() }).collect();
+            match voxels(Element::I16, big, bytes).into_ndarray().unwrap() {
+                NdArray::I16(a) => assert_eq!(a.as_slice().unwrap(), &values),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn s02_5_a_scaled_complex_mask_keeps_its_imaginary_voxels() {
+        // (0, 0), (0, 1), (1, 0): under slope 2 the second is 0 + 2i, which
+        // is a voxel; dropping the imaginary part lost it.
+        let parts = [0f32, 0.0, 0.0, 1.0, 1.0, 0.0];
+        for big in [false, true] {
+            let bytes = parts.iter().flat_map(|v| if big { v.to_be_bytes() } else { v.to_le_bytes() }).collect();
+            let v = voxels(Element::C64, big, bytes);
+            for rescale in [None, Some((2.0, 0.0))] {
+                assert_eq!(v.nonzero(rescale).unwrap().as_slice().unwrap(), &[false, true, true], "{rescale:?}");
+            }
+            // An intercept moves only the real part.
+            assert_eq!(v.nonzero(Some((1.0, -1.0))).unwrap().as_slice().unwrap(), &[true, true, false]);
+        }
+    }
 }

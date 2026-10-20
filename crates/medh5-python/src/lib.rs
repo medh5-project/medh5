@@ -31,6 +31,7 @@ pub mod integrity;
 pub mod io;
 pub mod labels;
 pub mod misc;
+pub mod nifti;
 pub mod nodes;
 pub mod preflight;
 pub mod reader;
@@ -76,6 +77,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     curation_tools::register(m)?;
     sampling::register(m)?;
     io::register(m)?;
+    nifti::register(m)?;
     clinical::register(m)?;
     preflight::register(m)?;
     files::register(m)?;

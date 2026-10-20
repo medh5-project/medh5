@@ -3146,16 +3146,18 @@ medh5.io.Note.kind	field
 medh5.io.Note.message	field
 medh5.io.Note.severity	field
 medh5.io.Note.to_json	method	()
-medh5.io.Series	class	(series_uid, study_uid, modality, patient_id, study_date, paths=<factory>, description='', frame_uid=None, birth_date=None, sex=None) bases=
+medh5.io.Series	class	(series_uid, study_uid, modality, patient_id, study_date, paths=<factory>, description='', frame_uid=None, birth_date=None, sex=None, frames=<factory>, stack=None) bases=
 medh5.io.Series.birth_date	field
 medh5.io.Series.description	field
 medh5.io.Series.frame_uid	field
+medh5.io.Series.frames	field
 medh5.io.Series.modality	field
 medh5.io.Series.n_slices	property
 medh5.io.Series.paths	field
 medh5.io.Series.patient_id	field
 medh5.io.Series.series_uid	field
 medh5.io.Series.sex	field
+medh5.io.Series.stack	field
 medh5.io.Series.study_date	field
 medh5.io.Series.study_uid	field
 medh5.io.Series.to_json	method	()
@@ -3185,16 +3187,18 @@ medh5.io.convert_world	function	(affine, *, source, target)
 medh5.io.dicom	module
 medh5.io.dicom.SPACING_TOLERANCE	constant	float
 medh5.io.dicom.STORED_TAGS	constant	tuple
-medh5.io.dicom.Series	class	(series_uid, study_uid, modality, patient_id, study_date, paths=<factory>, description='', frame_uid=None, birth_date=None, sex=None) bases=
+medh5.io.dicom.Series	class	(series_uid, study_uid, modality, patient_id, study_date, paths=<factory>, description='', frame_uid=None, birth_date=None, sex=None, frames=<factory>, stack=None) bases=
 medh5.io.dicom.Series.birth_date	field
 medh5.io.dicom.Series.description	field
 medh5.io.dicom.Series.frame_uid	field
+medh5.io.dicom.Series.frames	field
 medh5.io.dicom.Series.modality	field
 medh5.io.dicom.Series.n_slices	property
 medh5.io.dicom.Series.paths	field
 medh5.io.dicom.Series.patient_id	field
 medh5.io.dicom.Series.series_uid	field
 medh5.io.dicom.Series.sex	field
+medh5.io.dicom.Series.stack	field
 medh5.io.dicom.Series.study_date	field
 medh5.io.dicom.Series.study_uid	field
 medh5.io.dicom.Series.to_json	method	()

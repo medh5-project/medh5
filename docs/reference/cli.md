@@ -7,13 +7,15 @@ medh5 COMMAND [args] [--json]
 The command line is a native program over the format engine. `pip install
 medh5` puts it on the path; so do `cargo install --locked medh5-cli`, the binaries
 attached to every GitHub Release, and `brew install medh5-project/medh5/medh5`. Each is
-the same code, with the same output and exit codes. The converters
-(`medh5 convert …`) and the dataloader row of `medh5 bench` are Python
-integrations: the standalone binary runs them through a Python that has the
-package installed (`python3` — `python` on Windows — or the interpreter
-`MEDH5_PYTHON` names). That package must be a medh5 2.x; when it is not, or
-will not import, the command says why — the version found, or the last line
-Python printed — and what to install. `medh5 migrate` is native.
+the same code, with the same output and exit codes. `medh5 migrate` and the
+NIfTI converters (`from-nifti`, `import-seg-nifti`, `to-nifti`) are native,
+so the standalone binary runs them without Python. The other converters
+(`medh5 convert …` for DICOM, DICOM SEG, RTSTRUCT, ITK and nnU-Net) and the
+dataloader row of `medh5 bench` are Python integrations: the standalone binary
+runs them through a Python that has the package installed (`python3` —
+`python` on Windows — or the interpreter `MEDH5_PYTHON` names). That package
+must be a medh5 2.x; when it is not, or will not import, the command says why —
+the version found, or the last line Python printed — and what to install.
 
 Exit codes are Unix-conventional: **0** success, **1** a handled error or a
 failed check, **2** a usage error. Every inspection command takes `--json` and

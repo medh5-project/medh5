@@ -87,6 +87,9 @@ dev = [
   # find; the package itself never imports it.
   "h5py>=3.13",
   "hdf5plugin>=4.1",
+  # The tests write NIfTI inputs with nibabel, the reader the engine's
+  # converter is checked against; the package itself never imports it.
+  "nibabel>=5",
 ]
 # Reading and writing medh5 files with h5py directly, as any HDF5 tool can:
 # hdf5plugin carries the Blosc2 filter the default profiles use.
@@ -103,9 +106,9 @@ monai = [
   "monai>=1.3",
   "torch>=2.0",
 ]
-nifti = [
-  "nibabel>=5",
-]
+# Empty since 2.2.0, which reads and writes NIfTI in the engine; kept so that
+# `medh5[nifti]` still installs.
+nifti = []
 dicom = [
   # 3.0: writing an RTSTRUCT asks `save_as` to enforce the DICOM file format;
   # 3.0.1, because highdicom requires it and the floor is installed together.

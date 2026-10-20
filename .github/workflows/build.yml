@@ -107,10 +107,11 @@ jobs:
           medh5 --version
           medh5 conformance build corpus
           medh5 conformance run corpus
-      # The converters are the Python package's: the standalone binary runs them
-      # through a Python that has it (`MEDH5_PYTHON`, or `python3`/`python`),
-      # and says what to install when there is none.  Out of the checkout, whose
-      # `medh5/` has no compiled engine and would shadow the installed one.
+      # The converters but NIfTI's are the Python package's: the standalone
+      # binary runs them through a Python that has it (`MEDH5_PYTHON`, or
+      # `python3`/`python`), and says what to install when there is none.  Out
+      # of the checkout, whose `medh5/` has no compiled engine and would shadow
+      # the installed one.
       - name: The binary hands the converters to the wheel's Python
         if: ${{ !endsWith(inputs.target, '-musl') }}
         shell: bash
@@ -120,15 +121,23 @@ jobs:
           cd "$RUNNER_TEMP"
           # Only the Python package says this, and it needs none of the extras.
           status=0
-          MEDH5_PYTHON=python "$exe" convert from-nifti x.medh5 --image CT 2> bridged.log || status=$?
+          MEDH5_PYTHON=python "$exe" convert from-dicom . x.medh5 --report . 2> bridged.log || status=$?
           cat bridged.log
           [[ $status == 1 ]]
-          grep -F -e "--image expects NAME=VALUE" bridged.log
+          grep -F "is a directory; name the file to write" bridged.log
           status=0
-          MEDH5_PYTHON=/nonexistent "$exe" convert from-nifti x.medh5 --image CT 2> missing.log || status=$?
+          MEDH5_PYTHON=/nonexistent "$exe" convert from-dicom . x.medh5 --report . 2> missing.log || status=$?
           cat missing.log
           [[ $status == 1 ]]
           grep -F "MEDH5_PYTHON" missing.log
+          # NIfTI is converted by the binary itself (W22-02), with no Python.
+          status=0
+          MEDH5_PYTHON=/nonexistent "$exe" convert from-nifti x.medh5 --image CT 2> native.log || status=$?
+          cat native.log
+          [[ $status == 1 ]]
+          grep -F -e "--image expects NAME=VALUE" native.log
+          # Not `! grep`: `set -e` ignores a command whose status is negated.
+          if grep -F "MEDH5_PYTHON" native.log; then exit 1; fi
           # The clinical importers too (W21-12): the refusal is the package's.
           status=0
           MEDH5_PYTHON=python "$exe" clinical augment x.medh5 --from-fhir b.json \

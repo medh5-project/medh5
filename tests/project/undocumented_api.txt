@@ -305,12 +305,10 @@ medh5.integrity.verify_object
 medh5.integrity.verify_root
 medh5.io.ConversionReport
 medh5.io.Note
-medh5.io.Series
 medh5.io.SubjectGroup
 medh5.io.convert_world
 medh5.io.dicom.SPACING_TOLERANCE
 medh5.io.dicom.STORED_TAGS
-medh5.io.dicom.Series
 medh5.io.dicom.require_pydicom
 medh5.io.dicom_seg.SLICE_TOLERANCE
 medh5.io.dicom_seg.place_frames

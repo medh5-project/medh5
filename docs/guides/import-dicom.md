@@ -150,9 +150,25 @@ DICOM SEG that `read_dicom_seg` stacks.
 subject left with none gets no file, and a warning (`subject`) says so. Only
 when no series at all can be imported is the import refused. Objects that are
 not images — the RT Dose grid beside every radiotherapy export — are skipped
-with a note, and multi-frame objects with a warning: this importer reads
-classic series, a file per slice. A warning fails the command's exit status,
-so a partial import is never taken for a complete one.
+with a note, and multi-frame objects other than enhanced CT, MR and PET with
+a warning. A warning fails the command's exit status, so a partial import is
+never taken for a complete one.
+
+**Enhanced objects are read frame by frame.** An Enhanced or legacy-converted
+CT, MR or PET object holds every slice as a frame, with each frame's position,
+orientation, pixel spacing and rescale in its functional groups. Its frames
+are split into stacks — by `StackID` and by any dimension of its
+`DimensionIndexSequence` that tells stacks apart, such as a temporal
+position — and each stack is imported as the classic series it would have
+been, under the same checks: placed by its frames' positions, refused when
+they do not form a regular grid, and decoded one frame at a time. Two stacks
+of one object become two images (`CT_1_tp0`, `CT_2_tp0`). A frame stating no
+position is refused, never sorted by guess, and so is a stack whose
+`InStackPositionNumber` its positions contradict or that skips a number.
+Frames stating different rescales follow `--per-slice-rescale`, as slices
+do. A concatenation (one object split across instances) is joined by its
+`ConcatenationUID`, and refused when a part is missing. Enhanced ultrasound
+volumes are still skipped with a warning.
 
 One thing is assumed rather than refused, and the report records it as a guess
 (`slice_spacing`): a single-slice series that states no `SliceThickness` has no
