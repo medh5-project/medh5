@@ -86,13 +86,20 @@ unchanged: what was looked for on the source was looked for on the copy.
 - Points, keypoints and meshes map exactly through the same mapping as the
   voxels.
 - A box stays a box only where the mapping keeps the axes, and a contour only
-  where its plane lands on a grid plane. Anything else cannot be carried
-  exactly, and the whole resample is refused rather than approximated.
+  where its plane lands on a grid plane. A classification of slices or of a
+  region is carried only onto the source grid's own voxels. Anything else
+  cannot be carried exactly, and the whole resample is refused rather than
+  approximated.
 
 Target voxels outside the source were never examined, so background there would
 be a negative nobody found. They become the ignore region (§7.7) of every
 carried mask: its own ignore mask carried and widened, or a new
 `<output>_ignore` mask.
+
+An image goes a target chunk at a time. A carried mask is built whole on the
+target grid, in its own stored type, before it is written, as an image's
+`valid_mask` is; where one mask of the target is more than memory holds, pass
+`--no-annotations`.
 
 ```python
 from medh5.transforms import resample

@@ -487,8 +487,12 @@ fn prepare(sample: &Sample, plan: &ResamplePlan) -> Result<Prepared> {
     let sources: IndexMap<String, Grid> =
         jobs.iter().map(|job| (job.source_grid.grid_id.clone(), job.source_grid.clone())).collect();
     let excluded: HashSet<String> = jobs.iter().filter_map(|job| job.source_mask.clone()).collect();
-    taken.extend(jobs.iter().filter_map(|job| job.mask.clone()));
-    let carry = annotations::prepare(sample, plan, &target, &mappings, &sources, &excluded, &suffix, &mut taken)?;
+    // Images and annotations are separate groups, so an annotation may share
+    // an image's id; what it may not share is another annotation's, the
+    // outputs' valid masks among them.
+    let mut annotation_ids: HashSet<String> = jobs.iter().filter_map(|job| job.mask.clone()).collect();
+    let carry =
+        annotations::prepare(sample, plan, &target, &mappings, &sources, &excluded, &suffix, &mut annotation_ids)?;
     Ok(Prepared { target, new_grid, jobs, mappings, carry })
 }
 

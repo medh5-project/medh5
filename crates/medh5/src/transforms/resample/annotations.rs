@@ -548,6 +548,8 @@ fn check(annotation: &Annotation, kind: &str, geometry: &Geometry, on_grid: bool
             Ok(())
         }
         "classification" => match attrs::get_str(&annotation.group, "scope")?.as_deref() {
+            // On the same voxels, a slice or a region is still itself.
+            Some("slice" | "roi") if same_voxels(geometry, target) => Ok(()),
             Some(scope @ ("slice" | "roi")) => fail(&format!(
                 "its scope is a {scope} of grid {}, which the target does not have",
                 repr_str(&geometry.source.grid_id)
@@ -589,6 +591,16 @@ fn check_slices(
 }
 
 /// The axis along which box `i` has no extent (`lo == hi`), if one.
+/// Whether the target is the source grid's voxels: the same grid, or one of
+/// its shape whose index map is the identity.
+fn same_voxels(geometry: &Geometry, target: &Grid) -> bool {
+    geometry.source.grid_id == target.grid_id
+        || (geometry.source.spatial_shape() == target.spatial_shape()
+            && geometry.index.as_ref().is_some_and(|m| {
+                m.indexed_iter().all(|((i, j), v)| (v - if i == j { 1.0 } else { 0.0 }).abs() <= 1e-9)
+            }))
+}
+
 fn degenerate_axis(boxes: &ArrayD<f64>, i: usize) -> Option<usize> {
     let s = boxes.shape()[1];
     (0..s).find(|k| boxes[[i, *k, 0]] == boxes[[i, *k, 1]])
@@ -609,14 +621,53 @@ fn orthogonal(m: &Array2<f64>) -> bool {
     true
 }
 
-/// The target voxels' nearest source voxels, and which lie outside it.
-struct Nearest {
-    /// Per target voxel in C order, the flat index of its nearest source
-    /// voxel; `u32::MAX` outside the source.
-    index: Vec<u32>,
+/// The nearest source voxel of each target voxel, found a block of the
+/// target at a time and never held whole: a target-wide index would cost as
+/// much as the carried annotation itself.
+struct Nearest<'a> {
+    mapping: &'a Mapping,
+    /// The source's spatial shape.
+    source: Vec<usize>,
     /// The target's spatial shape.
     shape: Vec<usize>,
+    /// The target voxels outside the source, when there are any.
     outside: Option<ArrayD<bool>>,
+}
+
+impl<'a> Nearest<'a> {
+    fn new(mapping: &'a Mapping, source: &[usize], target: &[usize]) -> Result<Nearest<'a>> {
+        let mut near = Nearest { mapping, source: source.to_vec(), shape: target.to_vec(), outside: None };
+        let mut outside: Option<ArrayD<bool>> = None;
+        near.each(|t, at| {
+            if at.is_none() {
+                outside
+                    .get_or_insert_with(|| ArrayD::from_elem(IxDyn(target), false))
+                    .as_slice_mut()
+                    .expect("standard")[t] = true;
+            }
+        })?;
+        near.outside = outside;
+        Ok(near)
+    }
+
+    /// `visit(target, source)` for every target voxel, as flat C-order
+    /// indices, a block at a time; `source` is `None` outside the source.
+    fn each(&self, mut visit: impl FnMut(usize, Option<usize>)) -> Result<()> {
+        for block in blocks(&self.shape, &block_shape(&self.shape)) {
+            let (indices, _) = block_indices(&block);
+            let points = self.mapping.map(&indices)?;
+            for (row, point) in points.outer_iter().enumerate() {
+                let t = flat_index(indices.row(row).iter().map(|v| *v as usize), &self.shape);
+                let at = inside(point, &self.source).then(|| {
+                    let voxel =
+                        point.iter().zip(&self.source).map(|(v, m)| ((v + 0.5).floor().max(0.0) as usize).min(m - 1));
+                    flat_index(voxel, &self.source)
+                });
+                visit(t, at);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The block shape over `shape` that holds at most [`BLOCK_VOXELS`].
@@ -654,37 +705,6 @@ fn inside(point: ndarray::ArrayView1<f64>, shape: &[usize]) -> bool {
     point.iter().zip(shape).all(|(v, m)| *v >= -0.5 && *v <= *m as f64 - 0.5)
 }
 
-fn nearest(mapping: &Mapping, source: &[usize], target: &[usize]) -> Result<Nearest> {
-    let total: usize = source.iter().product();
-    if total >= u32::MAX as usize {
-        return Err(Error::invalid(format!(
-            "a source grid of {total} voxels is more than a resample carries annotations from; resample without \
-             annotations (--no-annotations, annotations=False)"
-        )));
-    }
-    let voxels: usize = target.iter().product();
-    let mut index = vec![u32::MAX; voxels];
-    let mut outside: Option<ArrayD<bool>> = None;
-    for block in blocks(target, &block_shape(target)) {
-        let (indices, _) = block_indices(&block);
-        let points = mapping.map(&indices)?;
-        for (row, point) in points.outer_iter().enumerate() {
-            let at = indices.row(row);
-            let flat = flat_index(at.iter().map(|v| *v as usize), target);
-            if inside(point, source) {
-                let voxel = point.iter().zip(source).map(|(v, m)| ((v + 0.5).floor().max(0.0) as usize).min(m - 1));
-                index[flat] = flat_index(voxel, source) as u32;
-            } else {
-                outside
-                    .get_or_insert_with(|| ArrayD::from_elem(IxDyn(target), false))
-                    .as_slice_mut()
-                    .expect("standard")[flat] = true;
-            }
-        }
-    }
-    Ok(Nearest { index, shape: target.to_vec(), outside })
-}
-
 /// Write every carried annotation; what was written is added to `written`.
 pub(super) fn write(
     sample: &Sample,
@@ -701,7 +721,7 @@ pub(super) fn write(
     for item in &carry.items {
         if item.voxel && !nearest_by_grid.contains_key(&item.grid) {
             let source = carry.geometry[&item.grid].source.spatial_shape();
-            nearest_by_grid.insert(item.grid.clone(), nearest(&mappings[&item.grid], &source, &target_spatial)?);
+            nearest_by_grid.insert(item.grid.clone(), Nearest::new(&mappings[&item.grid], &source, &target_spatial)?);
         }
     }
     let mut results: Vec<(usize, ResampledAnnotation)> = Vec::new();
@@ -858,18 +878,21 @@ fn dense_payload(annotation: &Annotation, near: &Nearest, widen: bool) -> Result
     let s = annotation.spatial_shape()?.len();
     let leading = shape[..shape.len() - s].to_vec();
     let lanes: usize = leading.iter().product::<usize>().max(1);
-    let voxels = near.index.len();
+    let voxels: usize = near.shape.iter().product();
     let mut full = leading.clone();
     full.extend(&near.shape);
     let gathered = crate::with_array!(&stored, a => {
-        let flat: Vec<_> = a.iter().copied().collect();
+        let a = a.as_standard_layout();
+        let flat = a.as_slice().expect("standard layout");
         let per_lane = flat.len() / lanes;
-        let fill = Element::from_f64(if widen { 1.0 } else { 0.0 });
-        let mut out = Vec::with_capacity(lanes * voxels);
-        for lane in 0..lanes {
-            let base = lane * per_lane;
-            out.extend(near.index.iter().map(|i| if *i == u32::MAX { fill } else { flat[base + *i as usize] }));
-        }
+        let mut out = vec![Element::from_f64(if widen { 1.0 } else { 0.0 }); lanes * voxels];
+        near.each(|t, at| {
+            if let Some(i) = at {
+                for lane in 0..lanes {
+                    out[lane * voxels + t] = flat[lane * per_lane + i];
+                }
+            }
+        })?;
         NdArray::from_vec(&full, out)?
     });
     let mut payload = copy_payload(annotation, &["data"])?;
@@ -940,6 +963,8 @@ fn unravel(mut flat: usize, shape: &[usize]) -> Vec<usize> {
 /// every object holding its nearest source voxel, so two objects of one
 /// class stay two, and overlapping objects keep their overlap.  Each box is
 /// recomputed from its mask.  An object left with no voxel is refused.
+/// What is held is the objects' own voxels and their new crops, never a
+/// volume.
 fn instances_payload(annotation: &Annotation, near: &Nearest, source: &[usize]) -> Result<Payload> {
     let n = annotation.n_objects()?;
     let boxes = annotation.boxes()?;
@@ -947,9 +972,9 @@ fn instances_payload(annotation: &Annotation, near: &Nearest, source: &[usize]) 
     let ids = annotation.instance_ids()?;
     let scores = annotation.scores()?;
     let s = source.len();
-    // Each source voxel's objects, as an interned set: most voxels hold one
-    // object or none, so the sets are few.
-    let mut label = vec![0u32; source.iter().product()];
+    // Each object voxel's objects, as an interned set: most voxels hold one
+    // object, so the sets are few.
+    let mut label: HashMap<usize, u32> = HashMap::new();
     let mut sets: Vec<Vec<u32>> = vec![Vec::new()];
     let mut interned: HashMap<Vec<u32>, u32> = HashMap::new();
     for i in 0..n {
@@ -967,51 +992,65 @@ fn instances_payload(annotation: &Annotation, near: &Nearest, source: &[usize]) 
                 continue;
             }
             let f = flat_index(voxel.iter().map(|v| *v as usize), source);
-            let mut set = sets[label[f] as usize].clone();
+            let held = label.get(&f).copied().unwrap_or(0);
+            let mut set = sets[held as usize].clone();
             set.push(i as u32);
             let next = sets.len() as u32;
-            let id = match interned.get(&set) {
-                Some(id) => *id,
-                None => {
-                    interned.insert(set.clone(), next);
-                    sets.push(set);
-                    next
-                }
-            };
-            label[f] = id;
+            let id = *interned.entry(set.clone()).or_insert_with(|| {
+                sets.push(set);
+                next
+            });
+            label.insert(f, id);
         }
     }
-    let mut voxels: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (t, at) in near.index.iter().enumerate() {
-        if *at == u32::MAX {
-            continue;
+    // First the extent of each object on the target, then its crop.
+    let mut lo = vec![vec![usize::MAX; s]; n];
+    let mut hi = vec![vec![0usize; s]; n];
+    near.each(|t, at| {
+        let Some(set) = at.and_then(|f| label.get(&f)) else {
+            return;
+        };
+        let c = unravel(t, &near.shape);
+        for object in &sets[*set as usize] {
+            let o = *object as usize;
+            for k in 0..s {
+                lo[o][k] = lo[o][k].min(c[k]);
+                hi[o][k] = hi[o][k].max(c[k] + 1);
+            }
         }
-        for object in &sets[label[*at as usize] as usize] {
-            voxels[*object as usize].push(t);
-        }
-    }
-    let mut objects = Vec::with_capacity(n);
-    for (i, held) in voxels.iter().enumerate() {
-        let id = ids.as_ref().map(|ids| ids[i]);
-        if held.is_empty() {
+    })?;
+    for i in 0..n {
+        if lo[i].first().is_some_and(|v| *v == usize::MAX) {
             return Err(Error::invalid(format!(
                 "object {} of annotation {} has no voxel on the target grid: each of its voxels falls between the \
                  target's voxel centres, and an object is refused, never dropped (§7.4); resample onto a finer grid, \
                  or without annotations (--no-annotations, annotations=False)",
-                id.map_or_else(|| format!("at row {i}"), |v| v.to_string()),
+                ids.as_ref().map_or_else(|| format!("at row {i}"), |ids| ids[i].to_string()),
                 repr_str(&annotation.ann_id)
             )));
         }
-        let coords: Vec<Vec<usize>> = held.iter().map(|f| unravel(*f, &near.shape)).collect();
-        let lo: Vec<usize> = (0..s).map(|k| coords.iter().map(|c| c[k]).min().unwrap_or(0)).collect();
-        let hi: Vec<usize> = (0..s).map(|k| coords.iter().map(|c| c[k] + 1).max().unwrap_or(0)).collect();
-        let extent: Vec<usize> = lo.iter().zip(&hi).map(|(a, b)| b - a).collect();
-        let mut crop = ArrayD::from_elem(IxDyn(&extent), false);
-        for c in &coords {
-            let local: Vec<usize> = c.iter().zip(&lo).map(|(v, o)| v - o).collect();
-            crop[IxDyn(&local)] = true;
+    }
+    let mut crops: Vec<ArrayD<bool>> = (0..n)
+        .map(|i| {
+            let extent: Vec<usize> = lo[i].iter().zip(&hi[i]).map(|(a, b)| b - a).collect();
+            ArrayD::from_elem(IxDyn(&extent), false)
+        })
+        .collect();
+    near.each(|t, at| {
+        let Some(set) = at.and_then(|f| label.get(&f)) else {
+            return;
+        };
+        let c = unravel(t, &near.shape);
+        for object in &sets[*set as usize] {
+            let o = *object as usize;
+            let local: Vec<usize> = c.iter().zip(&lo[o]).map(|(v, start)| v - start).collect();
+            crops[o][IxDyn(&local)] = true;
         }
-        let pairs: Vec<(i64, i64)> = lo.iter().zip(&hi).map(|(a, b)| (*a as i64, *b as i64)).collect();
+    })?;
+    let mut objects = Vec::with_capacity(n);
+    for (i, crop) in crops.into_iter().enumerate() {
+        let id = ids.as_ref().map(|ids| ids[i]);
+        let pairs: Vec<(i64, i64)> = lo[i].iter().zip(&hi[i]).map(|(a, b)| (*a as i64, *b as i64)).collect();
         objects.push(InstanceInput {
             class_id: i64::from(classes[i]),
             instance_id: id.unwrap_or(i as u64),

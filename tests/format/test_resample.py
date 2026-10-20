@@ -1000,3 +1000,42 @@ class TestAnnotationsFollow:
         report = resample(path, "img", onto="half", annotations=False)
         assert report.not_carried == ("marks", "seg")
         assert report.written == ("images/img_on_half",)
+
+    def test_S9_a_scoped_classification_is_carried_only_onto_its_own_voxels(
+        self, tmp_path
+    ):
+        """A slice is still itself on the same voxels; onto other voxels it
+        names no slice there, and the carry refuses."""
+        path = annotated(
+            tmp_path / "s.medh5",
+            dx=lambda w: w.add_classification(
+                "dx", [(1, 1.0, 2)], scope="slice", grid="g"
+            ),
+        )
+        with pytest.raises(MEDH5ValidationError, match="its scope is a slice"):
+            resample(path, "img", onto="half")
+        report = resample(path, "img", onto="g", dtype=np.float64, suffix="_f64")
+        assert [a.annotation_id for a in report.annotations] == ["dx_f64"]
+        with medh5.open(path) as s:
+            source, out = s.annotations["dx"], s.annotations["dx_f64"]
+            assert out.kind == "classification" and out.grid_id == "g"
+            assert out.header.derived_from == ("dx",)
+            assert list(out.scope_ids) == list(source.scope_ids)
+        codes = validate_file(path, level="integrity").codes
+        assert not [c for c in codes if c.startswith("E")]
+
+    def test_S2_an_annotation_may_share_an_image_id(self, tmp_path):
+        """Images and annotations are separate groups, so their outputs are
+        too: resampling both under one suffix writes both."""
+        one, _ = two_classes()
+        path = annotated(
+            tmp_path / "s.medh5",
+            seg=lambda w: w.add_segmentation("img", grid="g", masks={1: one}),
+        )
+        report = resample(path, "img", onto="half")
+        assert "images/img_on_half" in report.written
+        assert "annotations/img_on_half" in report.written
+        with medh5.open(path) as s:
+            assert s.annotations["img_on_half"].dense([1])[0].tolist() == (
+                one[ON_HALF].tolist()
+            )
