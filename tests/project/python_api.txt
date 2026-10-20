@@ -4362,17 +4362,25 @@ medh5.transforms.InverseTransform.transform_points	method	(points)
 medh5.transforms.InverseTransform.units	property
 medh5.transforms.LAST_ROW_TOL	constant	float
 medh5.transforms.RESAMPLE_INTERPOLATIONS	constant	tuple
-medh5.transforms.ResampleReport	class	(path, activity_id, grid_id, new_grid=False, images=(), transforms=<factory>, written=(), filled_voxels=0, content_id=None) bases=
+medh5.transforms.ResampleReport	class	(path, activity_id, grid_id, new_grid=False, images=(), transforms=<factory>, annotations=(), not_carried=(), written=(), filled_voxels=0, content_id=None) bases=
 medh5.transforms.ResampleReport.activity_id	field
+medh5.transforms.ResampleReport.annotations	field
 medh5.transforms.ResampleReport.content_id	field
 medh5.transforms.ResampleReport.filled_voxels	field
 medh5.transforms.ResampleReport.from_json	classmethod	(doc)
 medh5.transforms.ResampleReport.grid_id	field
 medh5.transforms.ResampleReport.images	field
 medh5.transforms.ResampleReport.new_grid	field
+medh5.transforms.ResampleReport.not_carried	field
 medh5.transforms.ResampleReport.path	field
 medh5.transforms.ResampleReport.transforms	field
 medh5.transforms.ResampleReport.written	field
+medh5.transforms.ResampledAnnotation	class	(source, annotation_id, kind, ignore_mask=None, note=None) bases=
+medh5.transforms.ResampledAnnotation.annotation_id	field
+medh5.transforms.ResampledAnnotation.ignore_mask	field
+medh5.transforms.ResampledAnnotation.kind	field
+medh5.transforms.ResampledAnnotation.note	field
+medh5.transforms.ResampledAnnotation.source	field
 medh5.transforms.ResampledImage	class	(source, image_id, dtype, valid_mask=None, filled_voxels=0) bases=
 medh5.transforms.ResampledImage.dtype	field
 medh5.transforms.ResampledImage.filled_voxels	field
@@ -4429,7 +4437,7 @@ medh5.transforms.jacobian_determinant	function	(field, grid, *, vector_space='wo
 medh5.transforms.linear_part	function	(grid)
 medh5.transforms.linear_sample	function	(field, coords, *, extrapolation='zero')
 medh5.transforms.refuse_outside	function	(inside)
-medh5.transforms.resample	function	(path, image_ids, *, onto=None, spacing=None, grid_id=None, suffix=None, interpolation='linear', fill=0, dtype=None, out=None)
+medh5.transforms.resample	function	(path, image_ids, *, onto=None, spacing=None, grid_id=None, suffix=None, interpolation='linear', fill=0, dtype=None, out=None, annotations=True)
 medh5.transforms.resolve_between	function	(transforms, from_frame, to_frame)
 medh5.transforms.sample_field	function	(field, coords, *, interpolation='linear', extrapolation='zero')
 medh5.transforms.target_registration_error	function	(transform, fixed_points, moving_points, *, weights=None)

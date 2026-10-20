@@ -864,10 +864,15 @@ class TestAnnotationsFollow:
         path = registered_pair(tmp_path / "s.medh5")
         with medh5.amend(path) as w:
             w.add_boxes(
-                "dets", np.array([[[0, 1], [0, 1], [0, 1]]], np.float32), [1], grid="src"
+                "dets",
+                np.array([[[0, 1], [0, 1], [0, 1]]], np.float32),
+                [1],
+                grid="src",
             )
         before = path.read_bytes()
-        with pytest.raises(MEDH5ValidationError, match="'dets'.*rather than approximated"):
+        with pytest.raises(
+            MEDH5ValidationError, match="'dets'.*rather than approximated"
+        ):
             resample(path, "img", onto="tgt")
         assert path.read_bytes() == before
         report = resample(path, "img", onto="tgt", annotations=False)
@@ -905,20 +910,28 @@ class TestAnnotationsFollow:
                 atol=1e-5,
             )
 
-    def test_S3_7_an_annotation_carried_to_another_visit_keeps_its_own(
-        self, tmp_path
-    ):
+    def test_S3_7_an_annotation_carried_to_another_visit_keeps_its_own(self, tmp_path):
         path = tmp_path / "s.medh5"
         with medh5.create(path, codec="portable") as w:
             w.add_timepoint("tp0", index=0)
             w.add_timepoint("tp1", index=1)
             w.add_grid(
-                "base", shape=(4, 4, 4), spacing=(1.0,) * 3, frame_uid="F0", timepoint="tp0"
+                "base",
+                shape=(4, 4, 4),
+                spacing=(1.0,) * 3,
+                frame_uid="F0",
+                timepoint="tp0",
             )
             w.add_grid(
-                "follow", shape=(4, 4, 4), spacing=(1.0,) * 3, frame_uid="F1", timepoint="tp1"
+                "follow",
+                shape=(4, 4, 4),
+                spacing=(1.0,) * 3,
+                frame_uid="F1",
+                timepoint="tp1",
             )
-            w.add_image("img", np.ones((4, 4, 4), np.float32), grid="base", modality="CT")
+            w.add_image(
+                "img", np.ones((4, 4, 4), np.float32), grid="base", modality="CT"
+            )
             w.add_transform(
                 "t", kind="affine", from_frame="F1", to_frame="F0", matrix=np.eye(4)
             )
@@ -941,7 +954,11 @@ class TestAnnotationsFollow:
         )
         with medh5.amend(path) as w:
             w.add_grid(
-                "up", shape=(8, 8, 8), spacing=(1.0,) * 3, origin=(1.0, 0, 0), frame_uid="F0"
+                "up",
+                shape=(8, 8, 8),
+                spacing=(1.0,) * 3,
+                origin=(1.0, 0, 0),
+                frame_uid="F0",
             )
         with pytest.raises(MEDH5ValidationError, match="plane 3 of axis 0"):
             resample(path, "img", onto="half")

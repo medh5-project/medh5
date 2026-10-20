@@ -1869,7 +1869,9 @@ class TestResample:
     ):
         from medh5.transforms import resample
 
-        by_command = write_sample(tmp_path / "a.medh5", label_set=label_set, masks=masks)
+        by_command = write_sample(
+            tmp_path / "a.medh5", label_set=label_set, masks=masks
+        )
         by_function = tmp_path / "b.medh5"
         by_function.write_bytes(by_command.read_bytes())
         argv = ["--image", "CT_tp0", "--spacing", "3,1.6,1.6", "--grid-id", "half"]
@@ -1896,8 +1898,16 @@ class TestResample:
         assert code == EXIT_OK, out.err
         assert "not carried: organs_tp0" in out.out
         code, out = run(
-            capsys, "resample", str(path), *argv[:2], "--onto", "half", "--suffix",
-            "_again", "--no-annotations", "--json",
+            capsys,
+            "resample",
+            str(path),
+            *argv[:2],
+            "--onto",
+            "half",
+            "--suffix",
+            "_again",
+            "--no-annotations",
+            "--json",
         )
         assert code == EXIT_OK, out.err
         report = json.loads(out.out)
