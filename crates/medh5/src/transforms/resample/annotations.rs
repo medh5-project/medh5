@@ -345,7 +345,8 @@ fn plane_map(m: &Array2<f64>, axis: usize, at: f64) -> Result<Option<(usize, f64
     let s = m.nrows() - 1;
     let back = inv(m)?;
     let largest = (0..s).map(|j| back[[axis, j]].abs()).fold(0.0, f64::max);
-    let rows: Vec<usize> = (0..s).filter(|j| back[[axis, *j]].abs() > 1e-9 * largest.max(1.0)).collect();
+    // Relative to the row alone: a scale of 1e10 leaves a sole entry of 1e-10.
+    let rows: Vec<usize> = (0..s).filter(|j| back[[axis, *j]].abs() > 1e-9 * largest).collect();
     let [j] = rows[..] else {
         return Ok(None);
     };
@@ -366,9 +367,9 @@ fn refused(item: &str, kind: &str, target: &str, why: &str) -> Error {
     ))
 }
 
-const NO_PATH: &str =
-    "the transform path the image is sampled through has no inverse that can be evaluated (analytic, \
-                       or stored and named by `inverse_id`), so nothing moves its coordinates with the image";
+const NO_PATH: &str = "the transform path the image is sampled through has no inverse that can be evaluated \
+                       (analytic, or stored and named by `inverse_id`), so nothing moves its coordinates with the \
+                       image";
 const NOT_AFFINE: &str =
     "the transform path to the target is not affine, so its straight edges would not stay straight";
 
@@ -1405,6 +1406,11 @@ mod tests {
         assert!(!whole(at));
         let swap = homogeneous([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], [0.0; 3]);
         assert_eq!(plane_map(&swap, 0, 4.0).unwrap(), Some((1, 4.0)));
+        // At a scale of 1e10 the row's only entry is 1e-10, and still the plane.
+        let vast = homogeneous([[1e10, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], [0.0; 3]);
+        let (axis, at) = plane_map(&vast, 0, 2.0).unwrap().unwrap();
+        assert_eq!(axis, 0);
+        assert!((at - 2e10).abs() <= 1.0);
     }
 
     #[test]
