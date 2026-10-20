@@ -1220,6 +1220,68 @@ class TestHandleCache:
         assert inherited.is_open
         assert inherited.identity.sample_id == "case0"
 
+    @pytest.mark.parametrize("threads", [8])
+    def test_handle_cache_survives_parallel_leases(self, indexed_cohort, threads: int):
+        """Threads leasing, reading and evicting through one small cache: every
+        lease reads its own sample, open, and nothing leased is closed."""
+        cache = HandleCache(maxsize=1)
+        barrier = threading.Barrier(threads)
+        failed: list[BaseException] = []
+
+        def lease(k: int) -> None:
+            barrier.wait()
+            try:
+                for i in range(30):
+                    j = (k + i) % len(indexed_cohort)
+                    with cache.lease(indexed_cohort[j]) as sample:
+                        assert sample.identity.sample_id == f"case{j}"
+                        head = sample.images["CT_tp0"].read((slice(0, 2), ...))
+                        assert head.shape[0] == 2
+                    cache.get(indexed_cohort[(j + 1) % len(indexed_cohort)])
+            except BaseException as e:  # pragma: no cover - the failure
+                failed.append(e)
+
+        workers = [threading.Thread(target=lease, args=(k,)) for k in range(threads)]
+        for t in workers:
+            t.start()
+        for t in workers:
+            t.join()
+        assert not failed, failed[:3]
+        assert len(cache) == 1, "back to its bound once every lease ended"
+        cache.close_all()
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="no fork on this platform")
+    def test_S14_4_a_fork_is_adopted_in_the_child_before_any_call(self, indexed_cohort):
+        """The child abandons the parent's handles and has a lock of its own,
+        even one another of the parent's threads held at the fork."""
+        cache = HandleCache()
+        inherited = cache.get(indexed_cohort[0])
+        read, write = os.pipe()
+        with cache._lock:  # held by the parent across the fork
+            pid = os.fork()
+            if pid == 0:  # pragma: no cover - the child reports through the pipe
+                ok = False
+                try:
+                    os.close(read)
+                    adopted = cache.owner_pid == os.getpid() and len(cache) == 0
+                    fresh = cache.get(indexed_cohort[1])
+                    ok = (
+                        adopted
+                        and fresh.identity.sample_id == "case1"
+                        and inherited.is_open
+                    )
+                finally:
+                    os.write(write, b"1" if ok else b"0")
+                    os._exit(0)
+        os.close(write)
+        try:
+            assert os.read(read, 1) == b"1"
+        finally:
+            os.close(read)
+            os.waitpid(pid, 0)
+        assert cache.get(indexed_cohort[0]) is inherited, "the parent's is untouched"
+        cache.close_all()
+
     def test_S14_4_clear_closes_what_this_process_opened(
         self, indexed_cohort, monkeypatch
     ):

@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{RwLockReadGuard, RwLockWriteGuard};
 
 use numpy::{PyArrayDescrMethods, PyArrayDyn, PyArrayMethods, PyUntypedArray, PyUntypedArrayMethods};
 use pyo3::exceptions::PyTypeError;
@@ -32,7 +33,9 @@ use crate::convert::{
 };
 use crate::curation::{Activity, Agent, Cohort, Deidentification, Identity, QualityRecord, SplitClaim, Timepoint};
 use crate::errors::R;
+use crate::exclusive::Exclusive;
 use crate::geometry::Grid;
+use crate::h5;
 use crate::nodes::{Dataset, Group};
 
 // -- arguments ----------------------------------------------------------------------------
@@ -186,7 +189,7 @@ fn label_values_arg(obj: &Bound<'_, PyAny>) -> PyResult<Vec<(i64, Vec<ClassKey>)
 /// whole write, which runs with the GIL released.
 #[allow(clippy::too_many_arguments)]
 fn add_labelmap(
-    writer: &mut EngineWriter,
+    writer: &SampleWriter,
     ann_id: &str,
     grid: &str,
     labelmap: &Bound<'_, PyAny>,
@@ -195,7 +198,7 @@ fn add_labelmap(
     options: SegmentationOptions,
 ) -> R<(String, Option<OverlapStats>)> {
     fn write<T: numpy::Element + LabelValue>(
-        writer: &mut EngineWriter,
+        writer: &SampleWriter,
         ann_id: &str,
         grid: &str,
         array: &Bound<'_, PyUntypedArray>,
@@ -206,6 +209,8 @@ fn add_labelmap(
         let typed = array.cast::<PyArrayDyn<T>>().map_err(PyErr::from)?;
         let guard = typed.readonly();
         let view = guard.as_array();
+        let mut held = writer.writer()?;
+        let writer = &mut *held;
         Ok(array.py().detach(move || {
             let mut source = LabelmapSource::new(view);
             if let Some(values) = values {
@@ -270,7 +275,12 @@ fn mask_arg(obj: &Bound<'_, PyAny>, what: &str) -> R<ndarray::ArrayD<bool>> {
     Ok(bool_array(array.as_any())?)
 }
 
-fn instance_inputs(writer: &EngineWriter, obj: &Bound<'_, PyAny>) -> R<Vec<InstanceInput>> {
+/// `class_id` resolves a class key against the writer's label set, taking
+/// the writer's lock only for the lookup, never while the items are read.
+/// Instances as given, each with its class key: the keys are resolved under
+/// the lock the write holds, so a label set changed by another thread cannot
+/// land between two of them (E4).
+fn instance_inputs(obj: &Bound<'_, PyAny>) -> R<Vec<(ClassKey, InstanceInput)>> {
     let mut out = Vec::new();
     for item in obj.try_iter()? {
         let item = item?;
@@ -282,24 +292,41 @@ fn instance_inputs(writer: &EngineWriter, obj: &Bound<'_, PyAny>) -> R<Vec<Insta
         };
         let class = get("class_id")?.ok_or_else(|| PyTypeError::new_err("an instance needs class_id"))?;
         let instance_id = get("instance_id")?.ok_or_else(|| PyTypeError::new_err("an instance needs instance_id"))?;
-        out.push(InstanceInput {
-            class_id: writer.class_id(&class_key(&class)?)?,
-            instance_id: instance_id.extract::<u64>()?,
-            mask: get("mask")?.map(|m| mask_arg(&m, "an instance's mask")).transpose()?,
-            bbox: get("box")?.map(|b| f64_vec(&b)).transpose()?,
-            crop: get("crop")?.map(|c| mask_arg(&c, "an instance's crop")).transpose()?,
-            score: get("score")?.map(|s| s.extract::<f64>()).transpose()?,
-        });
+        out.push((
+            class_key(&class)?,
+            InstanceInput {
+                class_id: 0,
+                instance_id: instance_id.extract::<u64>()?,
+                mask: get("mask")?.map(|m| mask_arg(&m, "an instance's mask")).transpose()?,
+                bbox: get("box")?.map(|b| f64_vec(&b)).transpose()?,
+                crop: get("crop")?.map(|c| mask_arg(&c, "an instance's crop")).transpose()?,
+                score: get("score")?.map(|s| s.extract::<f64>()).transpose()?,
+            },
+        ));
     }
     Ok(out)
 }
 
-fn polygons(writer: &EngineWriter, obj: &Bound<'_, PyAny>) -> R<Vec<Polygon>> {
+/// A polygon as given, its class not yet resolved (as `instance_inputs`).
+struct PolygonArg {
+    class: ClassKey,
+    vertices: numpy::ndarray::ArrayD<f64>,
+    plane: (i64, i64),
+    role: String,
+}
+
+impl PolygonArg {
+    fn resolve(self, class_id: impl Fn(&ClassKey) -> medh5::Result<i64>) -> R<Polygon> {
+        Ok(Polygon::new(self.vertices, class_id(&self.class)?, self.plane, &self.role)?)
+    }
+}
+
+fn polygons_of(obj: &Bound<'_, PyAny>) -> R<Vec<PolygonArg>> {
     let mut out = Vec::new();
     for item in obj.try_iter()? {
         let item = item?;
         let vertices = f64_array(&item.getattr("vertices")?)?;
-        let class_id = writer.class_id(&class_key(&item.getattr("class_id")?)?)?;
+        let class = class_key(&item.getattr("class_id")?)?;
         let plane: (i64, i64) = match item.getattr("plane") {
             Ok(p) if !p.is_none() => {
                 let v = i64_vec(&p)?;
@@ -314,33 +341,52 @@ fn polygons(writer: &EngineWriter, obj: &Bound<'_, PyAny>) -> R<Vec<Polygon>> {
             Ok(r) if !r.is_none() => r.extract()?,
             _ => "outer".into(),
         };
-        out.push(Polygon::new(vertices, class_id, plane, &role)?);
+        out.push(PolygonArg { class, vertices, plane, role });
     }
     Ok(out)
+}
+
+/// An open curve as given, its class not yet resolved (as `PolygonArg`).
+struct PolylineArg {
+    class: ClassKey,
+    vertices: numpy::ndarray::ArrayD<f64>,
+    plane: Option<(i64, i64)>,
 }
 
 /// Open curves (1.2 §3): each item's `vertices`, `class_id` (an id or a
 /// label-set key) and optional `plane` `(axis, index)`; `instance_ids`, one
 /// per curve, when given.
-fn polylines(
-    writer: &EngineWriter,
-    obj: &Bound<'_, PyAny>,
-    instance_ids: Option<Vec<u64>>,
-) -> R<Vec<medh5::annotations::Polyline>> {
+fn polylines_of(obj: &Bound<'_, PyAny>) -> R<Vec<PolylineArg>> {
     let mut out = Vec::new();
     for item in obj.try_iter()? {
         let item = item?;
         let vertices = f64_array(&item.getattr("vertices")?)?;
-        let class_id = writer.class_id(&class_key(&item.getattr("class_id")?)?)?;
-        let mut line = medh5::annotations::Polyline::new(vertices, class_id);
+        let class = class_key(&item.getattr("class_id")?)?;
+        let mut plane = None;
         if let Ok(p) = item.getattr("plane") {
             if !p.is_none() {
                 let v = i64_vec(&p)?;
                 if v.len() != 2 {
                     return Err(medh5::Error::coded("E405", "a polyline's plane is (axis, index)").into());
                 }
-                line = line.plane(v[0], v[1]);
+                plane = Some((v[0], v[1]));
             }
+        }
+        out.push(PolylineArg { class, vertices, plane });
+    }
+    Ok(out)
+}
+
+fn polylines(
+    writer: &EngineWriter,
+    given: Vec<PolylineArg>,
+    instance_ids: Option<Vec<u64>>,
+) -> R<Vec<medh5::annotations::Polyline>> {
+    let mut out = Vec::new();
+    for arg in given {
+        let mut line = medh5::annotations::Polyline::new(arg.vertices, writer.class_id(&arg.class)?);
+        if let Some((axis, index)) = arg.plane {
+            line = line.plane(axis, index);
         }
         out.push(line);
     }
@@ -482,16 +528,32 @@ pub fn assertion_columns(
 // -- the writer ------------------------------------------------------------------------------
 
 /// Builder for one sample.  Every `add_*` validates immediately; `commit`
-/// validates the whole and atomically replaces the target (§14.4).
-#[pyclass(module = "medh5.sample", name = "SampleWriter", subclass)]
+/// validates the whole and atomically replaces the target (§14.4).  Used by
+/// one thread at a time (E4): a call while another thread's runs is refused.
+#[pyclass(module = "medh5.sample", name = "SampleWriter", subclass, frozen)]
 pub struct SampleWriter {
-    pub inner: EngineWriter,
+    inner: Exclusive<EngineWriter>,
 }
 
 impl SampleWriter {
-    /// The engine writer, while it can still be written to.
-    pub(crate) fn engine(&mut self) -> R<&mut EngineWriter> {
-        self.writer()
+    fn of(inner: EngineWriter) -> Self {
+        SampleWriter { inner: Exclusive::new("a SampleWriter", inner) }
+    }
+
+    /// `f` of the writer's document, as it stands.
+    pub(crate) fn read_document<T>(&self, f: impl FnOnce(&medh5::document::SampleDocument) -> T) -> R<T> {
+        Ok(f(self.inner.read()?.document()))
+    }
+
+    /// `f` of the writer's document, to change, while it can still be
+    /// written to.
+    pub(crate) fn edit_document<T>(&self, f: impl FnOnce(&mut medh5::document::SampleDocument) -> T) -> R<T> {
+        Ok(f(self.writer()?.document_mut()))
+    }
+
+    /// The engine writer, to read.
+    fn state(&self) -> R<RwLockReadGuard<'_, EngineWriter>> {
+        self.inner.read()
     }
 
     /// The writer's document, as `document` hands it out: a record the
@@ -501,11 +563,13 @@ impl SampleWriter {
         Ok(Bound::new(slf.py(), crate::document::SampleDocument::of_writer(slf.clone().unbind()))?.into_any())
     }
 
-    fn writer(&mut self) -> R<&mut EngineWriter> {
-        if self.inner.is_closed() {
+    /// The engine writer, alone, while it can still be written to.
+    fn writer(&self) -> R<RwLockWriteGuard<'_, EngineWriter>> {
+        let held = self.inner.write()?;
+        if held.is_closed() {
             return Err(medh5::Error::invalid("this writer has already committed or aborted").into());
         }
-        Ok(&mut self.inner)
+        Ok(held)
     }
 }
 
@@ -540,7 +604,7 @@ impl SampleWriter {
         let inner = py.detach(move || {
             medh5::sample::writer::create(&path, sample_id.as_deref(), subject_id.as_deref(), &codec, &profiles)
         })?;
-        Ok(SampleWriter { inner })
+        Ok(SampleWriter::of(inner))
     }
 
     // -- lifecycle -------------------------------------------------------------------
@@ -551,51 +615,57 @@ impl SampleWriter {
 
     #[pyo3(signature = (exc_type=None, _exc=None, _tb=None))]
     fn __exit__(
-        &mut self,
+        &self,
         py: Python<'_>,
         exc_type: Option<&Bound<'_, PyAny>>,
         _exc: Option<&Bound<'_, PyAny>>,
         _tb: Option<&Bound<'_, PyAny>>,
     ) -> R<bool> {
-        if is_given(exc_type).is_some() {
-            self.inner.abort();
-            return Ok(false);
-        }
-        if !self.inner.is_closed() {
-            let inner = &mut self.inner;
-            if let Err(e) = py.detach(|| inner.commit(true)) {
-                // The block is over, so no one is left to mend and commit
-                // again: a refused commit aborts, and the temporary sibling
-                // goes.
-                self.inner.abort();
-                return Err(e.into());
+        let mut held = self.inner.write()?;
+        let inner = &mut *held;
+        let aborted = is_given(exc_type).is_some();
+        h5(py, move || {
+            if aborted {
+                inner.abort();
+            } else if !inner.is_closed() {
+                if let Err(e) = inner.commit(true) {
+                    // The block is over, so no one is left to mend and commit
+                    // again: a refused commit aborts, and the temporary
+                    // sibling goes.
+                    inner.abort();
+                    return Err(e);
+                }
             }
-        }
+            Ok(())
+        })?;
         Ok(false)
     }
 
     /// Discard the in-progress file, leaving any existing one untouched.
-    fn abort(&mut self) {
-        self.inner.abort();
+    fn abort(&self, py: Python<'_>) -> R<()> {
+        let mut held = self.inner.write()?;
+        let inner = &mut *held;
+        h5(py, move || inner.abort());
+        Ok(())
     }
 
     /// The target path.
     #[getter]
-    fn path(&self) -> String {
-        self.inner.path.to_string_lossy().into_owned()
+    fn path(&self) -> R<String> {
+        Ok(self.state()?.path.to_string_lossy().into_owned())
     }
 
     /// The codec profile datasets default to.
     #[getter]
-    fn codec(&self) -> String {
-        self.inner.codec.clone()
+    fn codec(&self) -> R<String> {
+        Ok(self.state()?.codec.clone())
     }
 
     /// Whether the writer has committed or been aborted.  A commit refused
     /// before it changed anything leaves it open.
     #[getter]
-    fn closed(&self) -> bool {
-        self.inner.is_closed()
+    fn closed(&self) -> R<bool> {
+        Ok(self.state()?.is_closed())
     }
 
     /// The sample document being built.  Live: assigning one of its fields
@@ -614,14 +684,13 @@ impl SampleWriter {
             ))
             .into());
         };
-        let doc = doc.try_borrow()?;
+        let doc = doc.get();
         if doc.is_view_of(slf.as_ptr()) {
             // `w.document = w.document`: already the writer's own.
             return Ok(());
         }
         let value = doc.current(slf.py())?;
-        drop(doc);
-        slf.try_borrow_mut()?.writer()?.set_document(value);
+        slf.get().writer()?.set_document(value);
         Ok(())
     }
 
@@ -629,8 +698,8 @@ impl SampleWriter {
     /// model.  `commit` stamps what is written through it, and refuses
     /// (E701) to restamp a dataset the amended file already failed.
     #[getter]
-    fn handle(&self) -> R<Group> {
-        Ok(Group::wrap(self.inner.root()?))
+    fn handle(&self, py: Python<'_>) -> R<Group> {
+        h5(py, || Ok(Group::wrap(self.state()?.root()?)))
     }
 
     // -- document ------------------------------------------------------------------
@@ -639,14 +708,14 @@ impl SampleWriter {
     #[pyo3(signature = (**fields))]
     fn identity(slf: &Bound<'_, Self>, fields: Option<&Bound<'_, PyDict>>) -> R<Identity> {
         let map = kwargs_to_map(fields)?;
-        let made = slf.try_borrow_mut()?.writer()?.identity(map)?;
+        let made = slf.get().writer()?.identity(map)?;
         Ok(Identity::read_from(made, &Self::document_view(slf)?, "identity", None))
     }
 
     #[pyo3(signature = (**fields))]
     fn cohort(slf: &Bound<'_, Self>, fields: Option<&Bound<'_, PyDict>>) -> R<Cohort> {
         let map = kwargs_to_map(fields)?;
-        let made = slf.try_borrow_mut()?.writer()?.cohort(map)?;
+        let made = slf.get().writer()?.cohort(map)?;
         Ok(Cohort::read_from(made, &Self::document_view(slf)?, "cohort", None))
     }
 
@@ -654,7 +723,7 @@ impl SampleWriter {
     #[pyo3(signature = (timepoint_id, **fields))]
     fn add_timepoint(slf: &Bound<'_, Self>, timepoint_id: &str, fields: Option<&Bound<'_, PyDict>>) -> R<Timepoint> {
         let map = kwargs_to_map(fields)?;
-        let made = slf.try_borrow_mut()?.writer()?.add_timepoint(timepoint_id, map)?;
+        let made = slf.get().writer()?.add_timepoint(timepoint_id, map)?;
         Ok(Timepoint::read_from(made, &Self::document_view(slf)?, "timepoints", Some(timepoint_id)))
     }
 
@@ -662,24 +731,24 @@ impl SampleWriter {
     /// edit to a class's `properties` through it reaches the file.
     fn label_set(slf: &Bound<'_, Self>, label_set: &Bound<'_, PyAny>) -> R<crate::labels::LabelSet> {
         let ls = crate::labels::label_set_arg(label_set)?;
-        let stored = slf.try_borrow_mut()?.writer()?.label_set(ls);
+        let stored = slf.get().writer()?.label_set(ls);
         Ok(crate::labels::LabelSet::read_from(stored, &Self::document_view(slf)?))
     }
 
     #[pyo3(signature = (name, agent_id=None, **fields))]
-    fn person(&mut self, name: &str, agent_id: Option<&str>, fields: Option<&Bound<'_, PyDict>>) -> R<Agent> {
+    fn person(&self, name: &str, agent_id: Option<&str>, fields: Option<&Bound<'_, PyDict>>) -> R<Agent> {
         let map = kwargs_to_map(fields)?;
         Ok(Agent::wrap(self.writer()?.person(name, agent_id, map)?))
     }
 
     #[pyo3(signature = (name, version=None, **fields))]
-    fn software(&mut self, name: &str, version: Option<&str>, fields: Option<&Bound<'_, PyDict>>) -> R<Agent> {
+    fn software(&self, name: &str, version: Option<&str>, fields: Option<&Bound<'_, PyDict>>) -> R<Agent> {
         let map = kwargs_to_map(fields)?;
         Ok(Agent::wrap(self.writer()?.software(name, version, map)?))
     }
 
     #[pyo3(signature = (name, **fields))]
-    fn organization(&mut self, name: &str, fields: Option<&Bound<'_, PyDict>>) -> R<Agent> {
+    fn organization(&self, name: &str, fields: Option<&Bound<'_, PyDict>>) -> R<Agent> {
         let map = kwargs_to_map(fields)?;
         Ok(Agent::wrap(self.writer()?.organization(name, map)?))
     }
@@ -695,7 +764,7 @@ impl SampleWriter {
     ) -> R<Activity> {
         let agent = agent_ref(agent)?;
         let map = kwargs_to_map(fields)?;
-        let made = slf.try_borrow_mut()?.writer()?.activity(activity_type, agent.as_deref(), activity_id, map)?;
+        let made = slf.get().writer()?.activity(activity_type, agent.as_deref(), activity_id, map)?;
         let id = made.id.clone();
         Ok(Activity::read_from(made, &Self::document_view(slf)?, "provenance.activities", Some(&id)))
     }
@@ -704,13 +773,13 @@ impl SampleWriter {
     #[pyo3(signature = (key, **fields))]
     fn set_quality(slf: &Bound<'_, Self>, key: &str, fields: Option<&Bound<'_, PyDict>>) -> R<QualityRecord> {
         let map = kwargs_to_map(fields)?;
-        let made = slf.try_borrow_mut()?.writer()?.set_quality(key, map)?;
+        let made = slf.get().writer()?.set_quality(key, map)?;
         Ok(QualityRecord::read_from(made, &Self::document_view(slf)?, "quality", Some(key)))
     }
 
     /// Record a split claim, replacing any earlier claim for the same set.
     #[pyo3(signature = (**fields))]
-    fn split(&mut self, fields: Option<&Bound<'_, PyDict>>) -> R<SplitClaim> {
+    fn split(&self, fields: Option<&Bound<'_, PyDict>>) -> R<SplitClaim> {
         let map = kwargs_to_map(fields)?;
         Ok(SplitClaim::wrap(self.writer()?.split(map)?))
     }
@@ -718,7 +787,7 @@ impl SampleWriter {
     #[pyo3(signature = (**fields))]
     fn deidentification(slf: &Bound<'_, Self>, fields: Option<&Bound<'_, PyDict>>) -> R<Deidentification> {
         let map = kwargs_to_map(fields)?;
-        let made = slf.try_borrow_mut()?.writer()?.deidentification(map)?;
+        let made = slf.get().writer()?.deidentification(map)?;
         Ok(Deidentification::read_from(made, &Self::document_view(slf)?, "deidentification", None))
     }
 
@@ -731,12 +800,17 @@ impl SampleWriter {
         params: Option<&Bound<'py, PyDict>>,
     ) -> R<Bound<'py, PyAny>> {
         let map = kwargs_to_map(params)?;
-        slf.try_borrow_mut()?.writer()?.acquisition(image_id, map);
-        Ok(Self::document_view(slf)?.getattr("acquisition")?.get_item(image_id)?)
+        let acquisition = {
+            let mut writer = slf.get().writer()?;
+            writer.acquisition(image_id, map);
+            writer.document().acquisition.clone()
+        };
+        let view = crate::document::acquisition_view(&Self::document_view(slf)?, acquisition)?;
+        Ok(view.get_item(image_id)?)
     }
 
     /// Set a namespaced extension member of the document.
-    fn extra(&mut self, namespace: &str, value: &Bound<'_, PyAny>) -> R<()> {
+    fn extra(&self, namespace: &str, value: &Bound<'_, PyAny>) -> R<()> {
         let value = py_to_json(value)?;
         self.writer()?.extra(namespace, value);
         Ok(())
@@ -750,7 +824,8 @@ impl SampleWriter {
         time_values=None, time_units=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_grid(
-        &mut self,
+        &self,
+        py: Python<'_>,
         grid_id: &str,
         shape: &Bound<'_, PyAny>,
         spacing: &Bound<'_, PyAny>,
@@ -783,32 +858,35 @@ impl SampleWriter {
         };
         let shape = i64_vec(shape)?;
         let spacing = f64_vec(spacing)?;
-        Ok(Grid::wrap(self.writer()?.add_grid(grid_id, &shape, &spacing, options)?))
+        h5(py, || Ok(Grid::wrap(self.writer()?.add_grid(grid_id, &shape, &spacing, options)?)))
     }
 
     /// Grids declared so far.
     #[getter]
-    fn grids<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    fn grids<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyDict>> {
+        let grids: Vec<_> = self.state()?.grids().iter().map(|(k, g)| (k.clone(), g.clone())).collect();
         let out = PyDict::new(py);
-        for (k, g) in self.inner.grids() {
-            out.set_item(k, Grid::wrap(g.clone()))?;
+        for (k, g) in grids {
+            out.set_item(k, Grid::wrap(g))?;
         }
         Ok(out)
     }
 
     /// Rename frames of reference everywhere they are named (§3.4).
-    fn remap_frame_uids<'py>(&mut self, py: Python<'py>, mapping: &Bound<'py, PyAny>) -> R<Bound<'py, PyTuple>> {
+    fn remap_frame_uids<'py>(&self, py: Python<'py>, mapping: &Bound<'py, PyAny>) -> R<Bound<'py, PyTuple>> {
         let mut map = HashMap::new();
         for (k, v) in items_of(mapping)? {
             map.insert(k.extract::<String>()?, v.extract::<String>()?);
         }
-        Ok(PyTuple::new(py, self.writer()?.remap_frame_uids(&map)?)?)
+        let renamed = h5(py, || -> R<_> { Ok(self.writer()?.remap_frame_uids(&map)?) })?;
+        Ok(PyTuple::new(py, renamed)?)
     }
 
     /// Every frame UID in the file so far, and the attributes naming it.
     fn frame_uids<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyDict>> {
+        let uids = h5(py, || -> R<_> { Ok(self.state()?.frame_uids()?) })?;
         let out = PyDict::new(py);
-        for (k, v) in self.inner.frame_uids()? {
+        for (k, v) in uids {
             out.set_item(k, PyTuple::new(py, v)?)?;
         }
         Ok(out)
@@ -822,7 +900,7 @@ impl SampleWriter {
         valid_mask=None, prov=None, codec=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_image(
-        &mut self,
+        &self,
         py: Python<'_>,
         image_id: &str,
         data: &Bound<'_, PyAny>,
@@ -852,7 +930,8 @@ impl SampleWriter {
             codec,
         };
         let array = py_to_nd(data)?;
-        let writer = self.writer()?;
+        let mut held = self.writer()?;
+        let writer = &mut *held;
         let (id, grid, modality) = (image_id.to_string(), grid.to_string(), modality.to_string());
         let ds = py.detach(move || writer.add_image(&id, &array, &grid, &modality, options))?;
         Ok(Dataset::wrap(ds))
@@ -863,7 +942,7 @@ impl SampleWriter {
         value_units=None, rescale_slope=None, rescale_intercept=None, prov=None, codec=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_pyramid(
-        &mut self,
+        &self,
         py: Python<'_>,
         image_id: &str,
         levels: &Bound<'_, PyAny>,
@@ -888,7 +967,8 @@ impl SampleWriter {
             codec,
             ..Default::default()
         };
-        let writer = self.writer()?;
+        let mut held = self.writer()?;
+        let writer = &mut *held;
         let (id, modality, method) = (image_id.to_string(), modality.to_string(), downsample_method.to_string());
         let group = py.detach(move || writer.add_pyramid(&id, &arrays, &grid_levels, &modality, &method, options))?;
         Ok(Group::wrap(group))
@@ -914,7 +994,7 @@ impl SampleWriter {
         task="segmentation", codec=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_segmentation<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         ann_id: &str,
         grid: &str,
@@ -937,8 +1017,7 @@ impl SampleWriter {
         task: &str,
         codec: Option<&str>,
     ) -> R<Bound<'py, PyTuple>> {
-        let writer = self.writer()?;
-        writer.grid_ref(grid)?;
+        self.writer()?.grid_ref(grid)?;
         let sources =
             [("masks", masks), ("probabilities", probabilities), ("instances", instances), ("labelmap", labelmap)];
         let given: Vec<&str> = sources.into_iter().filter(|(_, v)| is_given(*v).is_some()).map(|(n, _)| n).collect();
@@ -965,6 +1044,8 @@ impl SampleWriter {
             )
             .into());
         }
+        // Instance classes are resolved with the write, under its lock.
+        let mut keys = None;
         let source = if labelmap.is_some() {
             None
         } else if let Some(m) = is_given(masks) {
@@ -981,7 +1062,9 @@ impl SampleWriter {
             }
             Some(SegmentationSource::Probabilities(out))
         } else if let Some(i) = is_given(instances) {
-            Some(SegmentationSource::Instances(instance_inputs(writer, &i)?))
+            let (classes, given): (Vec<_>, Vec<_>) = instance_inputs(&i)?.into_iter().unzip();
+            keys = Some(classes);
+            Some(SegmentationSource::Instances(given))
         } else {
             return Err(medh5::Error::invalid(
                 "add_segmentation needs one of masks=, probabilities=, instances= or labelmap=",
@@ -998,8 +1081,17 @@ impl SampleWriter {
             common: common(annotated_classes, closure, timepoints, prov, quality, derived_from, Some(task), codec)?,
         };
         let (kind, stats) = match (source, labelmap) {
-            (Some(source), _) => py.detach(move || writer.add_segmentation(ann_id, grid, source, options))?,
-            (None, Some(labelmap)) => add_labelmap(writer, ann_id, grid, &labelmap, values, ignore_value, options)?,
+            (Some(mut source), _) => {
+                let mut held = self.writer()?;
+                if let (SegmentationSource::Instances(given), Some(keys)) = (&mut source, keys) {
+                    for (instance, key) in given.iter_mut().zip(&keys) {
+                        instance.class_id = held.class_id(key)?;
+                    }
+                }
+                let writer = &mut *held;
+                py.detach(move || writer.add_segmentation(ann_id, grid, source, options))?
+            }
+            (None, Some(labelmap)) => add_labelmap(self, ann_id, grid, &labelmap, values, ignore_value, options)?,
             (None, None) => unreachable!("one source is given"),
         };
         let stats = match stats {
@@ -1015,7 +1107,7 @@ impl SampleWriter {
     #[pyo3(signature = (ann_id, mask, *, grid, task="other", prov=None, codec=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_mask(
-        &mut self,
+        &self,
         py: Python<'_>,
         ann_id: &str,
         mask: &Bound<'_, PyAny>,
@@ -1026,7 +1118,8 @@ impl SampleWriter {
     ) -> R<Group> {
         let mask = mask_arg(mask, &format!("mask {}", medh5::json::repr_str(ann_id)))?;
         let prov = prov_arg(prov)?;
-        let writer = self.writer()?;
+        let mut held = self.writer()?;
+        let writer = &mut *held;
         let group = py.detach(move || -> medh5::Result<_> {
             writer.add_mask(ann_id, mask, grid, task, prov.as_deref(), codec)?;
             writer.root()?.group("annotations")?.group(ann_id).map_err(Into::into)
@@ -1035,32 +1128,32 @@ impl SampleWriter {
     }
 
     /// Drop an annotation, and any index entry derived from it.
-    fn remove_annotation(&mut self, ann_id: &str) -> R<()> {
-        Ok(self.writer()?.remove_annotation(ann_id)?)
+    fn remove_annotation(&self, py: Python<'_>, ann_id: &str) -> R<()> {
+        h5(py, || Ok(self.writer()?.remove_annotation(ann_id)?))
     }
 
     /// Drop a transform; what still names it is checked at commit.
-    fn remove_transform(&mut self, transform_id: &str) -> R<()> {
-        Ok(self.writer()?.remove_transform(transform_id)?)
+    fn remove_transform(&self, py: Python<'_>, transform_id: &str) -> R<()> {
+        h5(py, || Ok(self.writer()?.remove_transform(transform_id)?))
     }
 
     /// Drop an image, its `acquisition` entry and its `series_uids`
     /// mentions; what still names it, and the last image going (E201), are
     /// checked at commit.
-    fn remove_image(&mut self, image_id: &str) -> R<()> {
-        Ok(self.writer()?.remove_image(image_id)?)
+    fn remove_image(&self, py: Python<'_>, image_id: &str) -> R<()> {
+        h5(py, || Ok(self.writer()?.remove_image(image_id)?))
     }
 
     /// Drop a grid; what still names it (E101, E503), and the last grid
     /// going (E111), are checked at commit.
-    fn remove_grid(&mut self, grid_id: &str) -> R<()> {
-        Ok(self.writer()?.remove_grid(grid_id)?)
+    fn remove_grid(&self, py: Python<'_>, grid_id: &str) -> R<()> {
+        h5(py, || Ok(self.writer()?.remove_grid(grid_id)?))
     }
 
     /// Change an image's attributes without rewriting its samples (§4.1):
     /// `None` removes one.  Checked as `add_image` checks them.
     #[pyo3(signature = (image_id, **attrs))]
-    fn set_image_attrs(&mut self, image_id: &str, attrs: Option<&Bound<'_, PyDict>>) -> R<()> {
+    fn set_image_attrs(&self, py: Python<'_>, image_id: &str, attrs: Option<&Bound<'_, PyDict>>) -> R<()> {
         let mut edit = ImageEdit::default();
         for (key, value) in attrs.into_iter().flat_map(|d| d.iter()) {
             let key: String = key.extract()?;
@@ -1094,7 +1187,7 @@ impl SampleWriter {
                 }
             }
         }
-        Ok(self.writer()?.set_image_attrs(image_id, edit)?)
+        h5(py, || Ok(self.writer()?.set_image_attrs(image_id, edit)?))
     }
 
     /// Re-encode a voxel annotation in place, preserving its header (§7.6).
@@ -1103,14 +1196,15 @@ impl SampleWriter {
     /// probabilities.
     #[pyo3(signature = (ann_id, to_kind, *, codec=None, drop_identity=false))]
     fn transcode_annotation(
-        &mut self,
+        &self,
         py: Python<'_>,
         ann_id: &str,
         to_kind: &str,
         codec: Option<String>,
         drop_identity: bool,
     ) -> R<String> {
-        let writer = self.writer()?;
+        let mut held = self.writer()?;
+        let writer = &mut *held;
         let (id, kind) = (ann_id.to_string(), to_kind.to_string());
         Ok(py.detach(move || writer.transcode_annotation(&id, &kind, codec.as_deref(), drop_identity))?)
     }
@@ -1123,7 +1217,7 @@ impl SampleWriter {
         prov=None, quality=None, derived_from=None, task="detection", codec=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_boxes(
-        &mut self,
+        &self,
         py: Python<'_>,
         ann_id: &str,
         boxes: &Bound<'_, PyAny>,
@@ -1152,7 +1246,8 @@ impl SampleWriter {
             is_given(slice_index).map(|o| crate::annotations::slice_index_arg(&o, n_boxes)).transpose()?;
         let options = common(annotated_classes, closure, timepoints, prov, quality, derived_from, Some(task), codec)?;
         let at = placement(grid, Some(space), frame_uid);
-        let writer = self.writer()?;
+        let mut held = self.writer()?;
+        let writer = &mut *held;
         let group = detach_if(py, n_boxes >= DETACH_ROWS, move || {
             writer.add_boxes(ann_id, &boxes, &keys, objects, slice_index, at, options)
         })?;
@@ -1165,7 +1260,7 @@ impl SampleWriter {
         timepoints=None, prov=None, quality=None, derived_from=None, task="detection", codec=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_obb(
-        &mut self,
+        &self,
         py: Python<'_>,
         ann_id: &str,
         centers: &Bound<'_, PyAny>,
@@ -1193,7 +1288,8 @@ impl SampleWriter {
         let options = common(annotated_classes, closure, timepoints, prov, quality, derived_from, Some(task), codec)?;
         let rows = centers.shape().first().copied().unwrap_or(0);
         let at = placement(grid, Some(space), frame_uid);
-        let writer = self.writer()?;
+        let mut held = self.writer()?;
+        let writer = &mut *held;
         let group = detach_if(py, rows >= DETACH_ROWS, move || {
             writer.add_obb(ann_id, &centers, &sizes, &rotations, &keys, objects, at, options)
         })?;
@@ -1206,7 +1302,7 @@ impl SampleWriter {
         timepoints=None, prov=None, quality=None, derived_from=None, task="detection", codec=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_keypoints(
-        &mut self,
+        &self,
         py: Python<'_>,
         ann_id: &str,
         points: &Bound<'_, PyAny>,
@@ -1236,7 +1332,8 @@ impl SampleWriter {
         let options = common(annotated_classes, closure, timepoints, prov, quality, derived_from, Some(task), codec)?;
         let rows = points.shape().first().copied().unwrap_or(0) * slots.len().max(1);
         let at = placement(grid, Some(space), frame_uid);
-        let writer = self.writer()?;
+        let mut held = self.writer()?;
+        let writer = &mut *held;
         let group = detach_if(py, rows >= DETACH_ROWS, move || {
             writer.add_keypoints(ann_id, &points, &slots, &keys, visibility.as_ref(), objects, skeleton, at, options)
         })?;
@@ -1249,7 +1346,7 @@ impl SampleWriter {
         timepoints=None, prov=None, quality=None, derived_from=None, task="detection", codec=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_points(
-        &mut self,
+        &self,
         py: Python<'_>,
         ann_id: &str,
         points: &Bound<'_, PyAny>,
@@ -1278,7 +1375,8 @@ impl SampleWriter {
         let options = common(annotated_classes, closure, timepoints, prov, quality, derived_from, Some(task), codec)?;
         let rows = points.shape().first().copied().unwrap_or(0);
         let at = placement(grid, Some(space), frame_uid);
-        let writer = self.writer()?;
+        let mut held = self.writer()?;
+        let writer = &mut *held;
         let group = detach_if(py, rows >= DETACH_ROWS, move || {
             writer.add_points(
                 ann_id,
@@ -1301,7 +1399,7 @@ impl SampleWriter {
         codec=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_contours(
-        &mut self,
+        &self,
         py: Python<'_>,
         ann_id: &str,
         polygons: &Bound<'_, PyAny>,
@@ -1317,10 +1415,13 @@ impl SampleWriter {
         task: &str,
         codec: Option<&str>,
     ) -> R<Group> {
-        let found = polygons_of(&self.inner, polygons)?;
+        let given = polygons_of(polygons)?;
         let options = common(annotated_classes, closure, timepoints, prov, quality, derived_from, Some(task), codec)?;
         let at = placement(grid, Some(space), frame_uid);
-        let writer = self.writer()?;
+        // Every class against the one label set the write holds (E4).
+        let mut held = self.writer()?;
+        let found = given.into_iter().map(|p| p.resolve(|k| held.class_id(k))).collect::<R<Vec<_>>>()?;
+        let writer = &mut *held;
         let group = py.detach(move || writer.add_contours(ann_id, &found, at, options))?;
         Ok(Group::wrap(group))
     }
@@ -1333,7 +1434,7 @@ impl SampleWriter {
         task="other", codec=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_polylines(
-        &mut self,
+        &self,
         py: Python<'_>,
         ann_id: &str,
         polylines: &Bound<'_, PyAny>,
@@ -1351,10 +1452,13 @@ impl SampleWriter {
         codec: Option<&str>,
     ) -> R<Group> {
         let ids = is_given(instance_ids).map(|i| u64s(&i)).transpose()?;
-        let found = self::polylines(&self.inner, polylines, ids)?;
+        let given = polylines_of(polylines)?;
         let options = common(annotated_classes, closure, timepoints, prov, quality, derived_from, Some(task), codec)?;
         let at = placement(grid, Some(space), frame_uid);
-        let writer = self.writer()?;
+        // Every class against the one label set the write holds (E4).
+        let mut held = self.writer()?;
+        let found = self::polylines(&held, given, ids)?;
+        let writer = &mut *held;
         let group = py.detach(move || writer.add_polylines(ann_id, &found, &at, &options))?;
         Ok(Group::wrap(group))
     }
@@ -1365,7 +1469,7 @@ impl SampleWriter {
         timepoints=None, prov=None, quality=None, derived_from=None, task="segmentation", codec=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_mesh(
-        &mut self,
+        &self,
         py: Python<'_>,
         ann_id: &str,
         vertices: &Bound<'_, PyAny>,
@@ -1394,7 +1498,8 @@ impl SampleWriter {
         let mesh_ids = opt_keys(mesh_class_ids)?;
         let options = common(annotated_classes, closure, timepoints, prov, quality, derived_from, Some(task), codec)?;
         let at = placement(grid, Some(space), frame_uid);
-        let writer = self.writer()?;
+        let mut held = self.writer()?;
+        let writer = &mut *held;
         let group = py.detach(move || {
             writer.add_mesh(
                 ann_id,
@@ -1419,7 +1524,8 @@ impl SampleWriter {
         quality=None, derived_from=None, codec=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_classification(
-        &mut self,
+        &self,
+        py: Python<'_>,
         ann_id: &str,
         labels: &Bound<'_, PyAny>,
         scope: &str,
@@ -1437,10 +1543,14 @@ impl SampleWriter {
         codec: Option<&str>,
     ) -> R<Group> {
         let rows = assertion_rows(labels)?;
-        let class_ids = rows.classes.iter().map(|c| Ok(self.inner.class_id(&class_key(c)?)?)).collect::<R<Vec<_>>>()?;
-        let assertions = assertion_columns(rows, class_ids, scope_ids, schemes, scheme_values)?;
+        let keys = rows.classes.iter().map(class_key).collect::<PyResult<Vec<_>>>()?;
+        let mut assertions = assertion_columns(rows, Vec::new(), scope_ids, schemes, scheme_values)?;
         let options = common(annotated_classes, closure, timepoints, prov, quality, derived_from, None, codec)?;
-        let group = self.writer()?.add_classification(ann_id, assertions, scope, multilabel, grid, options)?;
+        // The classes against one label set, the one the write holds (E4).
+        let mut held = self.writer()?;
+        assertions.class_ids = keys.iter().map(|k| held.class_id(k)).collect::<medh5::Result<Vec<_>>>()?;
+        let writer = &mut *held;
+        let group = h5(py, move || writer.add_classification(ann_id, assertions, scope, multilabel, grid, options))?;
         Ok(Group::wrap(group))
     }
 
@@ -1455,7 +1565,7 @@ impl SampleWriter {
         metrics=None, prov=None, codec=None, field_dtype="float32"))]
     #[allow(clippy::too_many_arguments)]
     fn add_transform(
-        &mut self,
+        &self,
         py: Python<'_>,
         transform_id: &str,
         kind: &str,
@@ -1513,7 +1623,8 @@ impl SampleWriter {
             prov: prov_arg(prov)?,
             codec,
         };
-        let writer = self.writer()?;
+        let mut held = self.writer()?;
+        let writer = &mut *held;
         let (id, kind, from, to) =
             (transform_id.to_string(), kind.to_string(), from_frame.to_string(), to_frame.to_string());
         let group = py.detach(move || writer.add_transform_with(&id, &kind, &from, &to, spec, field_dtype))?;
@@ -1527,7 +1638,7 @@ impl SampleWriter {
     #[pyo3(signature = (ann_ids=None, *, max_coords=medh5::storage::index::DEFAULT_MAX_COORDS,
         occupancy=Some(medh5::storage::index::DEFAULT_OCCUPANCY_FACTOR), seed=0))]
     fn build_index<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         ann_ids: Option<&Bound<'py, PyAny>>,
         max_coords: usize,
@@ -1535,14 +1646,16 @@ impl SampleWriter {
         seed: u64,
     ) -> R<Bound<'py, PyTuple>> {
         let ids = opt_strings(ann_ids)?;
-        let writer = self.writer()?;
+        let mut held = self.writer()?;
+        let writer = &mut *held;
         let built = py.detach(move || writer.build_index(ids.as_deref(), Some(max_coords), Some(occupancy), seed))?;
         Ok(PyTuple::new(py, built)?)
     }
 
     /// Profiles this sample actually satisfies, unioned with declared ones.
     fn infer_profiles<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyFrozenSet>> {
-        Ok(PyFrozenSet::new(py, self.inner.infer_profiles()?)?)
+        let profiles = h5(py, || -> R<_> { Ok(self.state()?.infer_profiles()?) })?;
+        Ok(PyFrozenSet::new(py, profiles)?)
     }
 
     /// Validate, write `/meta`, stamp digests and atomically replace.
@@ -1557,8 +1670,9 @@ impl SampleWriter {
     /// aborts it.  Returns the `content_id`, or `None` when already
     /// committed; committing an aborted writer raises.
     #[pyo3(signature = (*, digests=true))]
-    fn commit(&mut self, py: Python<'_>, digests: bool) -> R<Option<String>> {
-        let writer = &mut self.inner;
+    fn commit(&self, py: Python<'_>, digests: bool) -> R<Option<String>> {
+        let mut held = self.inner.write()?;
+        let writer = &mut *held;
         Ok(py.detach(move || writer.commit(digests))?)
     }
 
@@ -1567,89 +1681,91 @@ impl SampleWriter {
     /// Declare the subject clock, starting the `clinical` profile (1.1 §3).
     #[pyo3(signature = (clock=None, **fields))]
     fn set_clock<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         clock: Option<&Bound<'py, PyAny>>,
         fields: Option<&Bound<'py, PyDict>>,
     ) -> R<Bound<'py, PyAny>> {
         let doc = crate::clinical::record_with(clock, fields)?;
         let clock = medh5::clinical::Clock::from_json(&doc)?;
-        Ok(crate::convert::json_to_py(py, &self.writer()?.set_clock(clock)?.to_json())?)
+        let added = h5(py, || -> R<_> { Ok(self.writer()?.set_clock(clock)?.to_json()) })?;
+        Ok(crate::convert::json_to_py(py, &added)?)
     }
 
     /// Add one event version (1.1 §5): an `Event`, a dict, or keywords.
     #[pyo3(signature = (event=None, **fields))]
     fn add_event<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         event: Option<&Bound<'py, PyAny>>,
         fields: Option<&Bound<'py, PyDict>>,
     ) -> R<Bound<'py, PyAny>> {
         let event = crate::clinical::event_arg(event, fields)?;
-        Ok(crate::convert::json_to_py(py, &self.writer()?.add_event(event)?.to_json())?)
+        let added = h5(py, || -> R<_> { Ok(self.writer()?.add_event(event)?.to_json()) })?;
+        Ok(crate::convert::json_to_py(py, &added)?)
     }
 
     /// Add one source document (1.1 §6).
     #[pyo3(signature = (document=None, **fields))]
     fn add_document<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         document: Option<&Bound<'py, PyAny>>,
         fields: Option<&Bound<'py, PyDict>>,
     ) -> R<Bound<'py, PyAny>> {
         let doc = medh5::clinical::Document::from_json(&crate::clinical::record_with(document, fields)?)?;
-        Ok(crate::convert::json_to_py(py, &self.writer()?.add_document(doc)?.to_json())?)
+        let added = h5(py, || -> R<_> { Ok(self.writer()?.add_document(doc)?.to_json()) })?;
+        Ok(crate::convert::json_to_py(py, &added)?)
     }
 
     /// Add one typed link (1.1 §7).
     #[pyo3(signature = (link=None, **fields))]
     fn add_link<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         link: Option<&Bound<'py, PyAny>>,
         fields: Option<&Bound<'py, PyDict>>,
     ) -> R<Bound<'py, PyAny>> {
         let link = medh5::clinical::Link::from_json(&crate::clinical::record_with(link, fields)?)?;
-        Ok(crate::convert::json_to_py(py, &self.writer()?.add_link(link)?.to_json())?)
+        let added = h5(py, || -> R<_> { Ok(self.writer()?.add_link(link)?.to_json()) })?;
+        Ok(crate::convert::json_to_py(py, &added)?)
     }
 
     /// Add a logical-record bundle: `clinical`, `events`, `documents`, `links`.
-    fn add_records(&mut self, py: Python<'_>, records: &Bound<'_, PyAny>) -> R<()> {
+    fn add_records(&self, py: Python<'_>, records: &Bound<'_, PyAny>) -> R<()> {
         let records = medh5::clinical::ClinicalRecords::from_json(&crate::clinical::record(records)?)?;
-        let writer = self.writer()?;
+        let mut held = self.writer()?;
+        let writer = &mut *held;
         Ok(py.detach(move || writer.add_records(records))?)
     }
 
     /// The clinical records so far (an amended file's once loaded), or `None`.
-    fn clinical<'py>(&mut self, py: Python<'py>) -> R<Option<Bound<'py, PyAny>>> {
-        let found = self.writer()?.clinical()?.map(|r| r.to_json());
+    fn clinical<'py>(&self, py: Python<'py>) -> R<Option<Bound<'py, PyAny>>> {
+        let found = h5(py, || -> R<_> { Ok(self.writer()?.clinical()?.map(|r| r.to_json())) })?;
         Ok(found.map(|v| crate::convert::json_to_py(py, &v)).transpose()?)
     }
 
     #[getter]
-    fn has_clinical(&self) -> bool {
-        self.inner.has_clinical()
+    fn has_clinical(&self) -> R<bool> {
+        Ok(self.state()?.has_clinical())
     }
 
     /// Remove the clinical profile: the imaging projection (1.1 §10), written
     /// at the lowest version what remains needs.  A sample with no clinical
     /// profile to remove keeps the version it declared (1.1 §2.1).
-    fn drop_clinical(&mut self) -> R<()> {
-        Ok(self.writer()?.drop_clinical()?)
+    fn drop_clinical(&self, py: Python<'_>) -> R<()> {
+        h5(py, || Ok(self.writer()?.drop_clinical()?))
     }
 
-    fn __repr__(&self) -> String {
-        format!(
+    fn __repr__(&self) -> R<String> {
+        let held = self.state()?;
+        Ok(format!(
             "SampleWriter({}, codec={}{})",
-            medh5::json::repr_str(&self.inner.path.to_string_lossy()),
-            medh5::json::repr_str(&self.inner.codec),
-            if self.inner.is_closed() { ", closed" } else { "" }
-        )
+            medh5::json::repr_str(&held.path.to_string_lossy()),
+            medh5::json::repr_str(&held.codec),
+            if held.is_closed() { ", closed" } else { "" }
+        ))
     }
-}
-
-fn polygons_of(writer: &EngineWriter, obj: &Bound<'_, PyAny>) -> R<Vec<Polygon>> {
-    polygons(writer, obj)
 }
 
 /// Create a new sample; use as a context manager, or call `commit()`.
@@ -1678,7 +1794,7 @@ fn amend(py: Python<'_>, path: PathBuf, codec: Option<String>) -> R<SampleWriter
     let inner = py
         .detach(move || medh5::sample::writer::amend(&path, codec.as_deref()))
         .map_err(|e| crate::errors::path_error(e, &at))?;
-    Ok(SampleWriter { inner })
+    Ok(SampleWriter::of(inner))
 }
 
 /// The `medh5_version` a commit writes: the lowest version `profiles` and

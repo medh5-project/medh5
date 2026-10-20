@@ -158,7 +158,7 @@ impl Grid {
         };
         let mut extras = Vec::new();
         if let Some(extra) = extra {
-            for (k, v) in extra.iter() {
+            for (k, v) in crate::convert::dict_items(extra)? {
                 extras.push((k.extract::<String>()?, py_to_attr(&v)?));
             }
         }
@@ -762,15 +762,17 @@ fn pyramid_factors<'py>(
 /// One grid group read back (`sample.root["grids/ct"]`).
 #[pyfunction]
 #[pyo3(signature = (group, grid_id=None))]
-fn read_grid(group: &Bound<'_, PyAny>, grid_id: Option<&str>) -> R<Grid> {
-    Ok(Grid::wrap(engine_grid::read_grid(&crate::integrity::group_of(group)?, grid_id)?))
+fn read_grid(py: Python<'_>, group: &Bound<'_, PyAny>, grid_id: Option<&str>) -> R<Grid> {
+    let group = crate::integrity::group_of(group)?;
+    Ok(Grid::wrap(crate::h5(py, || engine_grid::read_grid(&group, grid_id))?))
 }
 
 /// Every grid under a sample root, by id.
 #[pyfunction]
 fn read_grids<'py>(py: Python<'py>, root: &Bound<'py, PyAny>) -> R<Bound<'py, PyDict>> {
     let out = PyDict::new(py);
-    for (grid_id, grid) in engine_grid::read_grids(&crate::integrity::group_of(root)?)? {
+    let root = crate::integrity::group_of(root)?;
+    for (grid_id, grid) in crate::h5(py, || engine_grid::read_grids(&root))? {
         out.set_item(grid_id, Grid::wrap(grid))?;
     }
     Ok(out)

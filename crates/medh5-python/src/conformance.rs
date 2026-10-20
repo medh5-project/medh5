@@ -78,8 +78,8 @@ fn conformance_publish(py: Python<'_>, outdir: PathBuf, names: Option<Vec<String
 }
 
 #[pyfunction]
-fn conformance_check_checksums(root: PathBuf) -> R<Vec<String>> {
-    Ok(suite::check_checksums(&root)?)
+fn conformance_check_checksums(py: Python<'_>, root: PathBuf) -> R<Vec<String>> {
+    Ok(py.detach(move || suite::check_checksums(&root))?)
 }
 
 #[pyfunction]

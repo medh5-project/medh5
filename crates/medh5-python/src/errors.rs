@@ -86,6 +86,15 @@ fn medh5_class(py: Python<'_>, name: &str) -> PyResult<Py<PyType>> {
     Ok(module.bind(py).getattr(name)?.cast_into::<PyType>()?.unbind())
 }
 
+/// A `MEDH5Error` itself, for a refusal no subclass names: an object used by
+/// one thread at a time, found in use.
+pub fn medh5_error(py: Python<'_>, message: String) -> PyErr {
+    match medh5_class(py, "MEDH5Error").and_then(|class| class.bind(py).call1((message,))) {
+        Ok(instance) => PyErr::from_value(instance),
+        Err(e) => e,
+    }
+}
+
 /// The exception a 1.x caller saw for this engine error.
 pub fn engine_error(err: medh5::Error) -> PyErr {
     use medh5::Error as E;

@@ -19,6 +19,7 @@ use medh5::sampling::{self as engine, ClassWeights, PatchSize};
 
 use crate::convert::class_keys;
 use crate::errors::R;
+use crate::exclusive::Exclusive;
 use crate::reader::sample_arg;
 use crate::rng::rng_arg;
 
@@ -159,7 +160,13 @@ impl PatchSamplerHandle {
             let grid_id = self.inner.window_grid(&sample, found.as_deref(), grid.as_deref())?;
             sample.grid(&grid_id).map(|_| ())
         })?;
-        Ok(PatchDraws { sampler: self.inner.clone(), sample, annotation, grid, rng, remaining: n })
+        Ok(PatchDraws {
+            sampler: self.inner.clone(),
+            sample,
+            annotation,
+            grid,
+            state: Exclusive::new("a PatchDraws", Draws { rng, remaining: n }),
+        })
     }
 
     /// The annotation a draw takes foreground from, auto-selected if `None`.
@@ -170,15 +177,17 @@ impl PatchSamplerHandle {
         annotation: Option<String>,
         grid: Option<String>,
     ) -> R<Option<String>> {
+        let py = sample.py();
         let sample = sample_arg(sample)?;
-        Ok(self.inner.annotation(&sample, annotation.as_deref(), grid.as_deref())?)
+        Ok(crate::h5(py, || self.inner.annotation(&sample, annotation.as_deref(), grid.as_deref()))?)
     }
 
     /// The grid a draw is measured in.
     #[pyo3(signature = (sample, annotation=None, grid=None))]
     fn window_grid(&self, sample: &Bound<'_, PyAny>, annotation: Option<String>, grid: Option<String>) -> R<String> {
+        let py = sample.py();
         let sample = sample_arg(sample)?;
-        Ok(self.inner.window_grid(&sample, annotation.as_deref(), grid.as_deref())?)
+        Ok(crate::h5(py, || self.inner.window_grid(&sample, annotation.as_deref(), grid.as_deref()))?)
     }
 
     /// A class to sample from, weighted as configured; `None` when no class
@@ -197,13 +206,20 @@ impl PatchSamplerHandle {
 
 /// `n` patch draws from one generator, drawn one per `next()`: nothing is
 /// held but the generator and the count, so a long run costs one patch at a
-/// time.
-#[pyclass(module = "medh5._core", name = "PatchDraws")]
+/// time.  Drawn by one thread at a time (E4): a `next()` while another runs
+/// is refused, as two threads sharing one generator would draw nothing
+/// either could repeat.
+#[pyclass(module = "medh5._core", name = "PatchDraws", frozen)]
 pub struct PatchDraws {
     sampler: engine::PatchSampler,
     sample: Arc<EngineSample>,
     annotation: Option<String>,
     grid: Option<String>,
+    state: Exclusive<Draws>,
+}
+
+/// What each draw changes: the generator, and the draws still to come.
+struct Draws {
     rng: Rng,
     remaining: usize,
 }
@@ -215,21 +231,23 @@ impl PatchDraws {
     }
 
     /// The next draw: the fields of a `Patch`.
-    fn __next__<'py>(mut slf: PyRefMut<'py, Self>, py: Python<'py>) -> R<Option<Bound<'py, PyDict>>> {
-        if slf.remaining == 0 {
+    fn __next__<'py>(&self, py: Python<'py>) -> R<Option<Bound<'py, PyDict>>> {
+        let mut state = self.state.write()?;
+        if state.remaining == 0 {
             return Ok(None);
         }
-        let this = &mut *slf;
+        let draws = &mut *state;
         let patch = py.detach(|| {
-            this.sampler.draw(&this.sample, this.annotation.as_deref(), &mut this.rng, this.grid.as_deref())
+            self.sampler.draw(&self.sample, self.annotation.as_deref(), &mut draws.rng, self.grid.as_deref())
         })?;
-        this.remaining -= 1;
+        draws.remaining -= 1;
+        drop(state);
         Ok(Some(patch_fields(py, &patch)?))
     }
 
     /// The draws still to come.
-    fn __length_hint__(&self) -> usize {
-        self.remaining
+    fn __length_hint__(&self) -> R<usize> {
+        Ok(self.state.read()?.remaining)
     }
 }
 
@@ -317,7 +335,8 @@ fn sampling_check_pair_mode(mode: &str) -> R<()> {
 #[pyfunction]
 fn sampling_pairs<'py>(py: Python<'py>, mode: &str, sample: &Bound<'py, PyAny>) -> R<Bound<'py, PyList>> {
     let sample = sample_arg(sample)?;
-    let pairs = engine::TimepointPairSampler::new(mode)?.pairs(&sample)?;
+    let sampler = engine::TimepointPairSampler::new(mode)?;
+    let pairs = crate::h5(py, || sampler.pairs(&sample))?;
     let out = PyList::empty(py);
     for p in pairs {
         out.append((p.first, p.second, p.interval_days, p.label))?;

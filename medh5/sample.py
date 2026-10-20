@@ -264,6 +264,9 @@ class Sample:
     def __init__(self, handle: Any) -> None:
         self._handle = handle
         self.path: str | None = handle.path
+        # Built on first use and kept.  Two threads reading one at once may
+        # both build it: each gets a whole value and one is kept --- duplicate
+        # work, never a torn read --- so they take no lock.
         self._document: SampleDocument | None = None
         self._grids: dict[str, Grid] | None = None
         self._images: ImageCollection | None = None

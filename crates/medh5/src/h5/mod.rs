@@ -8,6 +8,8 @@
 pub mod attrs;
 pub mod data;
 pub mod file;
+#[doc(hidden)]
+pub mod fork;
 pub mod graph;
 pub mod ops;
 mod window;
@@ -159,8 +161,44 @@ pub fn alive(obj: &hdf5::Location) -> crate::Result<()> {
 }
 
 /// Run raw HDF5 C calls under the library's global lock.
+///
+/// A thread that would wait for the lock --- another thread holds it --- waits
+/// through the frontend's [`on_wait`] hook, which the Python extension uses to
+/// detach from the interpreter for the wait and the calls: a thread blocked
+/// while attached holds up a free-threaded interpreter's stop-the-world pause
+/// for as long as the holder's call runs.  A thread that already holds the
+/// lock, or finds it free, never waits and runs `f` where it is: the hook
+/// never lets go of the interpreter while this thread holds HDF5's lock, so
+/// no thread ever waits for the interpreter while holding it.
 pub(crate) fn locked<T>(f: impl FnOnce() -> T) -> T {
-    hdf5::sync::sync(f)
+    // The library starts once, under the lock, before any thread holds the
+    // lock here: `sync` waits for that start, and a thread holding the lock
+    // while another starts the library would wait for it forever.
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| hdf5::sync::sync(|| ()));
+    match crate::h5sys::LOCK.try_lock() {
+        // Free, or already this thread's: nothing to wait for.
+        Some(_held) => hdf5::sync::sync(f),
+        None => match WAIT.get() {
+            Some(wait) => {
+                let (mut f, mut out) = (Some(f), None);
+                wait(&mut || out = f.take().map(|f| hdf5::sync::sync(f)));
+                out.expect("the wait hook runs what it is given")
+            }
+            None => hdf5::sync::sync(f),
+        },
+    }
+}
+
+static WAIT: std::sync::OnceLock<fn(&mut dyn FnMut())> = std::sync::OnceLock::new();
+
+/// Set how a thread waits for HDF5's lock that another thread holds: `wait`
+/// is given the wait and the calls to run, and runs them once, on this thread
+/// (the Python extension, detached from the interpreter).  The first hook set
+/// is kept; whether this one was.
+#[doc(hidden)]
+pub fn on_wait(wait: fn(&mut dyn FnMut())) -> bool {
+    WAIT.set(wait).is_ok()
 }
 
 /// Start `command` while no file is between HDF5's open and the mark that
@@ -235,6 +273,57 @@ pub fn basename(name: &str) -> &str {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    /// The threads that have waited for HDF5's lock through the hook.
+    static WAITERS: std::sync::Mutex<Vec<std::thread::ThreadId>> = std::sync::Mutex::new(Vec::new());
+
+    /// The hook the tests set: records each thread that waits, and refuses a
+    /// wait by a thread already holding the lock --- the Python extension's
+    /// would let go of the interpreter there, and a thread holding HDF5's
+    /// lock must never wait to take the interpreter back.
+    fn recorded(run: &mut dyn FnMut()) {
+        assert!(!crate::h5sys::LOCK.is_owned_by_current_thread(), "a thread holding HDF5's lock waited for it");
+        WAITERS.lock().unwrap().push(std::thread::current().id());
+        run();
+    }
+
+    fn waits_of(thread: std::thread::ThreadId) -> usize {
+        WAITERS.lock().unwrap().iter().filter(|&&t| t == thread).count()
+    }
+
+    /// A thread waits for HDF5's lock through the hook only when another
+    /// thread holds it; one that holds it already never waits again.
+    #[test]
+    fn locked_waits_through_the_hook_only_for_another_threads_lock() {
+        on_wait(recorded);
+        let me = std::thread::current().id();
+        // Another test may hold the lock as this begins, so the outer call
+        // may wait; the inner, made holding it, never does.
+        locked(|| {
+            let before = waits_of(me);
+            locked(|| ());
+            assert_eq!(waits_of(me), before, "a thread holding the lock waited for it again");
+        });
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            locked(|| {
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+        });
+        held_rx.recv().unwrap();
+        let waiter = std::thread::spawn(|| locked(|| ()));
+        let id = waiter.thread().id();
+        // Released only once the waiter is waiting, through the hook.
+        while waits_of(id) == 0 {
+            std::thread::yield_now();
+        }
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        waiter.join().unwrap();
+        assert_eq!(waits_of(id), 1);
+    }
 
     /// Set in the child process of the test that sets the environment HDF5
     /// starts in.

@@ -41,6 +41,13 @@ reopened (for that lease alone while another is still reading the old
 handle), and a sample that is still another version is refused (T302) ---
 what a task's rows pin is what they read, warm cache or cold.  A lease in
 progress finishes on the bytes it opened.
+
+**A fork is noticed in the child before any thread runs there.**  An
+``os.register_at_fork`` hook abandons every cache's handles and replaces its
+lock as the child starts, while it has one thread.  The PID check each call
+makes stays as the fallback, under a lock of its own: two threads of a child
+that both noticed the fork once replaced the cache's lock one after the other,
+and then held different locks over the same handles.
 """
 
 from __future__ import annotations
@@ -49,6 +56,7 @@ import atexit
 import contextlib
 import os
 import threading
+import weakref
 from collections import OrderedDict
 from collections.abc import Iterator
 from pathlib import Path
@@ -116,10 +124,32 @@ def _abandon(samples: Iterator[Sample] | list[Sample]) -> None:
         _ABANDONED.append(sample)
 
 
+_CACHES: weakref.WeakSet[HandleCache] = weakref.WeakSet()
+"""Every cache, for the fork hook to adopt in the child."""
+
+_ADOPTING = threading.Lock()
+"""Held by the PID check that adopts a cache in a child the hook missed."""
+
+
+def _after_fork_in_child() -> None:
+    """Adopt every cache in a new child, before a second thread exists: its
+    handles are the parent's (abandoned), and a lock another of the parent's
+    threads held at the fork would be held forever."""
+    global _ADOPTING
+    _ADOPTING = threading.Lock()
+    for cache in list(_CACHES):
+        cache._adopt()
+
+
+if hasattr(os, "register_at_fork"):  # POSIX; Windows has no fork
+    os.register_at_fork(after_in_child=_after_fork_in_child)
+
+
 class HandleCache:
     """PID-scoped, thread-safe LRU cache of open samples."""
 
     __slots__ = (
+        "__weakref__",
         "_identities",
         "_items",
         "_lock",
@@ -137,6 +167,7 @@ class HandleCache:
         self._lock = threading.Lock()
         self._owner_pid = os.getpid()
         self.opens = 0
+        _CACHES.add(self)
 
     def __len__(self) -> int:
         return len(self._items)
@@ -146,17 +177,24 @@ class HandleCache:
         return self._owner_pid
 
     def _ensure_owner(self) -> None:
-        pid = os.getpid()
-        if pid != self._owner_pid:
-            # Abandon, never close: the descriptors are the parent's.  The lock
-            # is replaced too --- one held by another of the parent's threads
-            # at the fork is held forever in the child.
-            _abandon(list(self._items.values()))
-            self._lock = threading.Lock()
-            self._items = OrderedDict()
-            self._pins = {}
-            self._identities = {}
-            self._owner_pid = pid
+        if os.getpid() != self._owner_pid:
+            # A child the fork hook did not reach: adopt it once, whichever
+            # thread notices first.
+            with _ADOPTING:
+                if os.getpid() != self._owner_pid:
+                    self._adopt()
+
+    def _adopt(self) -> None:
+        """Take the cache over in a forked child.  Abandon, never close: the
+        descriptors are the parent's.  The lock is replaced too --- one held
+        by another of the parent's threads at the fork is held forever in the
+        child."""
+        _abandon(list(self._items.values()))
+        self._lock = threading.Lock()
+        self._items = OrderedDict()
+        self._pins = {}
+        self._identities = {}
+        self._owner_pid = os.getpid()
 
     def _acquire(self, key: Key, *, pin: bool) -> Sample:
         """The handle for *key*, opened if need be; the caller holds the lock."""

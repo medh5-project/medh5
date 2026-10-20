@@ -507,6 +507,9 @@ class TaskManifest:
 
     def __init__(self, doc: Mapping[str, Any], *, base: PathLike | None = None) -> None:
         self._doc: dict[str, Any] = copy.deepcopy(dict(doc))
+        # The normal form, made on first use.  Two threads asking at once may
+        # both make it; each is whole and one is kept.  Building the task
+        # (`_changed`) is one thread's work.
         self._normal: dict[str, Any] | None = None
         self._ids: dict[str, Any] = {}
         self._loaded = False
@@ -1058,6 +1061,8 @@ class EventTable:
 
     def __init__(self, columns: Mapping[str, Any]) -> None:
         self._c = _columns(columns)
+        # Lookups made on first use: two threads may both make one, each
+        # whole, and one is kept --- duplicate work, so no lock.
         self._ids: dict[str, int] | None = None
         self._concepts: tuple[tuple[str, ...], npt.NDArray[np.int32]] | None = None
 
@@ -1570,6 +1575,8 @@ class Preflight:
         self.findings = findings
         self.subjects = subjects
         self._rows = dict(rows)
+        # Made on first use: two threads may both make one, each whole, and
+        # one is kept --- duplicate work, so no lock.
         self._by_id: dict[str, int] | None = None
         self._views: tuple[RowView, ...] | None = None
 

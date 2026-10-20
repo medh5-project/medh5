@@ -88,21 +88,28 @@ fn dataset_layout<'py>(
 /// A dataset's actual HDF5 filter pipeline, e.g. `blosc2:zstd:3+shuffle`.
 #[pyfunction]
 fn describe_filters(dataset: &Bound<'_, PyAny>) -> R<String> {
-    Ok(codecs::describe_filters(crate::nodes::dataset_arg(dataset)?.get().ds())?)
+    let ds = crate::nodes::dataset_arg(dataset)?;
+    let ds = ds.get().ds();
+    Ok(crate::h5(dataset.py(), || codecs::describe_filters(ds))?)
 }
 
 /// Whether a dataset is large enough for the W902 warning.
 #[pyfunction]
 fn is_bulk(dataset: &Bound<'_, PyAny>) -> PyResult<bool> {
-    Ok(codecs::is_bulk(crate::nodes::dataset_arg(dataset)?.get().ds()))
+    let ds = crate::nodes::dataset_arg(dataset)?;
+    let ds = ds.get().ds();
+    Ok(crate::h5(dataset.py(), || codecs::is_bulk(ds)))
 }
 
 /// `portable` when every dataset of the file needs only HDF5's own filters,
 /// else `balanced` --- what an amend of the file defaults to.
 #[pyfunction]
-fn profile_family(path: PathBuf) -> R<&'static str> {
-    let file = medh5::h5::file::open_read(&path).map_err(|e| path_error(e, &path))?;
-    Ok(codecs::profile_family(&file.as_group()?)?)
+fn profile_family(py: Python<'_>, path: PathBuf) -> R<&'static str> {
+    // Opened, read and closed detached: each may wait for HDF5's lock.
+    crate::h5(py, || {
+        let file = medh5::h5::file::open_read(&path).map_err(|e| path_error(e, &path))?;
+        Ok(codecs::profile_family(&file.as_group()?)?)
+    })
 }
 
 // -- chunking ------------------------------------------------------------------------------
@@ -329,7 +336,7 @@ impl IndexPayload {
         stats: &Bound<'_, PyDict>,
     ) -> R<Self> {
         let mut coords = indexmap::IndexMap::new();
-        for (k, v) in fg_coords.iter() {
+        for (k, v) in crate::convert::dict_items(fg_coords)? {
             coords.insert(k.extract::<i64>()?, typed_array::<i32>(&v, "int32")?.into_dimensionality()?);
         }
         let total_foreground = match stats.get_item("total_foreground")? {

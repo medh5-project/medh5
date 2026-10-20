@@ -4,7 +4,7 @@
 //! `medh5/annotations/` and `medh5/transforms.py` wrap these; everything the
 //! facades answer is computed here, by the engine.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use ndarray::{ArrayD, IxDyn};
 use pyo3::prelude::*;
@@ -22,6 +22,7 @@ use crate::convert::{
 };
 use crate::errors::R;
 use crate::geometry::Grid;
+use crate::h5;
 use crate::nodes::Dataset;
 
 fn closed() -> medh5::Error {
@@ -57,104 +58,104 @@ impl ImageHandle {
         self.inner.is_multiscale()
     }
     #[getter]
-    fn levels(&self) -> R<usize> {
-        Ok(self.inner.levels()?)
+    fn levels(&self, py: Python<'_>) -> R<usize> {
+        h5(py, || -> R<_> { Ok(self.inner.levels()?) })
     }
     #[getter]
     fn level_index(&self) -> usize {
         self.inner.level_index()
     }
-    fn level(&self, index: usize) -> R<ImageHandle> {
-        Ok(ImageHandle { inner: Arc::new(self.inner.level(index)?) })
+    fn level(&self, py: Python<'_>, index: usize) -> R<ImageHandle> {
+        h5(py, || -> R<_> { Ok(ImageHandle { inner: Arc::new(self.inner.level(index)?) }) })
     }
     #[getter]
-    fn pyramid(&self) -> R<Option<crate::geometry::Pyramid>> {
-        Ok(self.inner.pyramid()?.map(crate::geometry::Pyramid))
+    fn pyramid(&self, py: Python<'_>) -> R<Option<crate::geometry::Pyramid>> {
+        h5(py, || -> R<_> { Ok(self.inner.pyramid()?.map(crate::geometry::Pyramid)) })
     }
     #[getter]
-    fn dataset(&self) -> R<Dataset> {
-        Ok(Dataset::wrap(self.inner.dataset()?))
+    fn dataset(&self, py: Python<'_>) -> R<Dataset> {
+        h5(py, || -> R<_> { Ok(Dataset::wrap(self.inner.dataset()?)) })
     }
     #[getter]
     fn attrs<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyDict>> {
         let out = PyDict::new(py);
-        for name in self.inner.attr_names()? {
-            if let Some(value) = self.inner.attr(&name)? {
+        for name in h5(py, || self.inner.attr_names())? {
+            if let Some(value) = h5(py, || self.inner.attr(&name))? {
                 out.set_item(&name, attr_to_py(py, &value)?)?;
             }
         }
         Ok(out)
     }
     #[getter]
-    fn grid_id(&self) -> R<String> {
-        Ok(self.inner.grid_id()?)
+    fn grid_id(&self, py: Python<'_>) -> R<String> {
+        h5(py, || -> R<_> { Ok(self.inner.grid_id()?) })
     }
     #[getter]
-    fn grid(&self) -> R<Grid> {
-        Ok(Grid::wrap(self.inner.grid()?.clone()))
+    fn grid(&self, py: Python<'_>) -> R<Grid> {
+        h5(py, || -> R<_> { Ok(Grid::wrap(self.inner.grid()?.clone())) })
     }
     #[getter]
-    fn timepoint(&self) -> R<Option<String>> {
-        Ok(self.inner.timepoint()?)
+    fn timepoint(&self, py: Python<'_>) -> R<Option<String>> {
+        h5(py, || -> R<_> { Ok(self.inner.timepoint()?) })
     }
     #[getter]
-    fn modality(&self) -> R<String> {
-        Ok(self.inner.modality()?)
+    fn modality(&self, py: Python<'_>) -> R<String> {
+        h5(py, || -> R<_> { Ok(self.inner.modality()?) })
     }
     #[getter]
-    fn value_type(&self) -> R<String> {
-        Ok(self.inner.value_type()?)
+    fn value_type(&self, py: Python<'_>) -> R<String> {
+        h5(py, || -> R<_> { Ok(self.inner.value_type()?) })
     }
     #[getter]
-    fn value_units(&self) -> R<Option<String>> {
-        Ok(self.inner.value_units()?)
+    fn value_units(&self, py: Python<'_>) -> R<Option<String>> {
+        h5(py, || -> R<_> { Ok(self.inner.value_units()?) })
     }
     #[getter]
     fn channel_names<'py>(&self, py: Python<'py>) -> R<Option<Bound<'py, PyTuple>>> {
-        Ok(self.inner.channel_names()?.map(|n| PyTuple::new(py, n)).transpose()?)
+        Ok(h5(py, || self.inner.channel_names())?.map(|n| PyTuple::new(py, n)).transpose()?)
     }
     #[getter]
-    fn rescale(&self) -> R<(f64, f64)> {
-        Ok(self.inner.rescale()?)
+    fn rescale(&self, py: Python<'_>) -> R<(f64, f64)> {
+        h5(py, || -> R<_> { Ok(self.inner.rescale()?) })
     }
     #[getter]
-    fn is_rescaled(&self) -> R<bool> {
-        Ok(self.inner.is_rescaled()?)
+    fn is_rescaled(&self, py: Python<'_>) -> R<bool> {
+        h5(py, || -> R<_> { Ok(self.inner.is_rescaled()?) })
     }
     #[getter]
     fn window<'py>(&self, py: Python<'py>) -> R<Option<Bound<'py, PyTuple>>> {
-        Ok(match self.inner.window()? {
+        Ok(match h5(py, || self.inner.window())? {
             Some((c, w)) => Some(PyTuple::new(py, [PyTuple::new(py, c)?, PyTuple::new(py, w)?])?),
             None => None,
         })
     }
     #[getter]
-    fn valid_mask(&self) -> R<Option<String>> {
-        Ok(self.inner.valid_mask()?)
+    fn valid_mask(&self, py: Python<'_>) -> R<Option<String>> {
+        h5(py, || -> R<_> { Ok(self.inner.valid_mask()?) })
     }
     #[getter]
-    fn prov(&self) -> R<Option<String>> {
-        Ok(self.inner.prov()?)
+    fn prov(&self, py: Python<'_>) -> R<Option<String>> {
+        h5(py, || -> R<_> { Ok(self.inner.prov()?) })
     }
     #[getter]
-    fn digest(&self) -> R<Option<String>> {
-        Ok(self.inner.digest()?)
+    fn digest(&self, py: Python<'_>) -> R<Option<String>> {
+        h5(py, || -> R<_> { Ok(self.inner.digest()?) })
     }
     #[getter]
     fn shape<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyTuple>> {
-        Ok(PyTuple::new(py, self.inner.shape()?)?)
+        Ok(PyTuple::new(py, h5(py, || self.inner.shape())?)?)
     }
     #[getter]
     fn dtype<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        Ok(dtype_to_py(py, self.inner.dtype()?)?)
+        Ok(dtype_to_py(py, h5(py, || self.inner.dtype())?)?)
     }
     #[getter]
-    fn nbytes(&self) -> R<usize> {
-        Ok(self.inner.nbytes()?)
+    fn nbytes(&self, py: Python<'_>) -> R<usize> {
+        h5(py, || -> R<_> { Ok(self.inner.nbytes()?) })
     }
     #[getter]
     fn chunks<'py>(&self, py: Python<'py>) -> R<Option<Bound<'py, PyTuple>>> {
-        Ok(self.inner.chunks()?.map(|c| PyTuple::new(py, c)).transpose()?)
+        Ok(h5(py, || self.inner.chunks())?.map(|c| PyTuple::new(py, c)).transpose()?)
     }
     #[pyo3(signature = (roi=None, *, physical=false, dtype=None))]
     fn read<'py>(
@@ -168,7 +169,7 @@ impl ImageHandle {
             Some(d) if !d.is_none() => Some(dtype_arg(d)?),
             _ => None,
         };
-        let grid = self.inner.grid()?;
+        let grid = h5(py, || self.inner.grid())?;
         let index = match crate::convert::region_for(roi, grid.ndim())? {
             None => vec![Index::Slice(Slice::full()); grid.ndim()],
             Some(items) if items.len() == grid.ndim() => items,
@@ -193,10 +194,10 @@ impl ImageHandle {
         Ok(nd_to_py(py, block))
     }
     fn summary<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        Ok(json_to_py(py, &self.inner.summary()?)?)
+        Ok(json_to_py(py, &h5(py, || self.inner.summary())?)?)
     }
-    fn __repr__(&self) -> R<String> {
-        Ok(self.inner.repr()?)
+    fn __repr__(&self, py: Python<'_>) -> R<String> {
+        h5(py, || -> R<_> { Ok(self.inner.repr()?) })
     }
 }
 
@@ -229,15 +230,16 @@ impl AnnotationHandle {
         name: &'static str,
         make: impl FnOnce() -> R<Bound<'py, PyAny>>,
     ) -> R<Bound<'py, PyAny>> {
-        if let Some(found) = self.columns.lock().unwrap().get(name) {
+        if let Some(found) = self.columns.lock().unwrap_or_else(PoisonError::into_inner).get(name) {
             return Ok(found.bind(py).clone());
         }
         let value = make()?;
         if !value.is_none() {
             value.getattr("flags")?.setattr("writeable", false)?;
         }
-        self.columns.lock().unwrap().entry(name).or_insert_with(|| value.clone().unbind());
-        Ok(value)
+        // Two threads may both have read it: every caller gets the one kept.
+        let mut columns = self.columns.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok(columns.entry(name).or_insert_with(|| value.unbind()).bind(py).clone())
     }
 }
 
@@ -357,36 +359,46 @@ impl AnnotationHandle {
         self.inner.grid_id()
     }
     #[getter]
-    fn grid(&self) -> R<Grid> {
-        self.live()?;
-        Ok(Grid::wrap(self.inner.grid()?.clone()))
+    fn grid(&self, py: Python<'_>) -> R<Grid> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(Grid::wrap(self.inner.grid()?.clone()))
+        })
     }
     #[getter]
     fn timepoints<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         PyTuple::new(py, self.inner.timepoints())
     }
-    fn is_annotated(&self, class_key_: &Bound<'_, PyAny>) -> R<bool> {
-        self.live()?;
-        Ok(self.inner.is_annotated(&class_key(class_key_)?)?)
+    fn is_annotated(&self, py: Python<'_>, class_key_: &Bound<'_, PyAny>) -> R<bool> {
+        let key = class_key(class_key_)?;
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.is_annotated(&key)?)
+        })
     }
     #[getter]
     fn is_fully_covered(&self) -> bool {
         self.inner.is_fully_covered()
     }
     #[getter]
-    fn has_ignore_region(&self) -> R<bool> {
-        self.live()?;
-        Ok(self.inner.has_ignore_region()?)
+    fn has_ignore_region(&self, py: Python<'_>) -> R<bool> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.has_ignore_region()?)
+        })
     }
-    fn resolve_class(&self, key: &Bound<'_, PyAny>) -> R<i64> {
-        self.live()?;
-        Ok(self.inner.resolve_class(&class_key(key)?)?)
+    fn resolve_class(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> R<i64> {
+        let key = class_key(key)?;
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.resolve_class(&key)?)
+        })
     }
     #[pyo3(signature = (keys=None))]
     fn resolve_classes<'py>(&self, py: Python<'py>, keys: Option<&Bound<'py, PyAny>>) -> R<Bound<'py, PyTuple>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let keys = opt_keys(keys)?;
-        Ok(PyTuple::new(py, self.inner.resolve_classes(keys.as_deref())?)?)
+        Ok(PyTuple::new(py, h5(py, || self.inner.resolve_classes(keys.as_deref()))?)?)
     }
     #[getter]
     fn classes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
@@ -400,7 +412,7 @@ impl AnnotationHandle {
         self.inner.class_key(class_id)
     }
     fn summary<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let ann = self.inner.clone();
         Ok(json_to_py(py, &py.detach(move || ann.summary())?)?)
     }
@@ -408,20 +420,24 @@ impl AnnotationHandle {
         self.inner.repr()
     }
     /// A stored dataset of the annotation group.
-    fn dataset(&self, name: &str) -> R<Dataset> {
-        self.live()?;
-        Ok(Dataset::wrap(self.inner.dataset(name)?))
+    fn dataset(&self, py: Python<'_>, name: &str) -> R<Dataset> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(Dataset::wrap(self.inner.dataset(name)?))
+        })
     }
-    fn has_dataset(&self, name: &str) -> R<bool> {
-        self.live()?;
-        Ok(self.inner.optional_dataset(name)?.is_some())
+    fn has_dataset(&self, py: Python<'_>, name: &str) -> R<bool> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.optional_dataset(name)?.is_some())
+        })
     }
 
     // -- voxel ------------------------------------------------------------------
     #[getter]
     fn spatial_shape<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyTuple>> {
-        self.live()?;
-        Ok(PyTuple::new(py, self.inner.spatial_shape()?)?)
+        h5(py, || self.live())?;
+        Ok(PyTuple::new(py, h5(py, || self.inner.spatial_shape())?)?)
     }
     #[pyo3(signature = (classes=None, roi=None))]
     fn dense<'py>(
@@ -430,16 +446,19 @@ impl AnnotationHandle {
         classes: Option<&Bound<'py, PyAny>>,
         roi: Option<&Bound<'py, PyAny>>,
     ) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let classes = opt_keys(classes)?;
         let roi = slices(roi)?;
         let ann = self.inner.clone();
         let out = py.detach(move || ann.dense(classes.as_deref(), roi.as_deref()))?;
         Ok(array_to_py(py, out))
     }
-    fn contains(&self, class_key_: &Bound<'_, PyAny>, voxel: Vec<i64>) -> R<bool> {
-        self.live()?;
-        Ok(self.inner.contains(&class_key(class_key_)?, &voxel)?)
+    fn contains(&self, py: Python<'_>, class_key_: &Bound<'_, PyAny>, voxel: Vec<i64>) -> R<bool> {
+        let key = class_key(class_key_)?;
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.contains(&key, &voxel)?)
+        })
     }
     /// `(volume, overwritten, order, warning)`.
     #[pyo3(signature = (roi=None, priority=None, dtype=None))]
@@ -450,7 +469,7 @@ impl AnnotationHandle {
         priority: Option<&Bound<'py, PyAny>>,
         dtype: Option<&Bound<'py, PyAny>>,
     ) -> R<Bound<'py, PyTuple>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let roi = slices(roi)?;
         let priority = opt_keys(priority)?;
         let dtype = match dtype {
@@ -473,7 +492,7 @@ impl AnnotationHandle {
     }
     #[pyo3(signature = (classes=None))]
     fn voxel_counts<'py>(&self, py: Python<'py>, classes: Option<&Bound<'py, PyAny>>) -> R<Bound<'py, PyDict>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let classes = opt_keys(classes)?;
         let ann = self.inner.clone();
         let counts = py.detach(move || ann.voxel_counts(classes.as_deref()))?;
@@ -485,7 +504,7 @@ impl AnnotationHandle {
     }
     #[pyo3(signature = (classes=None))]
     fn class_bboxes<'py>(&self, py: Python<'py>, classes: Option<&Bound<'py, PyAny>>) -> R<Bound<'py, PyDict>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let classes = opt_keys(classes)?;
         let ann = self.inner.clone();
         let boxes = py.detach(move || ann.class_bboxes(classes.as_deref()))?;
@@ -500,65 +519,69 @@ impl AnnotationHandle {
     }
     #[pyo3(signature = (roi=None))]
     fn ignore_mask<'py>(&self, py: Python<'py>, roi: Option<&Bound<'py, PyAny>>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let roi = slices(roi)?;
         let ann = self.inner.clone();
         Ok(array_to_py(py, py.detach(move || ann.ignore_mask(roi.as_deref()))?))
     }
     #[pyo3(signature = (roi=None))]
     fn read_mask<'py>(&self, py: Python<'py>, roi: Option<&Bound<'py, PyAny>>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let roi = slices(roi)?;
         let ann = self.inner.clone();
         Ok(array_to_py(py, py.detach(move || ann.read_mask(roi.as_deref()))?))
     }
     #[getter]
     fn layer_class_ids<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        Ok(array_to_py(py, self.inner.layer_class_ids()?.into_dyn()))
+        h5(py, || self.live())?;
+        Ok(array_to_py(py, h5(py, || self.inner.layer_class_ids())?.into_dyn()))
     }
     #[getter]
-    fn n_layers(&self) -> R<usize> {
-        self.live()?;
-        Ok(self.inner.n_layers()?)
+    fn n_layers(&self, py: Python<'_>) -> R<usize> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.n_layers()?)
+        })
     }
     #[getter]
     fn layer_of<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyDict>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let out = PyDict::new(py);
-        for (k, v) in self.inner.layer_of()? {
+        for (k, v) in h5(py, || self.inner.layer_of())? {
             out.set_item(k, v)?;
         }
         Ok(out)
     }
     fn layer_classes<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyTuple>> {
-        self.live()?;
-        let layers = self.inner.layer_classes()?;
+        h5(py, || self.live())?;
+        let layers = h5(py, || self.inner.layer_classes())?;
         Ok(PyTuple::new(py, layers.into_iter().map(|l| PyTuple::new(py, l)).collect::<PyResult<Vec<_>>>()?)?)
     }
     #[pyo3(signature = (layer, roi=None))]
     fn read_layer<'py>(&self, py: Python<'py>, layer: usize, roi: Option<&Bound<'py, PyAny>>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let roi = slices(roi)?;
         let ann = self.inner.clone();
         Ok(nd_to_py(py, py.detach(move || ann.read_layer(layer, roi.as_deref()))?))
     }
     #[getter]
     fn bit_class_ids<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        let ids = self.inner.bit_class_ids()?;
+        h5(py, || self.live())?;
+        let ids = h5(py, || self.inner.bit_class_ids())?;
         Ok(array_to_py(py, ArrayD::from_shape_vec(IxDyn(&[ids.len()]), ids)?))
     }
     #[getter]
-    fn n_planes(&self) -> R<usize> {
-        self.live()?;
-        Ok(self.inner.n_planes()?)
+    fn n_planes(&self, py: Python<'_>) -> R<usize> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.n_planes()?)
+        })
     }
     #[getter]
     fn position_of<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyDict>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let out = PyDict::new(py);
-        let mut found: Vec<(i64, usize)> = self.inner.position_of()?.into_iter().collect();
+        let mut found: Vec<(i64, usize)> = h5(py, || self.inner.position_of())?.into_iter().collect();
         found.sort_by_key(|(_, p)| *p);
         for (k, v) in found {
             out.set_item(k, v)?;
@@ -566,18 +589,22 @@ impl AnnotationHandle {
         Ok(out)
     }
     fn classes_at<'py>(&self, py: Python<'py>, voxel: Vec<i64>) -> R<Bound<'py, PyTuple>> {
-        self.live()?;
-        Ok(PyTuple::new(py, self.inner.classes_at(&voxel)?)?)
+        h5(py, || self.live())?;
+        Ok(PyTuple::new(py, h5(py, || self.inner.classes_at(&voxel))?)?)
     }
     #[getter]
-    fn normalized(&self) -> R<bool> {
-        self.live()?;
-        Ok(self.inner.normalized()?)
+    fn normalized(&self, py: Python<'_>) -> R<bool> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.normalized()?)
+        })
     }
     #[getter]
-    fn threshold(&self) -> R<f64> {
-        self.live()?;
-        Ok(self.inner.threshold()?)
+    fn threshold(&self, py: Python<'_>) -> R<f64> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.threshold()?)
+        })
     }
     #[pyo3(signature = (classes=None, roi=None))]
     fn probabilities<'py>(
@@ -586,35 +613,37 @@ impl AnnotationHandle {
         classes: Option<&Bound<'py, PyAny>>,
         roi: Option<&Bound<'py, PyAny>>,
     ) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let classes = opt_keys(classes)?;
         let roi = slices(roi)?;
         let ann = self.inner.clone();
         Ok(array_to_py(py, py.detach(move || ann.probabilities(classes.as_deref(), roi.as_deref()))?))
     }
     #[getter]
-    fn has_masks(&self) -> R<bool> {
-        self.live()?;
-        Ok(self.inner.has_masks()?)
+    fn has_masks(&self, py: Python<'_>) -> R<bool> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.has_masks()?)
+        })
     }
     #[getter]
     fn boxes<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        self.column(py, "boxes", || Ok(array_to_py(py, self.inner.boxes()?)))
+        h5(py, || self.live())?;
+        self.column(py, "boxes", || Ok(array_to_py(py, h5(py, || self.inner.boxes())?)))
     }
     #[getter]
     fn object_class_ids<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         self.column(py, "object_class_ids", || {
-            let ids = self.inner.object_class_ids()?;
+            let ids = h5(py, || self.inner.object_class_ids())?;
             Ok(array_to_py(py, ArrayD::from_shape_vec(IxDyn(&[ids.len()]), ids)?))
         })
     }
     #[getter]
     fn instance_ids<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         self.column(py, "instance_ids", || {
-            Ok(match self.inner.instance_ids()? {
+            Ok(match h5(py, || self.inner.instance_ids())? {
                 Some(ids) => array_to_py(py, ArrayD::from_shape_vec(IxDyn(&[ids.len()]), ids)?),
                 None => py.None().into_bound(py),
             })
@@ -622,21 +651,23 @@ impl AnnotationHandle {
     }
     #[getter]
     fn scores<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         self.column(py, "scores", || {
-            Ok(match self.inner.scores()? {
+            Ok(match h5(py, || self.inner.scores())? {
                 Some(s) => array_to_py(py, ArrayD::from_shape_vec(IxDyn(&[s.len()]), s)?),
                 None => py.None().into_bound(py),
             })
         })
     }
     #[getter]
-    fn n_objects(&self) -> R<usize> {
-        self.live()?;
-        Ok(self.inner.n_objects()?)
+    fn n_objects(&self, py: Python<'_>) -> R<usize> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.n_objects()?)
+        })
     }
     fn crop<'py>(&self, py: Python<'py>, index: usize) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let ann = self.inner.clone();
         Ok(match py.detach(move || ann.crop(index))? {
             Some(c) => array_to_py(py, c),
@@ -645,19 +676,19 @@ impl AnnotationHandle {
     }
     /// Every instance as `(index, instance_id, class_id, box, mask, score)`.
     fn instances<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyList>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let ann = self.inner.clone();
         let found = py.detach(move || ann.instances())?;
         Ok(PyList::new(py, found.into_iter().map(|i| instance_tuple(py, i)).collect::<PyResult<Vec<_>>>()?)?)
     }
     fn instance<'py>(&self, py: Python<'py>, instance_id: u64) -> R<Bound<'py, PyTuple>> {
-        self.live()?;
-        Ok(instance_tuple(py, self.inner.instance(instance_id)?)?)
+        h5(py, || self.live())?;
+        Ok(instance_tuple(py, h5(py, || self.inner.instance(instance_id))?)?)
     }
     fn tracking<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyDict>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let out = PyDict::new(py);
-        for (k, v) in self.inner.tracking()? {
+        for (k, v) in h5(py, || self.inner.tracking())? {
             out.set_item(k, v)?;
         }
         Ok(out)
@@ -665,18 +696,22 @@ impl AnnotationHandle {
 
     // -- geometric --------------------------------------------------------------------
     #[getter]
-    fn space(&self) -> R<String> {
-        self.live()?;
-        Ok(self.inner.space()?)
+    fn space(&self, py: Python<'_>) -> R<String> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.space()?)
+        })
     }
     #[getter]
     fn frame_uid(&self) -> Option<String> {
         self.inner.frame_uid()
     }
     #[getter]
-    fn n_spatial(&self) -> R<usize> {
-        self.live()?;
-        Ok(self.inner.n_spatial()?)
+    fn n_spatial(&self, py: Python<'_>) -> R<usize> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.n_spatial()?)
+        })
     }
     #[pyo3(signature = (coords, *, grid=None))]
     fn to_world<'py>(
@@ -685,7 +720,7 @@ impl AnnotationHandle {
         coords: &Bound<'py, PyAny>,
         grid: Option<&Bound<'py, PyAny>>,
     ) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let grid = grid_ref_owned(grid)?;
         let coords = f64_array(coords)?;
         let ann = self.inner.clone();
@@ -700,7 +735,7 @@ impl AnnotationHandle {
         coords: &Bound<'py, PyAny>,
         grid: Option<&Bound<'py, PyAny>>,
     ) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let grid = grid_ref_owned(grid)?;
         let coords = f64_array(coords)?;
         let ann = self.inner.clone();
@@ -710,8 +745,8 @@ impl AnnotationHandle {
     }
     #[getter]
     fn attributes<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        Ok(match self.inner.attributes()? {
+        h5(py, || self.live())?;
+        Ok(match h5(py, || self.inner.attributes())? {
             Some(items) => {
                 PyTuple::new(py, items.iter().map(|v| json_to_py(py, v)).collect::<PyResult<Vec<_>>>()?)?.into_any()
             }
@@ -719,28 +754,32 @@ impl AnnotationHandle {
         })
     }
     #[getter]
-    fn n_items(&self) -> R<usize> {
-        self.live()?;
-        Ok(self.inner.n_items()?)
+    fn n_items(&self, py: Python<'_>) -> R<usize> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.n_items()?)
+        })
     }
     #[getter]
-    fn box_ndim(&self) -> R<usize> {
-        self.live()?;
-        Ok(self.inner.box_ndim()?)
+    fn box_ndim(&self, py: Python<'_>) -> R<usize> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.box_ndim()?)
+        })
     }
     #[getter]
     fn slice_index<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        Ok(match self.inner.slice_index()? {
+        h5(py, || self.live())?;
+        Ok(match h5(py, || self.inner.slice_index())? {
             Some(s) => array_to_py(py, ArrayD::from_shape_vec(IxDyn(&[s.len()]), s)?),
             None => py.None().into_bound(py),
         })
     }
     #[pyo3(signature = (grid=None))]
     fn as_slices<'py>(&self, py: Python<'py>, grid: Option<&Bound<'py, PyAny>>) -> R<Bound<'py, PyList>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let grid = grid_ref_owned(grid)?;
-        let found = with_grid(&grid, |g| self.inner.as_slices(g))?;
+        let found = h5(py, || with_grid(&grid, |g| self.inner.as_slices(g)))?;
         let builtins = py.import("builtins")?;
         let slice = builtins.getattr("slice")?;
         let out = PyList::empty(py);
@@ -752,229 +791,251 @@ impl AnnotationHandle {
     }
     #[pyo3(signature = (grid=None))]
     fn world_corners<'py>(&self, py: Python<'py>, grid: Option<&Bound<'py, PyAny>>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let grid = grid_ref_owned(grid)?;
-        Ok(array_to_py(py, with_grid(&grid, |g| self.inner.world_corners(g))?.into_dyn()))
+        Ok(array_to_py(py, h5(py, || with_grid(&grid, |g| self.inner.world_corners(g)))?.into_dyn()))
     }
     #[pyo3(signature = (grid=None))]
     fn as_world<'py>(&self, py: Python<'py>, grid: Option<&Bound<'py, PyAny>>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let grid = grid_ref_owned(grid)?;
-        Ok(array_to_py(py, with_grid(&grid, |g| self.inner.as_world(g))?.into_dyn()))
+        Ok(array_to_py(py, h5(py, || with_grid(&grid, |g| self.inner.as_world(g)))?.into_dyn()))
     }
     fn obb_corners<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        Ok(array_to_py(py, self.inner.obb_corners()?.into_dyn()))
+        h5(py, || self.live())?;
+        Ok(array_to_py(py, h5(py, || self.inner.obb_corners())?.into_dyn()))
     }
     fn obb_as_aabb<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        Ok(array_to_py(py, self.inner.obb_as_aabb()?.into_dyn()))
+        h5(py, || self.live())?;
+        Ok(array_to_py(py, h5(py, || self.inner.obb_as_aabb())?.into_dyn()))
     }
     fn obb_volumes<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        let v = self.inner.obb_volumes()?;
+        h5(py, || self.live())?;
+        let v = h5(py, || self.inner.obb_volumes())?;
         Ok(array_to_py(py, ArrayD::from_shape_vec(IxDyn(&[v.len()]), v)?))
     }
     #[getter]
     fn visibility<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        Ok(array_to_py(py, self.inner.visibility()?))
+        h5(py, || self.live())?;
+        Ok(array_to_py(py, h5(py, || self.inner.visibility())?))
     }
     #[getter]
-    fn skeleton_id(&self) -> R<Option<String>> {
-        self.live()?;
-        Ok(self.inner.skeleton_id()?)
+    fn skeleton_id(&self, py: Python<'_>) -> R<Option<String>> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.skeleton_id()?)
+        })
     }
-    fn skeleton(&self) -> R<Option<crate::labels::Skeleton>> {
-        self.live()?;
-        Ok(self.inner.skeleton()?.map(crate::labels::Skeleton))
+    fn skeleton(&self, py: Python<'_>) -> R<Option<crate::labels::Skeleton>> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.skeleton()?.map(crate::labels::Skeleton))
+        })
     }
     fn labelled<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        Ok(array_to_py(py, self.inner.labelled()?))
+        h5(py, || self.live())?;
+        Ok(array_to_py(py, h5(py, || self.inner.labelled())?))
     }
     #[getter]
     fn point_names<'py>(&self, py: Python<'py>) -> R<Option<Bound<'py, PyTuple>>> {
-        self.live()?;
-        Ok(self.inner.point_names()?.map(|n| PyTuple::new(py, n)).transpose()?)
+        h5(py, || self.live())?;
+        Ok(h5(py, || self.inner.point_names())?.map(|n| PyTuple::new(py, n)).transpose()?)
     }
     #[getter]
-    fn correspondence(&self) -> R<Option<String>> {
-        self.live()?;
-        Ok(self.inner.correspondence()?)
+    fn correspondence(&self, py: Python<'_>) -> R<Option<String>> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.correspondence()?)
+        })
     }
     fn named_points<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyDict>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let out = PyDict::new(py);
-        for (k, v) in self.inner.named_points()? {
+        for (k, v) in h5(py, || self.inner.named_points())? {
             out.set_item(k, array_to_py(py, ArrayD::from_shape_vec(IxDyn(&[v.len()]), v)?))?;
         }
         Ok(out)
     }
     #[getter]
     fn contour_offsets<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        let v = self.inner.contour_offsets()?;
+        h5(py, || self.live())?;
+        let v = h5(py, || self.inner.contour_offsets())?;
         Ok(array_to_py(py, ArrayD::from_shape_vec(IxDyn(&[v.len()]), v)?))
     }
     #[getter]
     fn contour_planes<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        Ok(array_to_py(py, self.inner.contour_planes()?.into_dyn()))
+        h5(py, || self.live())?;
+        Ok(array_to_py(py, h5(py, || self.inner.contour_planes())?.into_dyn()))
     }
     #[getter]
     fn contour_roles<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyTuple>> {
-        self.live()?;
-        Ok(PyTuple::new(py, self.inner.contour_roles()?)?)
+        h5(py, || self.live())?;
+        Ok(PyTuple::new(py, h5(py, || self.inner.contour_roles())?)?)
     }
     fn polygon<'py>(&self, py: Python<'py>, index: usize) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        Ok(array_to_py(py, self.inner.polygon(index)?))
+        h5(py, || self.live())?;
+        Ok(array_to_py(py, h5(py, || self.inner.polygon(index))?))
     }
     /// Every polygon as `(vertices, class_id, (axis, index), role)`.
     fn polygons<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyList>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let out = PyList::empty(py);
-        for p in self.inner.polygons()? {
+        for p in h5(py, || self.inner.polygons())? {
             out.append((array_to_py(py, p.vertices), p.class_id, p.plane, p.role))?;
         }
         Ok(out)
     }
     fn by_plane<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyDict>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let out = PyDict::new(py);
-        for ((a, b), v) in self.inner.by_plane()? {
+        for ((a, b), v) in h5(py, || self.inner.by_plane())? {
             out.set_item((a, b), PyList::new(py, v)?)?;
         }
         Ok(out)
     }
     #[getter]
     fn polyline_offsets<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        let v = self.inner.polyline_offsets()?;
+        h5(py, || self.live())?;
+        let v = h5(py, || self.inner.polyline_offsets())?;
         Ok(array_to_py(py, ArrayD::from_shape_vec(IxDyn(&[v.len()]), v)?))
     }
     #[getter]
     fn polyline_planes<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        Ok(array_to_py(py, self.inner.polyline_planes()?.into_dyn()))
+        h5(py, || self.live())?;
+        Ok(array_to_py(py, h5(py, || self.inner.polyline_planes())?.into_dyn()))
     }
     fn polyline<'py>(&self, py: Python<'py>, index: usize) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        Ok(array_to_py(py, self.inner.polyline(index)?))
+        h5(py, || self.live())?;
+        Ok(array_to_py(py, h5(py, || self.inner.polyline(index))?))
     }
     /// Every polyline as `(vertices, class_id, (axis, index))` (1.2 §3).
     fn polylines<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyList>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let out = PyList::empty(py);
-        for p in self.inner.polylines()? {
+        for p in h5(py, || self.inner.polylines())? {
             out.append((array_to_py(py, p.vertices), p.class_id, p.plane))?;
         }
         Ok(out)
     }
     #[getter]
-    fn n_submeshes(&self) -> R<usize> {
-        self.live()?;
-        Ok(self.inner.n_submeshes()?)
+    fn n_submeshes(&self, py: Python<'_>) -> R<usize> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.n_submeshes()?)
+        })
     }
     fn mesh_bounds<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        Ok(array_to_py(py, self.inner.mesh_bounds()?.into_dyn()))
+        h5(py, || self.live())?;
+        Ok(array_to_py(py, h5(py, || self.inner.mesh_bounds())?.into_dyn()))
     }
 
     // -- classification ------------------------------------------------------------------
     #[getter]
-    fn scope(&self) -> R<String> {
-        self.live()?;
-        Ok(self.inner.scope()?)
+    fn scope(&self, py: Python<'_>) -> R<String> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.scope()?)
+        })
     }
     #[getter]
-    fn multilabel(&self) -> R<bool> {
-        self.live()?;
-        Ok(self.inner.multilabel()?)
+    fn multilabel(&self, py: Python<'_>) -> R<bool> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.multilabel()?)
+        })
     }
     #[getter]
     fn asserted_class_ids<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        let v = self.inner.asserted_class_ids()?;
+        h5(py, || self.live())?;
+        let v = h5(py, || self.inner.asserted_class_ids())?;
         Ok(array_to_py(py, ArrayD::from_shape_vec(IxDyn(&[v.len()]), v)?))
     }
     #[getter]
     fn assertion_values<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        let v = self.inner.assertion_values()?;
+        h5(py, || self.live())?;
+        let v = h5(py, || self.inner.assertion_values())?;
         Ok(array_to_py(py, ArrayD::from_shape_vec(IxDyn(&[v.len()]), v)?))
     }
     #[getter]
     fn scope_ids<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        Ok(match self.inner.scope_ids()? {
+        h5(py, || self.live())?;
+        Ok(match h5(py, || self.inner.scope_ids())? {
             Some(v) => array_to_py(py, ArrayD::from_shape_vec(IxDyn(&[v.len()]), v)?),
             None => py.None().into_bound(py),
         })
     }
     #[getter]
     fn schemes<'py>(&self, py: Python<'py>) -> R<Option<Bound<'py, PyTuple>>> {
-        self.live()?;
-        Ok(self.inner.schemes()?.map(|s| PyTuple::new(py, s)).transpose()?)
+        h5(py, || self.live())?;
+        Ok(h5(py, || self.inner.schemes())?.map(|s| PyTuple::new(py, s)).transpose()?)
     }
     #[getter]
     fn scheme_values<'py>(&self, py: Python<'py>) -> R<Option<Bound<'py, PyTuple>>> {
-        self.live()?;
-        Ok(self.inner.scheme_values()?.map(|s| PyTuple::new(py, s)).transpose()?)
+        h5(py, || self.live())?;
+        Ok(h5(py, || self.inner.scheme_values())?.map(|s| PyTuple::new(py, s)).transpose()?)
     }
     /// Every assertion as `(class_id, value, scope_id, scheme, scheme_value)`.
     fn assertions<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyList>> {
-        self.live()?;
-        let found = self.inner.assertions()?;
+        h5(py, || self.live())?;
+        let found = h5(py, || self.inner.assertions())?;
         Ok(PyList::new(py, found.iter().map(|a| assertion_tuple(py, a)).collect::<PyResult<Vec<_>>>()?)?)
     }
     #[getter]
     fn labels<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyDict>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let out = PyDict::new(py);
-        for (k, v) in self.inner.labels()? {
+        for (k, v) in h5(py, || self.inner.labels())? {
             out.set_item(k, v)?;
         }
         Ok(out)
     }
     #[getter]
     fn positives<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyTuple>> {
-        self.live()?;
-        Ok(PyTuple::new(py, self.inner.positives()?)?)
+        h5(py, || self.live())?;
+        Ok(PyTuple::new(py, h5(py, || self.inner.positives())?)?)
     }
     #[pyo3(signature = (class_key_, *, scope_id=None))]
-    fn value(&self, class_key_: &Bound<'_, PyAny>, scope_id: Option<i64>) -> R<Option<f64>> {
-        self.live()?;
-        Ok(self.inner.value(&class_key(class_key_)?, scope_id)?)
+    fn value(&self, py: Python<'_>, class_key_: &Bound<'_, PyAny>, scope_id: Option<i64>) -> R<Option<f64>> {
+        let key = class_key(class_key_)?;
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.value(&key, scope_id)?)
+        })
     }
     #[pyo3(signature = (class_key_, *, scope_id=None))]
-    fn state(&self, class_key_: &Bound<'_, PyAny>, scope_id: Option<i64>) -> R<&'static str> {
-        self.live()?;
-        Ok(self.inner.state(&class_key(class_key_)?, scope_id)?)
+    fn state(&self, py: Python<'_>, class_key_: &Bound<'_, PyAny>, scope_id: Option<i64>) -> R<&'static str> {
+        let key = class_key(class_key_)?;
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.state(&key, scope_id)?)
+        })
     }
-    fn scheme(&self, name: &str) -> R<Option<String>> {
-        self.live()?;
-        Ok(self.inner.scheme(name)?)
+    fn scheme(&self, py: Python<'_>, name: &str) -> R<Option<String>> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.scheme(name)?)
+        })
     }
     /// `{scope_id: [assertion tuples]}`.
     fn by_scope_id<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyDict>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let out = PyDict::new(py);
-        for (k, v) in self.inner.by_scope_id()? {
+        for (k, v) in h5(py, || self.inner.by_scope_id())? {
             out.set_item(k, PyList::new(py, v.iter().map(|a| assertion_tuple(py, a)).collect::<PyResult<Vec<_>>>()?)?)?;
         }
         Ok(out)
     }
     #[getter]
-    fn is_change_label(&self) -> R<bool> {
-        self.live()?;
-        Ok(self.inner.is_change_label()?)
+    fn is_change_label(&self, py: Python<'_>) -> R<bool> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.is_change_label()?)
+        })
     }
     #[getter]
     fn compared_timepoints<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyTuple>> {
-        self.live()?;
-        Ok(PyTuple::new(py, self.inner.compared_timepoints()?)?)
+        h5(py, || self.live())?;
+        Ok(PyTuple::new(py, h5(py, || self.inner.compared_timepoints())?)?)
     }
 }
 
@@ -1041,9 +1102,11 @@ impl TransformHandle {
         crate::transforms::TransformHeader { inner: self.inner.header.clone() }
     }
     #[getter]
-    fn is_invertible(&self) -> R<bool> {
-        self.live()?;
-        Ok(self.inner.is_invertible())
+    fn is_invertible(&self, py: Python<'_>) -> R<bool> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.is_invertible())
+        })
     }
     #[getter]
     fn timepoints<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
@@ -1053,14 +1116,16 @@ impl TransformHandle {
         self.inner.grid_in(frame).cloned().map(Grid::wrap)
     }
     fn transform_points<'py>(&self, py: Python<'py>, points: &Bound<'py, PyAny>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let points = f64_array(points)?;
         let t = self.inner.clone();
         Ok(array_to_py(py, py.detach(move || t.transform_points(&points))?))
     }
-    fn inverse(&self) -> R<Option<TransformHandle>> {
-        self.live()?;
-        Ok(self.inner.inverse()?.map(TransformHandle::wrap))
+    fn inverse(&self, py: Python<'_>) -> R<Option<TransformHandle>> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.inverse()?.map(TransformHandle::wrap))
+        })
     }
     #[getter]
     fn steps(&self) -> Option<Vec<TransformHandle>> {
@@ -1068,58 +1133,74 @@ impl TransformHandle {
     }
     #[getter]
     fn matrix<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        Ok(array_to_py(py, self.inner.matrix()?.into_dyn()))
+        h5(py, || self.live())?;
+        Ok(array_to_py(py, h5(py, || self.inner.matrix())?.into_dyn()))
     }
     #[getter]
-    fn n_spatial(&self) -> R<usize> {
-        self.live()?;
-        Ok(self.inner.n_spatial()?)
+    fn n_spatial(&self, py: Python<'_>) -> R<usize> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.n_spatial()?)
+        })
     }
     fn inverse_matrix<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        Ok(array_to_py(py, self.inner.inverse_matrix()?.into_dyn()))
+        h5(py, || self.live())?;
+        Ok(array_to_py(py, h5(py, || self.inner.inverse_matrix())?.into_dyn()))
     }
     fn inverse_points<'py>(&self, py: Python<'py>, points: &Bound<'py, PyAny>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let points = f64_array(points)?;
         let t = self.inner.clone();
         Ok(array_to_py(py, py.detach(move || t.inverse_points(&points))?))
     }
     #[getter]
-    fn jacobian_determinant_value(&self) -> R<f64> {
-        self.live()?;
-        Ok(self.inner.jacobian_determinant_value()?)
+    fn jacobian_determinant_value(&self, py: Python<'_>) -> R<f64> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.jacobian_determinant_value()?)
+        })
     }
     #[getter]
-    fn field(&self) -> R<Dataset> {
-        self.live()?;
-        Ok(Dataset::wrap(self.inner.field()?))
+    fn field(&self, py: Python<'_>) -> R<Dataset> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(Dataset::wrap(self.inner.field()?))
+        })
     }
     #[getter]
-    fn field_grid_id(&self) -> R<String> {
-        self.live()?;
-        Ok(self.inner.field_grid_id()?)
+    fn field_grid_id(&self, py: Python<'_>) -> R<String> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.field_grid_id()?)
+        })
     }
     #[getter]
-    fn field_grid(&self) -> R<Grid> {
-        self.live()?;
-        Ok(Grid::wrap(self.inner.field_grid()?.clone()))
+    fn field_grid(&self, py: Python<'_>) -> R<Grid> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(Grid::wrap(self.inner.field_grid()?.clone()))
+        })
     }
     #[getter]
-    fn vector_space(&self) -> R<String> {
-        self.live()?;
-        Ok(self.inner.vector_space()?)
+    fn vector_space(&self, py: Python<'_>) -> R<String> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.vector_space()?)
+        })
     }
     #[getter]
-    fn interpolation(&self) -> R<String> {
-        self.live()?;
-        Ok(self.inner.interpolation()?)
+    fn interpolation(&self, py: Python<'_>) -> R<String> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.interpolation()?)
+        })
     }
     #[getter]
-    fn extrapolation(&self) -> R<String> {
-        self.live()?;
-        Ok(self.inner.extrapolation()?)
+    fn extrapolation(&self, py: Python<'_>) -> R<String> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.extrapolation()?)
+        })
     }
     #[pyo3(signature = (roi=None, component=None))]
     fn read_field<'py>(
@@ -1128,86 +1209,96 @@ impl TransformHandle {
         roi: Option<&Bound<'py, PyAny>>,
         component: Option<usize>,
     ) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let roi = slices(roi)?;
         let t = self.inner.clone();
         Ok(nd_to_py(py, py.detach(move || t.read_field(roi.as_deref(), component))?))
     }
     fn displacement_at<'py>(&self, py: Python<'py>, points: &Bound<'py, PyAny>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let points = f64_array(points)?;
         let t = self.inner.clone();
         Ok(array_to_py(py, py.detach(move || t.displacement_at(&points))?))
     }
     /// The stored field interpolated at continuous field indices, `(N, S)`.
     fn sample_indices<'py>(&self, py: Python<'py>, indices: &Bound<'py, PyAny>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let found = crate::convert::matrix(indices)?;
         let t = self.inner.clone();
         Ok(array_to_py(py, py.detach(move || t.sample_indices(&found))?.into_dyn()))
     }
     #[pyo3(signature = (roi=None))]
     fn jacobian_determinant<'py>(&self, py: Python<'py>, roi: Option<&Bound<'py, PyAny>>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let roi = slices(roi)?;
         let t = self.inner.clone();
         Ok(array_to_py(py, py.detach(move || t.jacobian_determinant(roi.as_deref()))?))
     }
     #[pyo3(signature = (roi=None))]
     fn folding_fraction(&self, py: Python<'_>, roi: Option<&Bound<'_, PyAny>>) -> R<f64> {
-        self.live()?;
+        h5(py, || self.live())?;
         let roi = slices(roi)?;
         let t = self.inner.clone();
         Ok(py.detach(move || t.folding_fraction(roi.as_deref()))?)
     }
     #[getter]
     fn max_magnitude(&self, py: Python<'_>) -> R<f64> {
-        self.live()?;
+        h5(py, || self.live())?;
         let t = self.inner.clone();
         Ok(py.detach(move || t.max_magnitude())?)
     }
     #[getter]
     fn control_points<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        Ok(array_to_py(py, self.inner.control_points()?))
+        h5(py, || self.live())?;
+        Ok(array_to_py(py, h5(py, || self.inner.control_points())?))
     }
     #[getter]
-    fn cp_grid_id(&self) -> R<String> {
-        self.live()?;
-        Ok(self.inner.cp_grid_id()?)
+    fn cp_grid_id(&self, py: Python<'_>) -> R<String> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.cp_grid_id()?)
+        })
     }
     #[getter]
-    fn cp_grid(&self) -> R<Grid> {
-        self.live()?;
-        Ok(Grid::wrap(self.inner.cp_grid()?.clone()))
+    fn cp_grid(&self, py: Python<'_>) -> R<Grid> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(Grid::wrap(self.inner.cp_grid()?.clone()))
+        })
     }
     #[getter]
-    fn order(&self) -> R<i64> {
-        self.live()?;
-        Ok(self.inner.order()?)
+    fn order(&self, py: Python<'_>) -> R<i64> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.order()?)
+        })
     }
     fn to_displacement_field<'py>(&self, py: Python<'py>, grid: &Bound<'py, PyAny>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
+        h5(py, || self.live())?;
         let grid = crate::geometry::grid_arg(grid)?;
         let t = self.inner.clone();
         Ok(array_to_py(py, py.detach(move || t.to_displacement_field(&grid))?))
     }
     #[getter]
     fn component_ids<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyTuple>> {
-        self.live()?;
-        Ok(PyTuple::new(py, self.inner.component_ids()?)?)
+        h5(py, || self.live())?;
+        Ok(PyTuple::new(py, h5(py, || self.inner.component_ids())?)?)
     }
-    fn components(&self) -> R<Vec<TransformHandle>> {
-        self.live()?;
-        Ok(self.inner.components()?.into_iter().map(TransformHandle::wrap).collect())
+    fn components(&self, py: Python<'_>) -> R<Vec<TransformHandle>> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.components()?.into_iter().map(TransformHandle::wrap).collect())
+        })
     }
-    fn check_chain(&self) -> R<Vec<String>> {
-        self.live()?;
-        Ok(self.inner.check_chain())
+    fn check_chain(&self, py: Python<'_>) -> R<Vec<String>> {
+        h5(py, || -> R<_> {
+            self.live()?;
+            Ok(self.inner.check_chain())
+        })
     }
     fn summary<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        self.live()?;
-        Ok(json_to_py(py, &self.inner.summary()?)?)
+        h5(py, || self.live())?;
+        Ok(json_to_py(py, &h5(py, || self.inner.summary())?)?)
     }
     fn __repr__(&self) -> String {
         self.inner.repr()
@@ -1218,13 +1309,16 @@ impl TransformHandle {
     }
     #[staticmethod]
     fn can_invert(inner: &Bound<'_, TransformHandle>) -> R<bool> {
-        inner.get().live()?;
-        Ok(medh5::transforms::model::can_invert(&inner.get().inner)?)
+        let handle = inner.get();
+        h5(inner.py(), || {
+            handle.live()?;
+            Ok(medh5::transforms::model::can_invert(&handle.inner)?)
+        })
     }
     #[staticmethod]
-    fn chain(steps: Vec<Bound<'_, TransformHandle>>) -> R<TransformHandle> {
+    fn chain(py: Python<'_>, steps: Vec<Bound<'_, TransformHandle>>) -> R<TransformHandle> {
         let steps = steps.iter().map(|s| (*s.get().inner).clone()).collect();
-        Ok(TransformHandle::wrap(EngineTransform::chain(steps)?))
+        Ok(TransformHandle::wrap(h5(py, || EngineTransform::chain(steps))?))
     }
 }
 
@@ -1254,23 +1348,23 @@ impl IndexHandle {
     }
     #[getter]
     fn class_ids<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyTuple>> {
-        Ok(PyTuple::new(py, self.inner.class_ids()?)?)
+        Ok(PyTuple::new(py, h5(py, || self.inner.class_ids())?)?)
     }
-    fn has_class(&self, class_id: i64) -> R<bool> {
-        Ok(self.inner.has_class(class_id)?)
-    }
-    #[getter]
-    fn source_digest(&self) -> R<Option<String>> {
-        Ok(self.inner.source_digest()?)
+    fn has_class(&self, py: Python<'_>, class_id: i64) -> R<bool> {
+        h5(py, || -> R<_> { Ok(self.inner.has_class(class_id)?) })
     }
     #[getter]
-    fn max_coords(&self) -> R<i64> {
-        Ok(self.inner.max_coords()?)
+    fn source_digest(&self, py: Python<'_>) -> R<Option<String>> {
+        h5(py, || -> R<_> { Ok(self.inner.source_digest()?) })
+    }
+    #[getter]
+    fn max_coords(&self, py: Python<'_>) -> R<i64> {
+        h5(py, || -> R<_> { Ok(self.inner.max_coords()?) })
     }
     #[getter]
     fn voxel_counts<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyDict>> {
         let out = PyDict::new(py);
-        for (k, v) in self.inner.voxel_counts()? {
+        for (k, v) in h5(py, || self.inner.voxel_counts())? {
             out.set_item(k, v)?;
         }
         Ok(out)
@@ -1304,17 +1398,17 @@ impl IndexHandle {
     #[pyo3(signature = (mode="inverse_frequency"))]
     fn class_weights<'py>(&self, py: Python<'py>, mode: &str) -> R<Bound<'py, PyDict>> {
         let out = PyDict::new(py);
-        for (k, v) in self.inner.class_weights(mode)? {
+        for (k, v) in h5(py, || self.inner.class_weights(mode))? {
             out.set_item(k, v)?;
         }
         Ok(out)
     }
-    fn is_current(&self, annotation_digest: &str) -> R<bool> {
-        Ok(self.inner.is_current(annotation_digest)?)
+    fn is_current(&self, py: Python<'_>, annotation_digest: &str) -> R<bool> {
+        h5(py, || -> R<_> { Ok(self.inner.is_current(annotation_digest)?) })
     }
     #[getter]
-    fn has_occupancy(&self) -> R<bool> {
-        Ok(self.inner.has_occupancy()?)
+    fn has_occupancy(&self, py: Python<'_>) -> R<bool> {
+        h5(py, || -> R<_> { Ok(self.inner.has_occupancy()?) })
     }
     fn occupancy_plane<'py>(&self, py: Python<'py>, position: usize) -> R<Bound<'py, PyAny>> {
         let index = self.inner.clone();
@@ -1324,7 +1418,7 @@ impl IndexHandle {
         })
     }
     fn summary<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        Ok(json_to_py(py, &self.inner.summary()?)?)
+        Ok(json_to_py(py, &h5(py, || self.inner.summary())?)?)
     }
     fn __repr__(&self) -> String {
         format!("SamplingIndex({})", medh5::json::repr_str(&self.inner.ann_id))
@@ -1355,7 +1449,7 @@ impl SampleHandle {
     /// The engine sample, refused once closed --- by `close()`, or, for a
     /// collection member, by closing its collection.
     pub fn sample(&self) -> R<Arc<EngineSample>> {
-        let sample = self.inner.lock().unwrap().clone().ok_or_else(closed)?;
+        let sample = self.inner.lock().unwrap_or_else(PoisonError::into_inner).clone().ok_or_else(closed)?;
         medh5::h5::alive(&sample.root)?;
         Ok(sample)
     }
@@ -1364,10 +1458,12 @@ impl SampleHandle {
 /// The engine sample of a `SampleHandle`, or of a `Sample` holding one.
 pub fn sample_arg(obj: &Bound<'_, PyAny>) -> R<Arc<EngineSample>> {
     if let Ok(handle) = obj.cast::<SampleHandle>() {
-        return handle.get().sample();
+        let handle = handle.get();
+        return h5(obj.py(), || handle.sample());
     }
     let inner = obj.getattr("_handle")?;
-    inner.cast::<SampleHandle>().map_err(PyErr::from)?.get().sample()
+    let handle = inner.cast::<SampleHandle>().map_err(PyErr::from)?.get();
+    h5(obj.py(), || handle.sample())
 }
 
 #[pymethods]
@@ -1378,8 +1474,8 @@ impl SampleHandle {
     }
     /// The sample's root group (read-only use).
     #[getter]
-    fn root(&self) -> R<crate::nodes::Group> {
-        Ok(crate::nodes::Group::wrap(self.sample()?.root.clone()))
+    fn root(&self, py: Python<'_>) -> R<crate::nodes::Group> {
+        h5(py, || -> R<_> { Ok(crate::nodes::Group::wrap(self.sample()?.root.clone())) })
     }
     /// Close the file and everything read from it, as 1.x's sample did: an
     /// image, annotation or group still held becomes invalid rather than
@@ -1387,13 +1483,18 @@ impl SampleHandle {
     /// closing one releases the member alone, and the shard --- its other
     /// members, and what was read from this one --- stays open until the
     /// collection is closed.
-    fn close(&self) {
-        if let Some(sample) = self.inner.lock().unwrap().take() {
-            if !self.abandoned.load(std::sync::atomic::Ordering::Acquire) {
-                let _ = sample.close_file();
+    fn close(&self, py: Python<'_>) {
+        h5(py, || {
+            // Taken out first: the file closes with the lock let go, so a thread
+            // asking for the sample meanwhile is refused rather than kept waiting.
+            let taken = self.inner.lock().unwrap_or_else(PoisonError::into_inner).take();
+            if let Some(sample) = taken {
+                if !self.abandoned.load(std::sync::atomic::Ordering::Acquire) {
+                    let _ = sample.close_file();
+                }
+                drop(sample);
             }
-            drop(sample);
-        }
+        })
     }
     /// Make sure this process never closes the file: for a process that
     /// inherited the handle across `fork`, where closing would call into HDF5
@@ -1418,54 +1519,56 @@ impl SampleHandle {
     /// Whether the sample can be read: not once closed, and not, for a
     /// collection member, once its collection is closed.
     #[getter]
-    fn is_open(&self) -> bool {
-        self.inner.lock().unwrap().as_ref().is_some_and(|s| s.is_open())
+    fn is_open(&self, py: Python<'_>) -> bool {
+        h5(py, || self.inner.lock().unwrap_or_else(PoisonError::into_inner).as_ref().is_some_and(|s| s.is_open()))
     }
     /// `repr()`; a closed sample says so rather than raising, as a closed
     /// dataset does: debuggers, loggers and test reports all ask.
-    fn repr(&self) -> R<String> {
-        if !self.is_open() {
+    fn repr(&self, py: Python<'_>) -> R<String> {
+        if !self.is_open(py) {
             return Ok(match &self.path {
                 Some(path) => format!("Sample({}, closed)", medh5::json::repr_str(path)),
                 None => "Sample(closed)".to_string(),
             });
         }
-        Ok(self.sample()?.repr()?)
+        h5(py, || Ok(self.sample()?.repr()?))
     }
     /// The sample document (§2), as read --- a later minor's as its supported
     /// projection (1.1 §2.2): a copy, so editing it changes nothing in the
     /// file.
-    fn document(&self) -> R<crate::document::SampleDocument> {
-        Ok(crate::document::SampleDocument::owned(self.sample()?.document()?.clone()))
+    fn document(&self, py: Python<'_>) -> R<crate::document::SampleDocument> {
+        h5(py, || -> R<_> { Ok(crate::document::SampleDocument::owned(self.sample()?.document()?.clone())) })
     }
     #[getter]
-    fn version(&self) -> R<String> {
-        Ok(self.sample()?.version()?)
+    fn version(&self, py: Python<'_>) -> R<String> {
+        h5(py, || -> R<_> { Ok(self.sample()?.version()?) })
     }
     #[getter]
-    fn kind(&self) -> R<String> {
-        Ok(self.sample()?.kind()?)
+    fn kind(&self, py: Python<'_>) -> R<String> {
+        h5(py, || -> R<_> { Ok(self.sample()?.kind()?) })
     }
     #[getter]
-    fn profiles(&self) -> R<Vec<String>> {
-        Ok(self.sample()?.profiles()?.into_iter().collect())
+    fn profiles(&self, py: Python<'_>) -> R<Vec<String>> {
+        h5(py, || -> R<_> { Ok(self.sample()?.profiles()?.into_iter().collect()) })
     }
     #[getter]
-    fn content_id(&self) -> R<Option<String>> {
-        Ok(self.sample()?.content_id()?)
+    fn content_id(&self, py: Python<'_>) -> R<Option<String>> {
+        h5(py, || -> R<_> { Ok(self.sample()?.content_id()?) })
     }
     /// `full` or `projection` (a higher minor, read as what this engine knows).
     #[getter]
-    fn support(&self) -> R<&'static str> {
-        Ok(match self.sample()?.support()? {
-            medh5::version::Support::Full => "full",
-            medh5::version::Support::Projection => "projection",
-            medh5::version::Support::Unsupported => "unsupported",
+    fn support(&self, py: Python<'_>) -> R<&'static str> {
+        h5(py, || -> R<_> {
+            Ok(match self.sample()?.support()? {
+                medh5::version::Support::Full => "full",
+                medh5::version::Support::Projection => "projection",
+                medh5::version::Support::Unsupported => "unsupported",
+            })
         })
     }
     /// The clinical profile's records, when the sample declares it (1.1).
     fn clinical(&self, py: Python<'_>) -> R<Option<crate::clinical::ClinicalHandle>> {
-        let sample = self.sample()?;
+        let sample = h5(py, || self.sample())?;
         let reader = sample.clone();
         let found = py.detach(move || reader.clinical().map(|c| c.cloned()))?;
         Ok(found.map(|inner| crate::clinical::ClinicalHandle { inner, _sample: sample }))
@@ -1474,7 +1577,7 @@ impl SampleHandle {
     /// offsets and that document's bytes --- not the events, the links or any
     /// other document's text (1.1 §6).
     fn document_text(&self, py: Python<'_>, document_id: &str) -> R<String> {
-        let sample = self.sample()?;
+        let sample = h5(py, || self.sample())?;
         let id = document_id.to_string();
         Ok(py.detach(move || -> medh5::Result<String> {
             match sample.documents()? {
@@ -1488,32 +1591,32 @@ impl SampleHandle {
     }
     /// `{grid_id: Grid}`, with §3.7's implicit timepoint resolved.
     fn grids<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyDict>> {
-        let sample = self.sample()?;
+        let grids = h5(py, || -> R<_> { Ok(self.sample()?.grids()?.clone()) })?;
         let out = PyDict::new(py);
-        for (k, g) in sample.grids()?.iter() {
+        for (k, g) in grids.iter() {
             out.set_item(k, Grid::wrap(g.clone()))?;
         }
         Ok(out)
     }
     /// One grid: `KeyError`, or W913 for one a later minor's file holds that
     /// this engine's projection leaves out (1.1 §2.2).
-    fn grid(&self, grid_id: &str) -> R<Grid> {
-        Ok(Grid::wrap(self.sample()?.grid(grid_id)?.clone()))
+    fn grid(&self, py: Python<'_>, grid_id: &str) -> R<Grid> {
+        h5(py, || -> R<_> { Ok(Grid::wrap(self.sample()?.grid(grid_id)?.clone())) })
     }
-    fn reference_grid(&self) -> R<Grid> {
-        Ok(Grid::wrap(self.sample()?.reference_grid()?))
+    fn reference_grid(&self, py: Python<'_>) -> R<Grid> {
+        h5(py, || -> R<_> { Ok(Grid::wrap(self.sample()?.reference_grid()?)) })
     }
-    fn image_ids(&self) -> R<Vec<String>> {
-        Ok(self.sample()?.images()?.keys().cloned().collect())
+    fn image_ids(&self, py: Python<'_>) -> R<Vec<String>> {
+        h5(py, || -> R<_> { Ok(self.sample()?.images()?.keys().cloned().collect()) })
     }
-    fn image(&self, image_id: &str) -> R<ImageHandle> {
-        Ok(ImageHandle { inner: Arc::new(self.sample()?.image(image_id)?.clone()) })
+    fn image(&self, py: Python<'_>, image_id: &str) -> R<ImageHandle> {
+        h5(py, || -> R<_> { Ok(ImageHandle { inner: Arc::new(self.sample()?.image(image_id)?.clone()) }) })
     }
-    fn annotation_ids(&self) -> R<Vec<String>> {
-        Ok(self.sample()?.annotations()?.keys().cloned().collect())
+    fn annotation_ids(&self, py: Python<'_>) -> R<Vec<String>> {
+        h5(py, || -> R<_> { Ok(self.sample()?.annotations()?.keys().cloned().collect()) })
     }
-    fn annotation(&self, ann_id: &str) -> R<AnnotationHandle> {
-        Ok(AnnotationHandle::wrap(self.sample()?.annotation(ann_id)?.clone()))
+    fn annotation(&self, py: Python<'_>, ann_id: &str) -> R<AnnotationHandle> {
+        h5(py, || -> R<_> { Ok(AnnotationHandle::wrap(self.sample()?.annotation(ann_id)?.clone())) })
     }
     #[pyo3(signature = (ann_id, roi=None))]
     fn ignore_region<'py>(
@@ -1523,7 +1626,7 @@ impl SampleHandle {
         roi: Option<&Bound<'py, PyAny>>,
     ) -> R<Bound<'py, PyAny>> {
         let roi = slices(roi)?;
-        let sample = self.sample()?;
+        let sample = h5(py, || self.sample())?;
         Ok(array_to_py(py, py.detach(move || sample.ignore_region(ann_id, roi.as_deref()))?))
     }
     #[pyo3(signature = (image_id, roi=None))]
@@ -1534,62 +1637,72 @@ impl SampleHandle {
         roi: Option<&Bound<'py, PyAny>>,
     ) -> R<Bound<'py, PyAny>> {
         let roi = slices(roi)?;
-        let sample = self.sample()?;
+        let sample = h5(py, || self.sample())?;
         Ok(array_to_py(py, py.detach(move || sample.valid_region(image_id, roi.as_deref()))?))
     }
-    fn index_ids(&self) -> R<Vec<String>> {
-        Ok(self.sample()?.index()?.keys().cloned().collect())
+    fn index_ids(&self, py: Python<'_>) -> R<Vec<String>> {
+        h5(py, || -> R<_> { Ok(self.sample()?.index()?.keys().cloned().collect()) })
     }
-    fn index(&self, ann_id: &str) -> R<IndexHandle> {
-        let sample = self.sample()?;
-        let found = sample.index_entry(ann_id)?;
-        Ok(IndexHandle { inner: Arc::new(EngineIndex::new(&found.ann_id, found.group.clone())) })
+    fn index(&self, py: Python<'_>, ann_id: &str) -> R<IndexHandle> {
+        h5(py, || -> R<_> {
+            let sample = self.sample()?;
+            let found = sample.index_entry(ann_id)?;
+            Ok(IndexHandle { inner: Arc::new(EngineIndex::new(&found.ann_id, found.group.clone())) })
+        })
     }
-    fn fresh_indices(&self) -> R<Vec<String>> {
-        Ok(self.sample()?.fresh_indices()?.iter().cloned().collect())
+    fn fresh_indices(&self, py: Python<'_>) -> R<Vec<String>> {
+        h5(py, || -> R<_> { Ok(self.sample()?.fresh_indices()?.iter().cloned().collect()) })
     }
-    fn transform_ids(&self) -> R<Vec<String>> {
-        Ok(self.sample()?.transforms()?.keys().cloned().collect())
+    fn transform_ids(&self, py: Python<'_>) -> R<Vec<String>> {
+        h5(py, || -> R<_> { Ok(self.sample()?.transforms()?.keys().cloned().collect()) })
     }
-    fn transform(&self, transform_id: &str) -> R<TransformHandle> {
-        Ok(TransformHandle::wrap(self.sample()?.transform(transform_id)?.clone()))
+    fn transform(&self, py: Python<'_>, transform_id: &str) -> R<TransformHandle> {
+        h5(py, || -> R<_> { Ok(TransformHandle::wrap(self.sample()?.transform(transform_id)?.clone())) })
     }
     #[pyo3(signature = (source, target, by=None))]
-    fn transform_between(&self, source: &str, target: &str, by: Option<&str>) -> R<Option<TransformHandle>> {
-        let by = by.map(medh5::sample::KeyKind::parse).transpose()?;
-        Ok(self.sample()?.transform_between_as(source, target, by)?.map(TransformHandle::wrap))
+    fn transform_between(
+        &self,
+        py: Python<'_>,
+        source: &str,
+        target: &str,
+        by: Option<&str>,
+    ) -> R<Option<TransformHandle>> {
+        h5(py, || -> R<_> {
+            let by = by.map(medh5::sample::KeyKind::parse).transpose()?;
+            Ok(self.sample()?.transform_between_as(source, target, by)?.map(TransformHandle::wrap))
+        })
     }
-    fn frames_for(&self, key: &str) -> R<Vec<String>> {
-        Ok(self.sample()?.frames_for(key)?)
+    fn frames_for(&self, py: Python<'_>, key: &str) -> R<Vec<String>> {
+        h5(py, || -> R<_> { Ok(self.sample()?.frames_for(key)?) })
     }
-    fn resolve_frames(&self, from_frame: &str, to_frame: &str) -> R<Option<TransformHandle>> {
-        Ok(self.sample()?.resolve_frames(from_frame, to_frame)?.map(TransformHandle::wrap))
+    fn resolve_frames(&self, py: Python<'_>, from_frame: &str, to_frame: &str) -> R<Option<TransformHandle>> {
+        h5(py, || -> R<_> { Ok(self.sample()?.resolve_frames(from_frame, to_frame)?.map(TransformHandle::wrap)) })
     }
-    fn images_at(&self, timepoint: &str) -> R<Vec<String>> {
-        Ok(self.sample()?.images_at(timepoint)?)
+    fn images_at(&self, py: Python<'_>, timepoint: &str) -> R<Vec<String>> {
+        h5(py, || -> R<_> { Ok(self.sample()?.images_at(timepoint)?) })
     }
-    fn annotations_at(&self, timepoint: &str) -> R<Vec<String>> {
-        Ok(self.sample()?.annotations_at(timepoint)?)
+    fn annotations_at(&self, py: Python<'_>, timepoint: &str) -> R<Vec<String>> {
+        h5(py, || -> R<_> { Ok(self.sample()?.annotations_at(timepoint)?) })
     }
     fn attr_name_map<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyDict>> {
         let out = PyDict::new(py);
-        for (k, v) in self.sample()?.attr_name_map()? {
+        for (k, v) in h5(py, || -> R<_> { Ok(self.sample()?.attr_name_map()?) })? {
             out.set_item(k, PyTuple::new(py, v)?)?;
         }
         Ok(out)
     }
     #[pyo3(signature = (partial=None))]
     fn verify<'py>(&self, py: Python<'py>, partial: Option<Vec<String>>) -> R<Bound<'py, PyAny>> {
-        let sample = self.sample()?;
+        let sample = h5(py, || self.sample())?;
         let result = py.detach(move || sample.verify(partial.as_deref()))?;
         Ok(crate::integrity::verify_result_to_py(py, &result)?)
     }
     fn compute_content_id(&self, py: Python<'_>) -> R<String> {
-        let sample = self.sample()?;
+        let sample = h5(py, || self.sample())?;
         Ok(py.detach(move || sample.compute_content_id())?)
     }
     fn summary<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        let sample = self.sample()?;
+        let sample = h5(py, || self.sample())?;
         Ok(json_to_py(py, &py.detach(move || sample.summary())?)?)
     }
     #[pyo3(signature = (class_key=None, *, measure=true))]
@@ -1603,7 +1716,7 @@ impl SampleHandle {
             Some(k) if !k.is_none() => Some(crate::convert::class_key(k)?),
             _ => None,
         };
-        let sample = self.sample()?;
+        let sample = h5(py, || self.sample())?;
         let tracks = py.detach(move || medh5::curation::tracking::locate_tracks(&sample, key.as_ref(), measure))?;
         Ok(crate::tracking::Tracking::wrap(tracks))
     }

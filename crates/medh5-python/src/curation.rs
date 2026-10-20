@@ -16,6 +16,7 @@ use medh5::curation::timeline as tl_engine;
 
 use crate::convert::{json_to_py, py_to_json};
 use crate::errors::R;
+use crate::exclusive::Exclusive;
 use crate::record_class;
 use crate::records::{field, required, Kind};
 
@@ -186,10 +187,15 @@ record_class!(
 /// was given, and from the first read those it hands out --- so an edit to
 /// one's `params` is the graph's.  A document's provenance makes every change
 /// to the document as well.
-#[pyclass(module = "medh5.curation", name = "Provenance", skip_from_py_object)]
+#[pyclass(module = "medh5.curation", name = "Provenance", skip_from_py_object, frozen)]
 pub struct Provenance {
+    /// Changed by one thread at a time (E4).
+    state: Exclusive<ProvenanceState>,
+}
+
+struct ProvenanceState {
     /// The agents, and the activities as given or read.
-    pub inner: prov_engine::Provenance,
+    inner: prov_engine::Provenance,
     /// The activity objects, once given or read, in `inner`'s order.
     activities: Option<Vec<Py<Activity>>>,
     /// The document this is the provenance of.
@@ -204,16 +210,7 @@ fn activity_arg(obj: &Bound<'_, PyAny>) -> R<prov_engine::Activity> {
     Activity::arg(obj)
 }
 
-impl Provenance {
-    pub fn wrap(inner: prov_engine::Provenance) -> Self {
-        Provenance { inner, activities: None, document: None }
-    }
-
-    /// The provenance of `document`, read as `inner`.
-    pub fn read_from(inner: prov_engine::Provenance, document: &Bound<'_, PyAny>) -> Self {
-        Provenance { inner, activities: None, document: Some(document.clone().unbind()) }
-    }
-
+impl ProvenanceState {
     /// The object for an activity of the graph: for a document's
     /// provenance, one whose edits reach the document's activity.
     fn object(&self, py: Python<'_>, activity: prov_engine::Activity) -> PyResult<Py<Activity>> {
@@ -234,27 +231,80 @@ impl Provenance {
         }
         Ok(self.activities.as_ref().expect("made"))
     }
+}
+
+impl Provenance {
+    fn of(inner: prov_engine::Provenance, activities: Option<Vec<Py<Activity>>>, document: Option<Py<PyAny>>) -> Self {
+        Provenance { state: Exclusive::new("a Provenance", ProvenanceState { inner, activities, document }) }
+    }
+
+    pub fn wrap(inner: prov_engine::Provenance) -> Self {
+        Provenance::of(inner, None, None)
+    }
+
+    /// The provenance of `document`, read as `inner`.
+    pub fn read_from(inner: prov_engine::Provenance, document: &Bound<'_, PyAny>) -> Self {
+        Provenance::of(inner, None, Some(document.clone().unbind()))
+    }
 
     /// The activity objects whose activity `keep` selects.
-    fn select<'py>(
-        &mut self,
-        py: Python<'py>,
-        keep: impl Fn(&prov_engine::Activity) -> bool,
-    ) -> PyResult<Bound<'py, PyTuple>> {
-        let chosen: Vec<usize> = self.inner.activities().enumerate().filter(|(_, a)| keep(a)).map(|(i, _)| i).collect();
-        let objects = self.objects(py)?;
-        PyTuple::new(py, chosen.into_iter().map(|i| objects[i].clone_ref(py)))
+    fn select<'py>(&self, py: Python<'py>, keep: impl Fn(&prov_engine::Activity) -> bool) -> R<Bound<'py, PyTuple>> {
+        let pick = |state: &ProvenanceState, objects: &[Py<Activity>]| -> Vec<Py<Activity>> {
+            state.inner.activities().zip(objects).filter(|(a, _)| keep(a)).map(|(_, o)| o.clone_ref(py)).collect()
+        };
+        let chosen = {
+            let state = self.state.read()?;
+            state.activities.as_ref().map(|objects| pick(&state, objects))
+        };
+        let chosen = match chosen {
+            Some(chosen) => chosen,
+            None => {
+                // The first read makes the objects, alone.
+                let mut state = self.state.write()?;
+                let objects = state.objects(py)?.iter().map(|o| o.clone_ref(py)).collect::<Vec<_>>();
+                pick(&state, &objects)
+            }
+        };
+        Ok(PyTuple::new(py, chosen)?)
     }
 
     /// The graph as it stands: its activities as edited.
     pub fn current(&self, py: Python<'_>) -> R<prov_engine::Provenance> {
-        let Some(objects) = &self.activities else { return Ok(self.inner.clone()) };
-        let activities = objects.iter().map(|a| activity_arg(a.bind(py).as_any())).collect::<R<Vec<_>>>()?;
-        Ok(prov_engine::Provenance::new(self.inner.agents().cloned().collect(), activities)?)
+        loop {
+            let (objects, anchored) = {
+                let state = self.state.read()?;
+                let Some(objects) = &state.activities else { return Ok(state.inner.clone()) };
+                (objects.iter().map(|o| o.clone_ref(py)).collect::<Vec<_>>(), state.document.is_some())
+            };
+            // Read under the lock a document's activity takes for an edit to
+            // its `params`, so the graph is one state of every activity; the
+            // objects are read outside this provenance's lock (reading them
+            // runs Python), so the graph is taken as it was read only if it
+            // still holds them, and its agents with them.  An activity
+            // replaced meanwhile, and edited by whoever kept it, reads again.
+            let read = crate::document::under_live_lock_if(py, anchored, || {
+                let activities = objects.iter().map(|a| activity_arg(a.bind(py).as_any())).collect::<R<Vec<_>>>()?;
+                let state = self.state.read()?;
+                let held = state
+                    .activities
+                    .as_ref()
+                    .is_some_and(|now| now.len() == objects.len() && now.iter().zip(&objects).all(|(a, b)| a.is(b)));
+                Ok(held.then(|| (state.inner.agents().cloned().collect::<Vec<_>>(), activities)))
+            })?;
+            if let Some((agents, activities)) = read {
+                return Ok(prov_engine::Provenance::new(agents, activities)?);
+            }
+        }
     }
+}
 
+impl ProvenanceState {
     /// Make a change to the document's provenance, for a document's
-    /// provenance; whether there was one to make it to.
+    /// provenance; whether there was one to make it to.  The caller holds
+    /// this provenance's lock across the change and its own update, so a
+    /// second thread is refused rather than writing the document in one
+    /// order and this graph in the other.  The document's lock is the
+    /// engine's, and no Python runs under either.
     fn write_through(
         &self,
         py: Python<'_>,
@@ -262,7 +312,7 @@ impl Provenance {
     ) -> R<bool> {
         let Some(document) = &self.document else { return Ok(false) };
         let document = document.bind(py).cast::<crate::document::SampleDocument>().map_err(PyErr::from)?;
-        document.try_borrow_mut()?.edit(py, |d| change(&mut d.provenance))??;
+        document.get().edit(py, |d| change(&mut d.provenance))??;
         Ok(true)
     }
 }
@@ -291,40 +341,43 @@ impl Provenance {
                 b.push(value);
             }
         }
-        Ok(Provenance { inner: prov_engine::Provenance::new(a, b)?, activities: Some(objects), document: None })
+        Ok(Provenance::of(prov_engine::Provenance::new(a, b)?, Some(objects), None))
     }
-    fn __repr__(&self) -> String {
-        self.inner.repr()
-    }
-    #[getter]
-    fn agents<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        PyTuple::new(py, self.inner.agents().cloned().map(Agent::wrap).collect::<Vec<_>>())
+    fn __repr__(&self) -> R<String> {
+        Ok(self.state.read()?.inner.repr())
     }
     #[getter]
-    fn activities<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+    fn agents<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyTuple>> {
+        let agents = self.state.read()?.inner.agents().cloned().map(Agent::wrap).collect::<Vec<_>>();
+        Ok(PyTuple::new(py, agents)?)
+    }
+    #[getter]
+    fn activities<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyTuple>> {
         self.select(py, |_| true)
     }
     fn agent(&self, agent_id: &str) -> R<Agent> {
-        Ok(Agent::wrap(self.inner.agent(agent_id)?.clone()))
+        Ok(Agent::wrap(self.state.read()?.inner.agent(agent_id)?.clone()))
     }
-    fn activity(&mut self, py: Python<'_>, activity_id: &str) -> R<Py<Activity>> {
-        self.inner.activity(activity_id)?;
+    fn activity(&self, py: Python<'_>, activity_id: &str) -> R<Py<Activity>> {
+        self.state.read()?.inner.activity(activity_id)?;
         let found = self.select(py, |a| a.id == activity_id)?;
         Ok(found.get_item(0)?.cast_into::<Activity>().map_err(PyErr::from)?.unbind())
     }
-    fn has_activity(&self, activity_id: &str) -> bool {
-        self.inner.has_activity(activity_id)
+    fn has_activity(&self, activity_id: &str) -> R<bool> {
+        Ok(self.state.read()?.inner.has_activity(activity_id))
     }
-    fn has_agent(&self, agent_id: &str) -> bool {
-        self.inner.has_agent(agent_id)
+    fn has_agent(&self, agent_id: &str) -> R<bool> {
+        Ok(self.state.read()?.inner.has_agent(agent_id))
     }
     /// Add an agent; an id already in the graph is refused unless `replace`.
     #[pyo3(signature = (agent, *, replace=false))]
-    fn add_agent<'py>(&mut self, agent: &Bound<'py, PyAny>, replace: bool) -> R<Bound<'py, PyAny>> {
+    fn add_agent<'py>(&self, agent: &Bound<'py, PyAny>, replace: bool) -> R<Bound<'py, PyAny>> {
         let value = agent_arg(agent)?;
         // The document first: what it refuses is refused here too.
-        let written = self.write_through(agent.py(), |p| p.add_agent(value.clone(), replace).map(drop))?;
-        self.inner.add_agent(value.clone(), replace || written)?;
+        let mut state = self.state.write()?;
+        let written = state.write_through(agent.py(), |p| p.add_agent(value.clone(), replace).map(drop))?;
+        state.inner.add_agent(value.clone(), replace || written)?;
+        drop(state);
         Ok(match agent.cast::<Agent>() {
             Ok(given) => given.clone().into_any(),
             Err(_) => Bound::new(agent.py(), Agent::wrap(value))?.into_any(),
@@ -334,32 +387,34 @@ impl Provenance {
     /// `replace`.  The activity given is kept, as 1.x kept it; a document's
     /// provenance keeps, and returns, the document's.
     #[pyo3(signature = (activity, *, replace=false))]
-    fn add_activity(&mut self, activity: &Bound<'_, PyAny>, replace: bool) -> R<Py<Activity>> {
+    fn add_activity(&self, activity: &Bound<'_, PyAny>, replace: bool) -> R<Py<Activity>> {
         let py = activity.py();
         let value = activity_arg(activity)?;
-        let written = self.write_through(py, |p| p.add_activity(value.clone(), replace).map(drop))?;
-        self.objects(py)?;
-        let at = self.inner.activities().position(|a| a.id == value.id);
-        self.inner.add_activity(value.clone(), replace || written)?;
+        let mut state = self.state.write()?;
+        let written = state.write_through(py, |p| p.add_activity(value.clone(), replace).map(drop))?;
+        state.objects(py)?;
+        let at = state.inner.activities().position(|a| a.id == value.id);
+        state.inner.add_activity(value.clone(), replace || written)?;
         let object = match activity.cast::<Activity>() {
             Ok(given) if !written => given.clone().unbind(),
-            _ => self.object(py, value)?,
+            _ => state.object(py, value)?,
         };
-        let objects = self.activities.get_or_insert_with(Vec::new);
+        let objects = state.activities.get_or_insert_with(Vec::new);
         match at {
             Some(i) => objects[i] = object.clone_ref(py),
             None => objects.push(object.clone_ref(py)),
         }
         Ok(object)
     }
-    fn activities_by_type<'py>(&mut self, py: Python<'py>, activity_type: &str) -> PyResult<Bound<'py, PyTuple>> {
+    fn activities_by_type<'py>(&self, py: Python<'py>, activity_type: &str) -> R<Bound<'py, PyTuple>> {
         self.select(py, |a| a.r#type == activity_type)
     }
-    fn produced_by<'py>(&mut self, py: Python<'py>, object_path: &str) -> PyResult<Bound<'py, PyTuple>> {
+    fn produced_by<'py>(&self, py: Python<'py>, object_path: &str) -> R<Bound<'py, PyTuple>> {
         self.select(py, |a| a.outputs.iter().any(|o| o == object_path))
     }
-    fn dangling_agent_refs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        PyTuple::new(py, self.inner.dangling_agent_refs())
+    fn dangling_agent_refs<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyTuple>> {
+        let refs = self.state.read()?.inner.dangling_agent_refs();
+        Ok(PyTuple::new(py, refs)?)
     }
     fn __iter__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         Ok(slf.getattr("activities")?.try_iter()?.into_any())
@@ -367,11 +422,11 @@ impl Provenance {
     /// Whether the graph holds anything --- an agent or an activity --- as
     /// 1.x's did: `len` counts activities only, and a graph that has
     /// declared its agents and no activity yet is not empty.
-    fn __bool__(&self) -> bool {
-        !self.inner.is_empty()
+    fn __bool__(&self) -> R<bool> {
+        Ok(!self.state.read()?.inner.is_empty())
     }
-    fn __len__(&self) -> usize {
-        self.inner.n_activities()
+    fn __len__(&self) -> R<usize> {
+        Ok(self.state.read()?.inner.n_activities())
     }
     /// The graph as it stands, as JSON.
     fn to_json<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
@@ -384,8 +439,7 @@ impl Provenance {
     }
     fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> bool {
         let Ok(other) = other.cast::<Provenance>() else { return false };
-        let Ok(other) = other.try_borrow() else { return false };
-        match (self.current(py), other.current(py)) {
+        match (self.current(py), other.get().current(py)) {
             (Ok(a), Ok(b)) => a == b,
             _ => false,
         }
@@ -394,14 +448,17 @@ impl Provenance {
         crate::values::reduce_via_json(slf.as_any())
     }
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        for activity in self.activities.iter().flatten() {
+        let Some(state) = self.state.peek() else { return Ok(()) };
+        for activity in state.activities.iter().flatten() {
             visit.call(activity)?;
         }
-        visit.call(&self.document)
+        visit.call(&state.document)
     }
-    fn __clear__(&mut self) {
-        self.activities = None;
-        self.document = None;
+    fn __clear__(&self) {
+        if let Some(mut state) = self.state.try_write() {
+            state.activities = None;
+            state.document = None;
+        }
     }
 }
 
@@ -597,7 +654,11 @@ impl Timeline {
     /// The timeline as it stands: its timepoints as edited.
     pub fn current(&self, py: Python<'_>) -> R<tl_engine::Timeline> {
         let Some(points) = self.points.get() else { return Ok(self.inner.clone()) };
-        let points = points.bind(py).iter().map(|p| Timepoint::arg(&p)).collect::<R<Vec<_>>>()?;
+        // Every timepoint in one step under the live views' lock, so that
+        // edits to two timepoints are read both or neither.
+        let points = crate::document::under_live_lock_if(py, self.document.is_some(), || {
+            points.bind(py).iter().map(|p| Timepoint::arg(&p)).collect::<R<Vec<_>>>()
+        })?;
         Ok(tl_engine::Timeline::new(points)?)
     }
 }

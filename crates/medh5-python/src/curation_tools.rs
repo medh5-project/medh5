@@ -590,7 +590,7 @@ fn scrub_apply(
 /// form.
 fn document_arg(obj: &Bound<'_, PyAny>) -> R<medh5::document::SampleDocument> {
     if let Ok(doc) = obj.cast::<crate::document::SampleDocument>() {
-        return Ok(doc.try_borrow()?.current(obj.py())?);
+        return doc.get().current(obj.py());
     }
     let json = if obj.hasattr("to_json")? { obj.call_method0("to_json")? } else { obj.clone() };
     Ok(medh5::document::SampleDocument::from_json(&py_to_json(&json)?)?)

@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use crate::h5sys::{h5, h5a, h5d, h5i, h5l, h5o, h5p, h5t};
 use crate::json::repr_str;
@@ -690,7 +690,9 @@ pub fn outside_references(handle: &hdf5::File) -> Result<Vec<(String, String)>> 
 /// 100-nanosecond ticks).
 pub(crate) type FileIdentity = (u64, u128, u64, i128, i128);
 
-fn checked_files() -> &'static Mutex<HashMap<FileIdentity, ()>> {
+/// The files checked already.  A panic while it is held leaves the map whole
+/// (an insert or a clear), so a poisoned lock is taken as it stands.
+pub(super) fn checked_files() -> &'static Mutex<HashMap<FileIdentity, ()>> {
     static CHECKED: std::sync::OnceLock<Mutex<HashMap<FileIdentity, ()>>> = std::sync::OnceLock::new();
     CHECKED.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -837,7 +839,7 @@ pub(crate) fn opened_identity(handle: &hdf5::File, path: Option<&Path>) -> Optio
 pub fn check_self_contained(handle: &hdf5::File, path: Option<&Path>) -> Result<()> {
     let key = opened_identity(handle, path);
     if let Some(k) = key {
-        if checked_files().lock().unwrap().contains_key(&k) {
+        if checked_files().lock().unwrap_or_else(PoisonError::into_inner).contains_key(&k) {
             return Ok(());
         }
     }
@@ -854,7 +856,7 @@ pub fn check_self_contained(handle: &hdf5::File, path: Option<&Path>) -> Result<
         )));
     }
     if let Some(k) = key {
-        let mut map = checked_files().lock().unwrap();
+        let mut map = checked_files().lock().unwrap_or_else(PoisonError::into_inner);
         if map.len() >= CHECKED_LIMIT {
             map.clear();
         }

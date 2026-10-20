@@ -7,7 +7,7 @@
 //! runs here, on the engine's types rebuilt from that JSON.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use indexmap::IndexMap;
 use pyo3::prelude::*;
@@ -36,10 +36,14 @@ impl CollectionHandle {
         CollectionHandle { inner: Mutex::new(Some(c)), path }
     }
 
-    fn with<T>(&self, f: impl FnOnce(&coll::Collection) -> medh5::Result<T>) -> R<T> {
-        let guard = self.inner.lock().unwrap();
-        let c = guard.as_ref().ok_or_else(|| medh5::Error::File("this collection has been closed".into()))?;
-        Ok(f(c)?)
+    /// `f` of the open collection, detached (`crate::h5`): the lock is
+    /// taken and let go there too, so no thread waits for it attached.
+    fn with<T: Send>(&self, py: Python<'_>, f: impl FnOnce(&coll::Collection) -> medh5::Result<T> + Send) -> R<T> {
+        crate::h5(py, || {
+            let guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            let c = guard.as_ref().ok_or_else(|| medh5::Error::File("this collection has been closed".into()))?;
+            Ok(f(c)?)
+        })
     }
 }
 
@@ -49,46 +53,51 @@ impl CollectionHandle {
     fn path(&self) -> Option<String> {
         self.path.clone()
     }
-    fn close(&self) {
-        if let Some(mut c) = self.inner.lock().unwrap().take() {
-            c.close();
-        }
+    /// Closing waits, detached, for a call another thread is making through
+    /// the collection, then closes it with the lock let go.
+    fn close(&self, py: Python<'_>) {
+        crate::h5(py, || {
+            let taken = self.inner.lock().unwrap_or_else(PoisonError::into_inner).take();
+            if let Some(mut c) = taken {
+                c.close();
+            }
+        })
     }
     #[getter]
-    fn is_open(&self) -> bool {
-        self.inner.lock().unwrap().is_some()
+    fn is_open(&self, py: Python<'_>) -> bool {
+        crate::h5(py, || self.inner.lock().unwrap_or_else(PoisonError::into_inner).is_some())
     }
-    fn keys(&self) -> R<Vec<String>> {
-        self.with(|c| c.keys())
+    fn keys(&self, py: Python<'_>) -> R<Vec<String>> {
+        self.with(py, |c| c.keys())
     }
-    fn __len__(&self) -> R<usize> {
-        self.with(|c| c.len())
+    fn __len__(&self, py: Python<'_>) -> R<usize> {
+        self.with(py, |c| c.len())
     }
-    fn contains(&self, key: &str) -> R<bool> {
-        self.with(|c| c.contains(key))
+    fn contains(&self, py: Python<'_>, key: &str) -> R<bool> {
+        self.with(py, |c| c.contains(key))
     }
     /// One member, as a sample handle.
-    fn get(&self, key: &str) -> R<SampleHandle> {
-        Ok(SampleHandle::wrap(self.with(|c| c.get(key))?))
+    fn get(&self, py: Python<'_>, key: &str) -> R<SampleHandle> {
+        Ok(SampleHandle::wrap(self.with(py, |c| c.get(key))?))
     }
     #[getter]
-    fn version(&self) -> R<String> {
-        self.with(|c| c.version())
+    fn version(&self, py: Python<'_>) -> R<String> {
+        self.with(py, |c| c.version())
     }
     #[getter]
-    fn kind(&self) -> R<String> {
-        self.with(|c| c.kind())
+    fn kind(&self, py: Python<'_>) -> R<String> {
+        self.with(py, |c| c.kind())
     }
-    fn repr(&self) -> R<String> {
-        self.with(|c| c.repr())
+    fn repr(&self, py: Python<'_>) -> R<String> {
+        self.with(py, |c| c.repr())
     }
     fn summary<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
-        let doc = self.with(|c| c.summary())?;
+        let doc = self.with(py, |c| c.summary())?;
         Ok(json_to_py(py, &doc)?)
     }
     /// `{sample_key: subject_id}`.
     fn subject_ids<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyDict>> {
-        let pairs = self.with(|c| c.subject_ids())?;
+        let pairs = self.with(py, |c| c.subject_ids())?;
         let out = PyDict::new(py);
         for (k, v) in pairs {
             out.set_item(k, v)?;
@@ -97,13 +106,13 @@ impl CollectionHandle {
     }
     /// The root group.
     #[getter]
-    fn root(&self) -> R<Group> {
-        self.with(|c| Ok(Group::wrap(c.root.clone())))
+    fn root(&self, py: Python<'_>) -> R<Group> {
+        self.with(py, |c| Ok(Group::wrap(c.root.clone())))
     }
     /// The `samples` group.
     #[getter]
-    fn group(&self) -> R<Group> {
-        Ok(Group::wrap(self.with(|c| c.group())?))
+    fn group(&self, py: Python<'_>) -> R<Group> {
+        Ok(Group::wrap(self.with(py, |c| c.group())?))
     }
 }
 
@@ -130,20 +139,26 @@ fn open_any<'py>(py: Python<'py>, path: PathBuf, key: Option<String>) -> R<Bound
 /// collection, or a path.
 #[pyfunction]
 fn is_collection(obj: &Bound<'_, PyAny>) -> R<bool> {
+    let py = obj.py();
     if let Ok(g) = obj.cast::<Group>() {
-        return Ok(coll::is_collection(&g.get().group)?);
+        let group = &g.get().group;
+        return Ok(crate::h5(py, || coll::is_collection(group))?);
     }
     if let Ok(c) = obj.cast::<CollectionHandle>() {
-        return c.get().with(|c| coll::is_collection(&c.root));
+        return c.get().with(obj.py(), |c| coll::is_collection(&c.root));
     }
     if let Ok(root) = obj.getattr("root") {
         if let Ok(g) = root.cast::<Group>() {
-            return Ok(coll::is_collection(&g.get().group)?);
+            let group = &g.get().group;
+            return Ok(crate::h5(py, || coll::is_collection(group))?);
         }
     }
     let path: PathBuf = obj.extract()?;
-    let file = medh5::h5::file::open_read(&path).map_err(|e| path_error(e, &path))?;
-    Ok(coll::is_collection(&file)?)
+    // Opened, read and closed detached: each may wait for HDF5's lock.
+    crate::h5(py, || {
+        let file = medh5::h5::file::open_read(&path).map_err(|e| path_error(e, &path))?;
+        Ok(coll::is_collection(&file)?)
+    })
 }
 
 #[pyfunction]
