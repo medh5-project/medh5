@@ -95,7 +95,8 @@ fn validate_root<'py>(
         Ok(h) => h.clone(),
         Err(_) => sample.getattr("_handle")?.cast_into::<SampleHandle>().map_err(PyErr::from)?,
     };
-    let engine_sample = handle.get().sample()?;
+    let handle = handle.get();
+    let engine_sample = crate::h5(py, || handle.sample())?;
     let profiles = opt_strings(profiles)?;
     let shown = path.or_else(|| engine_sample.path.as_ref().map(|p| p.to_string_lossy().into_owned()));
     let shown = shown.unwrap_or_else(|| "<memory>".into());

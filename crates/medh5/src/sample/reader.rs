@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use indexmap::IndexMap;
 use ndarray::{ArrayD, IxDyn};
@@ -854,11 +854,11 @@ impl Sample {
             return Ok(None);
         }
         let key = (from_frame.to_string(), to_frame.to_string());
-        if let Some(found) = self.resolved.lock().expect("resolution cache").get(&key) {
+        if let Some(found) = self.resolved.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
             return Ok(found.clone());
         }
         let found = resolve_between(self.transforms()?, from_frame, to_frame)?;
-        self.resolved.lock().expect("resolution cache").insert(key, found.clone());
+        self.resolved.lock().unwrap_or_else(PoisonError::into_inner).insert(key, found.clone());
         Ok(found)
     }
 

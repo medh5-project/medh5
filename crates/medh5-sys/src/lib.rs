@@ -87,6 +87,17 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
+/// Start C-Blosc2, once per process.  `blosc2_init` is not safe to enter
+/// from two threads at once: a call that finds the library not yet started
+/// registers the codecs afresh and initialises the global context's mutex,
+/// under any other thread doing the same.  Later calls (the filter makes one
+/// per chunk) return at once.
+fn start_blosc2() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    // SAFETY: C-Blosc2's own initialisation, entered by one thread only.
+    STARTED.call_once(|| unsafe { blosc2_init() });
+}
+
 /// Register the HDF5-Blosc2 filter with the process's HDF5 library.
 ///
 /// Idempotent and cheap after the first call.  **The caller must hold HDF5's
@@ -106,7 +117,7 @@ pub unsafe fn register_blosc2_filter() -> bool {
         2 => return false,
         _ => {}
     }
-    unsafe { blosc2_init() };
+    start_blosc2();
     let ok = unsafe { register_blosc2(std::ptr::null_mut(), std::ptr::null_mut()) } >= 0
         && unsafe { hdf5_sys::h5z::H5Zfilter_avail(BLOSC2_FILTER_ID as _) } > 0;
     STATE.store(if ok { 1 } else { 2 }, Ordering::Release);
@@ -160,6 +171,9 @@ fn run_blosc2_filter(reverse: bool, values: &[std::os::raw::c_uint], data: &[u8]
         fn malloc(size: usize) -> *mut c_void;
         fn free(ptr: *mut c_void);
     }
+    // The filter starts C-Blosc2 itself; started here first, its call returns
+    // at once whichever thread makes it.
+    start_blosc2();
     let flags = if reverse { hdf5_sys::h5z::H5Z_FLAG_REVERSE } else { 0 };
     let mut size = buf_size.max(data.len()).max(1);
     // SAFETY: the buffer is allocated as the filter frees it, and holds
@@ -191,8 +205,7 @@ pub mod fuzzing {
     /// The Blosc2 filter (32026) decoding `chunk` with the filter values
     /// `values`, for a chunk buffer of `buf_size` bytes.
     pub fn blosc2_decode(values: &[u32], chunk: &[u8], buf_size: usize) -> Option<Vec<u8>> {
-        // SAFETY: C-Blosc2's own initialisation, which a second call skips.
-        unsafe { super::blosc2_init() };
+        super::start_blosc2();
         cleared(|| super::run_blosc2_filter(true, values, chunk, buf_size))
     }
 
@@ -306,7 +319,7 @@ mod tests {
         let mut out = vec![0u8; blocksize as usize];
         // SAFETY: both buffers are valid for the lengths given.
         let n = unsafe {
-            blosc2_init();
+            start_blosc2();
             blosc2_decompress(chunk.as_ptr().cast(), cbytes as i32, out.as_mut_ptr().cast(), blocksize)
         };
         assert!(n < 0, "the chunk must be refused, not decompressed to {n} bytes");
@@ -320,7 +333,7 @@ mod tests {
         // SAFETY: every buffer is valid for the length given; the global
         // compressor is set to the one this test is about.
         let (written, read) = unsafe {
-            blosc2_init();
+            start_blosc2();
             assert!(blosc1_set_compressor(c"blosclz".as_ptr()) >= 0);
             let written = blosc2_compress(
                 5,
@@ -399,7 +412,7 @@ mod tests {
         // SAFETY: a super-chunk of default parameters in memory; its frame is
         // copied out before it is freed.
         let frame = unsafe {
-            blosc2_init();
+            start_blosc2();
             use std::ptr::null_mut;
             let mut storage = Blosc2Storage {
                 contiguous: true,
@@ -439,7 +452,7 @@ mod tests {
         // SAFETY: the codec is copied into C-Blosc2's registry, and its name
         // is a static string; nothing compresses with it.
         unsafe {
-            blosc2_init();
+            start_blosc2();
             assert!(blosc2_register_codec(&mut codec) >= 0);
             assert_eq!(blosc2_compname_to_compcode(name.as_ptr()), 250);
         }

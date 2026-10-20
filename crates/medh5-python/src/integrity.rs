@@ -121,25 +121,34 @@ fn static_names(names: Vec<String>) -> Vec<&'static str> {
     use std::collections::HashMap;
     use std::sync::Mutex;
     static INTERNED: Mutex<Option<HashMap<String, &'static str>>> = Mutex::new(None);
-    let mut guard = INTERNED.lock().unwrap();
+    let mut guard = INTERNED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let table = guard.get_or_insert_with(HashMap::new);
     names.into_iter().map(|n| *table.entry(n.clone()).or_insert_with(|| Box::leak(n.into_boxed_str()))).collect()
 }
 
-fn attr_names_arg(
-    root: &medh5::hdf5::Group,
-    attr_names: Option<&Bound<'_, PyAny>>,
-) -> R<medh5::integrity::AttrNameMap> {
+/// The names a caller gave, or `None` for the root's own: those are read
+/// from the file, by [`attr_names_of`], where the reading is detached.
+fn attr_names_arg(attr_names: Option<&Bound<'_, PyAny>>) -> PyResult<Option<medh5::integrity::AttrNameMap>> {
     match attr_names.filter(|a| !a.is_none()) {
-        None => Ok(medh5::sample::attr_name_map_of(root)?),
+        None => Ok(None),
         Some(map) => {
             let mut out = medh5::integrity::AttrNameMap::new();
             for item in map.call_method0("items")?.try_iter()? {
                 let (k, v): (String, Vec<String>) = item?.extract()?;
                 out.insert(k, static_names(v));
             }
-            Ok(out)
+            Ok(Some(out))
         }
+    }
+}
+
+fn attr_names_of(
+    root: &medh5::hdf5::Group,
+    given: Option<medh5::integrity::AttrNameMap>,
+) -> medh5::Result<medh5::integrity::AttrNameMap> {
+    match given {
+        Some(names) => Ok(names),
+        None => medh5::sample::attr_name_map_of(root),
     }
 }
 
@@ -148,18 +157,21 @@ fn attr_names_arg(
 #[pyo3(signature = (dataset, path=None, algo="sha256"))]
 fn dataset_digest(py: Python<'_>, dataset: &Bound<'_, PyAny>, path: Option<String>, algo: &str) -> R<String> {
     let ds = crate::nodes::dataset_arg(dataset)?.get().ds().clone();
-    let path = path.unwrap_or_else(|| ds.name().trim_start_matches('/').to_string());
-    Ok(py.detach(move || digest::dataset_digest(&ds, &path, algo))?)
+    Ok(py.detach(move || {
+        let path = path.unwrap_or_else(|| ds.name().trim_start_matches('/').to_string());
+        digest::dataset_digest(&ds, &path, algo)
+    })?)
 }
 
 /// Canonical JSON over an object's named attributes (§13.2).
 #[pyfunction]
 fn canonical_attrs(obj: &Bound<'_, PyAny>, names: Vec<String>) -> R<String> {
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    Ok(match loc_of(obj)? {
-        Loc::Dataset(d) => digest::canonical_attrs(&d, &refs)?,
-        Loc::Group(g) => digest::canonical_attrs(&g, &refs)?,
-    })
+    let loc = loc_of(obj)?;
+    Ok(crate::h5(obj.py(), || match &loc {
+        Loc::Dataset(d) => digest::canonical_attrs(d, &refs),
+        Loc::Group(g) => digest::canonical_attrs(g, &refs),
+    })?)
 }
 
 /// Return the digest of the canonical JSON of an object's named attributes (§13.2).
@@ -170,25 +182,26 @@ fn canonical_attrs(obj: &Bound<'_, PyAny>, names: Vec<String>) -> R<String> {
 #[pyo3(signature = (obj, names, algo="sha256"))]
 fn attrs_digest(obj: &Bound<'_, PyAny>, names: Vec<String>, algo: &str) -> R<String> {
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    Ok(match loc_of(obj)? {
-        Loc::Dataset(d) => digest::attrs_digest(&d, &refs, algo)?,
-        Loc::Group(g) => digest::attrs_digest(&g, &refs, algo)?,
-    })
+    let loc = loc_of(obj)?;
+    Ok(crate::h5(obj.py(), || match &loc {
+        Loc::Dataset(d) => digest::attrs_digest(d, &refs, algo),
+        Loc::Group(g) => digest::attrs_digest(g, &refs, algo),
+    })?)
 }
 
 /// An object's path relative to a sample root (the file root by default).
 #[pyfunction]
 #[pyo3(signature = (node, root=None))]
-fn relative_path(node: &Bound<'_, PyAny>, root: Option<&Bound<'_, PyAny>>) -> R<String> {
-    let (name, own_root) = match loc_of(node)? {
-        Loc::Dataset(d) => (d.name(), file_root(&d.file()?.as_group()?)?),
-        Loc::Group(g) => (g.name(), file_root(&g)?),
-    };
-    let root = match root.filter(|r| !r.is_none()) {
-        Some(r) => group_of(r)?,
-        None => own_root,
-    };
-    Ok(digest::relative_path(&name, &root))
+fn relative_path(py: Python<'_>, node: &Bound<'_, PyAny>, root: Option<&Bound<'_, PyAny>>) -> R<String> {
+    let loc = loc_of(node)?;
+    let given = root.filter(|r| !r.is_none()).map(group_of).transpose()?;
+    crate::h5(py, move || -> R<String> {
+        let (name, own_root) = match &loc {
+            Loc::Dataset(d) => (d.name(), file_root(&d.file()?.as_group()?)?),
+            Loc::Group(g) => (g.name(), file_root(g)?),
+        };
+        Ok(digest::relative_path(&name, &given.unwrap_or(own_root)))
+    })
 }
 
 /// The digest of an object group: its datasets and canonical attributes.
@@ -196,11 +209,14 @@ fn relative_path(node: &Bound<'_, PyAny>, root: Option<&Bound<'_, PyAny>>) -> R<
 #[pyo3(signature = (group, algo="sha256", *, root=None))]
 fn group_digest(py: Python<'_>, group: &Bound<'_, PyAny>, algo: &str, root: Option<&Bound<'_, PyAny>>) -> R<String> {
     let g = group_of(group)?;
-    let root = match root.filter(|r| !r.is_none()) {
-        Some(r) => group_of(r)?,
-        None => file_root(&g)?,
-    };
-    Ok(py.detach(move || digest::group_digest(&g, &root, algo))?)
+    let given = root.filter(|r| !r.is_none()).map(group_of).transpose()?;
+    py.detach(move || -> R<String> {
+        let root = match given {
+            Some(root) => root,
+            None => file_root(&g)?,
+        };
+        Ok(digest::group_digest(&g, &root, algo)?)
+    })
 }
 
 /// The Merkle root over stored digests, `meta` and canonical attributes.
@@ -213,12 +229,15 @@ fn compute_content_id(
     algo: Option<String>,
 ) -> R<String> {
     let g = group_of(root)?;
-    let names = attr_names_arg(&g, attr_names)?;
-    let algo = match algo {
-        Some(a) => a,
-        None => digest::root_algo(&g)?,
-    };
-    Ok(py.detach(move || digest::compute_content_id(&g, &names, &algo, None))?)
+    let given = attr_names_arg(attr_names)?;
+    Ok(py.detach(move || -> medh5::Result<String> {
+        let names = attr_names_of(&g, given)?;
+        let algo = match algo {
+            Some(a) => a,
+            None => digest::root_algo(&g)?,
+        };
+        digest::compute_content_id(&g, &names, &algo, None)
+    })?)
 }
 
 /// Whether the dataset at `path` under `root` matches its stored `digest` attribute (§13.1).
@@ -252,8 +271,11 @@ fn verify_root<'py>(
     check_content_id: bool,
 ) -> R<Bound<'py, PyAny>> {
     let g = group_of(root)?;
-    let names = attr_names_arg(&g, attr_names)?;
-    let result = py.detach(move || verify::verify_root(&g, Some(&names), partial.as_deref(), check_content_id))?;
+    let given = attr_names_arg(attr_names)?;
+    let result = py.detach(move || -> medh5::Result<_> {
+        let names = attr_names_of(&g, given)?;
+        verify::verify_root(&g, Some(&names), partial.as_deref(), check_content_id)
+    })?;
     Ok(verify_result_to_py(py, &result)?)
 }
 

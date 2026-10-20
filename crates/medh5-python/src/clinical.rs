@@ -23,6 +23,7 @@ use medh5::sample::Sample as EngineSample;
 
 use crate::convert::{json_to_py, nd_to_py, py_to_json, py_to_nd};
 use crate::errors::R;
+use crate::exclusive::Exclusive;
 
 /// A Python value as JSON: a dict, or anything with `to_json()`.
 pub fn record(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
@@ -129,7 +130,8 @@ impl ClinicalHandle {
         Ok(py.detach(move || inner.text(&id))?)
     }
     fn document<'py>(&self, py: Python<'py>, document_id: &str) -> R<Bound<'py, PyAny>> {
-        Ok(json_to_py(py, &self.inner.document(document_id)?.to_json())?)
+        let doc = crate::h5(py, || self.inner.document(document_id).map(|d| d.to_json()))?;
+        Ok(json_to_py(py, &doc)?)
     }
     /// Every record, each document's text read from the file now.
     fn records<'py>(&self, py: Python<'py>) -> R<Bound<'py, PyAny>> {
@@ -139,8 +141,11 @@ impl ClinicalHandle {
     }
     #[pyo3(signature = (cutoff_us, policy=None))]
     fn select<'py>(&self, py: Python<'py>, cutoff_us: i64, policy: Option<&Bound<'py, PyAny>>) -> R<Bound<'py, PyAny>> {
-        let selection = self.inner.select(cutoff_us, &policy_arg(policy)?)?;
-        Ok(json_to_py(py, &selection.to_json(&self.inner.events))?)
+        let policy = policy_arg(policy)?;
+        let doc = crate::h5(py, || {
+            self.inner.select(cutoff_us, &policy).map(|selection| selection.to_json(&self.inner.events))
+        })?;
+        Ok(json_to_py(py, &doc)?)
     }
     fn summary<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         json_to_py(py, &self.inner.summary())
@@ -575,46 +580,52 @@ fn header(value: &Value) -> CacheHeader {
     }
 }
 
-/// Writes a feature cache; `commit()` moves it into place.
-#[pyclass(module = "medh5._core", name = "CacheWriterHandle")]
+/// Writes a feature cache; `commit()` moves it into place.  Used by one
+/// thread at a time (E4): a call while another runs is refused.
+#[pyclass(module = "medh5._core", name = "CacheWriterHandle", frozen)]
 pub struct CacheWriterHandle {
-    inner: Option<CacheWriter>,
+    inner: Exclusive<Option<CacheWriter>>,
 }
 
 #[pymethods]
 impl CacheWriterHandle {
     /// Add one feature: `entry` as a dict (its `digest` is computed).
-    fn add<'py>(
-        &mut self,
-        py: Python<'py>,
-        entry: &Bound<'py, PyAny>,
-        values: &Bound<'py, PyAny>,
-    ) -> R<Bound<'py, PyAny>> {
+    fn add<'py>(&self, py: Python<'py>, entry: &Bound<'py, PyAny>, values: &Bound<'py, PyAny>) -> R<Bound<'py, PyAny>> {
         // As the reader parses one: a cutoff that is not an integer was read
         // as none, and refused as a row entry pinning no cutoff.
         let entry = CacheEntry { digest: String::new(), ..CacheEntry::from_json(&record(entry)?)? };
         let values = py_to_nd(values)?;
-        let writer = self.inner.as_mut().ok_or_else(|| medh5::Error::invalid("this cache writer has finished"))?;
+        let mut held = self.inner.write()?;
+        let writer = held.as_mut().ok_or_else(|| medh5::Error::invalid("this cache writer has finished"))?;
         // The digest and the write, of values already out of Python.
         let added = py.detach(move || writer.add(entry, &values).map(|e| e.to_json()))?;
+        drop(held);
         Ok(json_to_py(py, &added)?)
     }
     /// Write the manifest and its checksum; returns the checksum.
-    fn commit(&mut self, py: Python<'_>) -> R<String> {
-        let writer = self.inner.take().ok_or_else(|| medh5::Error::invalid("this cache writer has finished"))?;
-        Ok(py.detach(move || writer.commit())?)
+    fn commit(&self, py: Python<'_>) -> R<String> {
+        // Held across the write, as `add`'s is: a call meanwhile is refused,
+        // not told the writer has finished before it has.
+        let mut held = self.inner.write()?;
+        let writer = held.take().ok_or_else(|| medh5::Error::invalid("this cache writer has finished"))?;
+        let checksum = py.detach(move || writer.commit());
+        drop(held);
+        Ok(checksum?)
     }
     /// Discard the half-written cache.
-    fn abort(&mut self) {
-        self.inner.take();
+    fn abort(&self, py: Python<'_>) -> R<()> {
+        let taken = self.inner.write()?.take();
+        crate::h5(py, move || drop(taken));
+        Ok(())
     }
 }
 
 /// Start writing a feature cache (`medh5.cache/1`).
 #[pyfunction]
-fn cache_create(path: PathBuf, header_doc: &Bound<'_, PyAny>) -> R<CacheWriterHandle> {
+fn cache_create(py: Python<'_>, path: PathBuf, header_doc: &Bound<'_, PyAny>) -> R<CacheWriterHandle> {
     let h = header(&record(header_doc)?);
-    Ok(CacheWriterHandle { inner: Some(CacheWriter::create(&path, h)?) })
+    let writer = crate::h5(py, move || CacheWriter::create(&path, h))?;
+    Ok(CacheWriterHandle { inner: Exclusive::new("a CacheWriterHandle", Some(writer)) })
 }
 
 /// An open feature cache; `close()` releases the file.
@@ -644,8 +655,9 @@ impl FeatureCacheHandle {
     fn is_open(&self) -> bool {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
-    fn close(&self) {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).take();
+    fn close(&self, py: Python<'_>) {
+        let taken = self.inner.lock().unwrap_or_else(|e| e.into_inner()).take();
+        crate::h5(py, move || drop(taken));
     }
     /// Forget the handle without closing it: what a forked child does with
     /// its parent's (§14.4) --- the descriptor is the parent's to close.

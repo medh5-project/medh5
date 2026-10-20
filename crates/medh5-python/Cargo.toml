@@ -23,6 +23,9 @@ half.workspace = true
 serde_json.workspace = true
 indexmap.workspace = true
 
+[build-dependencies]
+pyo3-build-config.workspace = true
+
 [features]
 # maturin turns this on: an extension module must not link libpython.
 extension-module = ["pyo3/extension-module"]

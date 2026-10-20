@@ -318,9 +318,10 @@ impl TransformHeader {
 impl TransformHeader {
     /// The header a transform group carries (`sample.root["transforms/x"]`).
     #[classmethod]
-    fn read(_cls: &Bound<'_, pyo3::types::PyType>, group: &Bound<'_, PyAny>) -> R<Self> {
+    fn read(cls: &Bound<'_, pyo3::types::PyType>, group: &Bound<'_, PyAny>) -> R<Self> {
         let group = crate::integrity::group_of(group)?;
-        Ok(TransformHeader { inner: medh5::transforms::model::TransformHeader::read(&group)? })
+        let inner = crate::h5(cls.py(), || medh5::transforms::model::TransformHeader::read(&group))?;
+        Ok(TransformHeader { inner })
     }
 
     #[classattr]
@@ -473,7 +474,8 @@ pub fn handle_of<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, TransformH
 /// Frame -> frames one hop away, as the resolver would walk them.
 #[pyfunction]
 fn frame_graph<'py>(py: Python<'py>, transforms: &Bound<'py, PyAny>) -> R<Bound<'py, PyDict>> {
-    let graph = resolve::frame_graph(&transforms_arg(transforms)?)?;
+    let transforms = transforms_arg(transforms)?;
+    let graph = crate::h5(py, || resolve::frame_graph(&transforms))?;
     let out = PyDict::new(py);
     for (k, v) in graph {
         out.set_item(k, PyList::new(py, v)?)?;
@@ -483,8 +485,15 @@ fn frame_graph<'py>(py: Python<'py>, transforms: &Bound<'py, PyAny>) -> R<Bound<
 
 /// The transform relating two frames, or `None` when no path exists.
 #[pyfunction]
-fn resolve_between(transforms: &Bound<'_, PyAny>, from_frame: &str, to_frame: &str) -> R<Option<TransformHandle>> {
-    Ok(resolve::resolve_between(&transforms_arg(transforms)?, from_frame, to_frame)?.map(TransformHandle::wrap))
+fn resolve_between(
+    py: Python<'_>,
+    transforms: &Bound<'_, PyAny>,
+    from_frame: &str,
+    to_frame: &str,
+) -> R<Option<TransformHandle>> {
+    let transforms = transforms_arg(transforms)?;
+    let found = crate::h5(py, || resolve::resolve_between(&transforms, from_frame, to_frame))?;
+    Ok(found.map(TransformHandle::wrap))
 }
 
 /// The frames of every grid of one timepoint, in grid order.

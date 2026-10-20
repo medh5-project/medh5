@@ -93,6 +93,12 @@ assert tuple(batch["images"]["CT"].shape) == (2, 8, 8, 8)
 The same holds for your own code: open samples in the child, after the fork. A sample opened in the
 parent and read in a forked child is the case the cache exists to avoid.
 
+A fork waits for any HDF5 call another thread is in the middle of. A forked child has only the
+thread that forked, so a lock another thread held at that moment would stay held in the child, and
+its first read would wait for it forever. medh5 has `fork` itself take HDF5's lock as it begins
+(`pthread_atfork`) and let it go on both sides as it returns, and the locks medh5 keeps in Python
+(the handle caches, the vocabulary registry, documents' live views) are made anew in the child.
+
 `exec` is the other half. HDF5 opens files without close-on-exec, so a program started while a
 sample was open used to inherit the descriptor, and with it HDF5's file lock. medh5 now marks each
 file it opens close-on-exec, on every platform, so a child process neither keeps the file locked
@@ -103,8 +109,13 @@ gives the two cases that remain.
 ## Writers
 
 **A writer belongs to one thread.** A second thread calling the same writer while the first is in
-a call is refused (`RuntimeError: Already borrowed`) rather than made to wait. Two writers on two
-files, one per thread, are fine, and take turns at the HDF5 lock.
+a call is refused with a `MEDH5Error` saying the writer "is used by one thread at a time", rather
+than made to wait, and the refused call changes nothing. Two writers on two files, one per thread,
+are fine, and take turns at the HDF5 lock. The same holds for every object that changes as it is
+used: a document, an annotation payload, a provenance record, a cache writer, a staged file and a
+sampler's draws. Calls that only read one of them share it; they are refused only while another
+thread is changing it. The dicts they hand out (a document's `extra`, a payload's `datasets`) are
+yours to edit from any thread: a write or a `describe()` takes each as it stands at one moment.
 
 **`amend` replaces the file.** An amendment is copy-on-write: it writes the new version beside the
 file and renames it over the old one. Anything holding the file open across that keeps reading the
@@ -139,8 +150,19 @@ medh5 dataset stats cohort.json --workers 4 -o stats.json
 
 ## Free-threaded CPython 3.14
 
-CPython 3.14's free-threaded build (`python3.14t`) installs its own medh5 wheel (`cp314t`). The
-extension declares that it needs the GIL, so that interpreter turns the GIL back on when medh5 is
-imported, with a warning, and everything above applies unchanged. Running without the GIL is
-planned for 2.2, once the extension's shared state has been audited for it. Until then, a
-free-threaded interpreter buys nothing here.
+CPython 3.14's free-threaded build (`python3.14t`) installs its own medh5 wheel (`cp314t`), and
+runs it without the GIL: importing medh5 leaves the GIL off. Threads then run Python at once, and
+medh5's own work beside them, but the HDF5 lock is the same one lock per process, so threads
+reading files still take turns inside HDF5. What changes is everything around it: your NumPy and
+PyTorch work between reads, Blosc2 window decompression, and the parts of medh5 written in Python.
+
+A call that reads or writes a file lets go of the interpreter for as long as it runs, waiting for
+the HDF5 lock included, so a garbage collection, which stops every thread, does not wait for one
+thread's read to end because another is queued behind it. A few short steps still wait for the
+lock attached, such as taking a second reference to an open dataset; a pause that meets one waits
+for the read ahead of it, and no longer. An object
+that changes as it is used (see [Writers](#writers)) is still used by one thread at a time, and a
+second thread is refused rather than made to wait. A sample read from several threads at once
+reads correctly, since every call takes the HDF5 lock, though one handle per thread, as above, is
+still the simpler pattern. The training datasets' handle cache and the vocabulary registry are
+locked.

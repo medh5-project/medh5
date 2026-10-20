@@ -524,37 +524,16 @@ jobs:
 
   test-free-threaded:
     # Free-threaded CPython 3.14 installs the cp314t wheel, built for it: the
-    # abi3 one does not load there.  The module asks for the GIL, so CPython
-    # turns it on as it imports `medh5._core` and warns once; what is tested is
-    # the wheel, under the interpreter that installs it, not free-threading.
+    # abi3 one does not load there.  The suite runs with the GIL kept off
+    # (`PYTHON_GIL=0`), then the format and tools tests run again, each from
+    # four threads at once (`pytest-run-parallel`, one per core): what one
+    # thread does alone must hold with three others doing the same beside it.
+    # A test whose fixture wrote its files runs on one thread (`conftest.py`).
+    # Every thread takes turns at HDF5's one lock, so four threads already cost
+    # each test about ten times its time alone, with the GIL or without.
     needs: build-linux-x86_64
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.14t"
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: ci-dist-x86_64-unknown-linux-gnu
-          path: dist/
-      - run: pip install "$(ls dist/*-cp314t-*.whl)[dev,torch,nifti,dicom,dicomseg]"
-      - run: rm -rf medh5
-      # A free-threaded interpreter, the installed wheel, and the GIL the
-      # module asked for.
-      - run: python -c "import sys, sysconfig, medh5; assert sysconfig.get_config_var('Py_GIL_DISABLED'); assert 'site-packages' in medh5.__file__; assert sys._is_gil_enabled()"
-      - run: pytest tests/ -v -rs --no-cov -p no:cacheprovider
-
-  test-no-gil:
-    # The same, with the GIL kept off (`PYTHON_GIL=0`) though the module asks
-    # for it: information about what free-threading would meet, not a gate
-    # (`continue-on-error`, and not among what `ci-ok` needs) until 2.2.0
-    # audits the extension for it.
-    needs: build-linux-x86_64
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    continue-on-error: true
+    timeout-minutes: 45
     env:
       PYTHON_GIL: "0"
     steps:
@@ -566,9 +545,13 @@ jobs:
         with:
           name: ci-dist-x86_64-unknown-linux-gnu
           path: dist/
-      - run: pip install "$(ls dist/*-cp314t-*.whl)[dev,torch,nifti,dicom,dicomseg]"
+      - run: pip install "$(ls dist/*-cp314t-*.whl)[dev,torch,nifti,dicom,dicomseg]" "pytest-run-parallel==0.10.0"
       - run: rm -rf medh5
+      # A free-threaded interpreter, the installed wheel, and no GIL: imported
+      # with nothing holding it off, the module leaves it off, and says nothing.
+      - run: env -u PYTHON_GIL python -W error::RuntimeWarning -c "import sys, sysconfig, medh5; assert sysconfig.get_config_var('Py_GIL_DISABLED'); assert 'site-packages' in medh5.__file__; assert not sys._is_gil_enabled()"
       - run: pytest tests/ -v -rs --no-cov -p no:cacheprovider
+      - run: pytest tests/format tests/tools -rs --no-cov -p no:cacheprovider --parallel-threads=4
 
   test-macos:
     # macOS defaults to the `spawn` multiprocessing start method, which is

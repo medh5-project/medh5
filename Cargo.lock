@@ -666,6 +666,7 @@ dependencies = [
  "libc",
  "medh5-sys",
  "ndarray",
+ "parking_lot_core",
  "regex",
  "serde",
  "serde_json",
@@ -698,6 +699,7 @@ dependencies = [
  "ndarray",
  "numpy",
  "pyo3",
+ "pyo3-build-config",
  "serde_json",
 ]
 

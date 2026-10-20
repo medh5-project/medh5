@@ -85,8 +85,8 @@ rustup target add "$target"
 maturin build --release --locked --target "$target" --out dist --interpreter "$python" ${compatibility[@]+"${compatibility[@]}"}
 # Free-threaded CPython cannot load an abi3 extension, so it gets one built for
 # it: `-cp314-cp314t-<platform>.whl`.  Only PyO3 and the extension compile
-# again; the engine and HDF5 are the build above's.  The module still asks for
-# the GIL (`gil_used = true`), which CPython then turns on as it imports it.
+# again; the engine and HDF5 are the build above's.  The module runs without
+# the GIL (`gil_used = false`), so CPython leaves it off as it imports it.
 if [[ -z "${MEDH5_FT_PYTHON:-}" ]]; then
   echo "MEDH5_FT_PYTHON names no free-threaded Python to build the cp314t wheel with" >&2
   exit 1
