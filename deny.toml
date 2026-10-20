@@ -9,12 +9,11 @@ all-features = true
 # Exactly the licences of pyproject.toml's `license` expression, which the
 # wheels publish: a crate under any other licence fails here before it reaches
 # a wheel whose metadata would not name it (a test holds the two equal).
-allow = ["MIT", "BSD-3-Clause", "BSD-2-Clause", "Zlib", "Apache-2.0", "MIT-0"]
+allow = ["MIT", "BSD-3-Clause", "BSD-2-Clause", "Zlib", "Apache-2.0", "MIT-0", "Unicode-3.0"]
 confidence-threshold = 0.93
 # Crates that run at build time only (a proc-macro's, a build script's), so
 # nothing of theirs is compiled into what the project ships.
 exceptions = [
-  { crate = "unicode-ident", allow = ["Unicode-3.0"] },
   { crate = "target-lexicon", allow = ["Apache-2.0 WITH LLVM-exception"] },
   { crate = "libloading", allow = ["ISC"] },
 ]

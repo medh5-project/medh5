@@ -158,7 +158,7 @@ Rust crates (132)
   typenum 1.20.1                               MIT OR Apache-2.0                [91, 92, 93]
   unicode-general-category 1.1.0               Apache-2.0                       [21]
   unicode-ident 1.0.27                         (MIT OR Apache-2.0) AND Unicode-3.0 [14, 20, 94]
-  unicode-normalization 0.1.25                 MIT OR Apache-2.0                [15, 55, 95]
+  unicode-normalization 0.1.26                 (MIT OR Apache-2.0) AND Unicode-3.0 [15, 55, 94, 95]
   utf8parse 0.2.2                              Apache-2.0 OR MIT                [20, 96]
   uuid-simd 0.8.0                              MIT                              [54]
   vsimd 0.8.0                                  MIT                              [54]
@@ -861,7 +861,7 @@ DEALINGS IN THE SOFTWARE.
     LICENSE-APACHE; regex-automata 0.4.18: LICENSE-APACHE; regex-syntax 0.8.11:
     LICENSE-APACHE; rustix 1.1.5: LICENSE-APACHE; scopeguard 1.2.0:
     LICENSE-APACHE; smallvec 1.16.3: LICENSE-APACHE; tempfile 3.27.0:
-    LICENSE-APACHE; unicode-normalization 0.1.25: LICENSE-APACHE
+    LICENSE-APACHE; unicode-normalization 0.1.26: LICENSE-APACHE
 -------------------------------------------------------------------------------
 
                               Apache License
@@ -3544,7 +3544,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-[55] heck 0.5.0: LICENSE-MIT; unicode-normalization 0.1.25: LICENSE-MIT
+[55] heck 0.5.0: LICENSE-MIT; unicode-normalization 0.1.26: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2015 The Rust Project Developers
@@ -5686,7 +5686,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-[94] unicode-ident 1.0.27: LICENSE-UNICODE
+[94] unicode-ident 1.0.27: LICENSE-UNICODE; unicode-normalization 0.1.26:
+    LICENSE-UNICODE
 -------------------------------------------------------------------------------
 
 UNICODE LICENSE V3
@@ -5730,7 +5731,7 @@ dealings in these Data Files or Software without prior written
 authorization of the copyright holder.
 
 -------------------------------------------------------------------------------
-[95] unicode-normalization 0.1.25: COPYRIGHT
+[95] unicode-normalization 0.1.26: COPYRIGHT
 -------------------------------------------------------------------------------
 
 Licensed under the Apache License, Version 2.0

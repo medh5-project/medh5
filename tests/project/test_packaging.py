@@ -1332,18 +1332,24 @@ class TestDistribution:
         rust-numpy (BSD-2-Clause), zlib and `foldhash` (Zlib),
         `unicode-general-category` (Apache-2.0) and `borrow-or-share` (MIT-0)
         --- and PyPI cannot correct a release's metadata.  The binary links the
-        same libraries, so the Homebrew formula states the same set."""
+        same libraries, so the Homebrew formula states the same set.  2.2.0
+        added Unicode-3.0, for the data tables `unicode-normalization`
+        compiles in."""
         (expression,) = re.findall(
             r'^license = "([^"]+)"$', PYPROJECT.read_text(encoding="utf-8"), re.M
         )
         declared = expression.split(" AND ")
         assert declared[0] == "MIT", "the package's own licence leads"
         assert set(declared) == {
-            "MIT", "BSD-3-Clause", "BSD-2-Clause", "Zlib", "Apache-2.0", "MIT-0"
+            "MIT", "BSD-3-Clause", "BSD-2-Clause", "Zlib", "Apache-2.0", "MIT-0",
+            "Unicode-3.0",
         }  # fmt: skip
         notices = (ROOT / "THIRD_PARTY_NOTICES").read_text(encoding="utf-8")
         for licence in ("BSD-3-Clause", "BSD-2-Clause", "Zlib", "MIT-0"):
             assert re.search(rf"  {re.escape(licence)} +\[", notices), licence
+        assert re.search(
+            r"^  unicode-normalization .* AND Unicode-3\.0 +\[", notices, re.M
+        )
         brew = _release_script("homebrew_formula.py")
         assert list(brew.LICENSES) == declared
         sums = {brew.archive("2.0.0", t): "0" * 64 for t in brew.TARGETS.values()}

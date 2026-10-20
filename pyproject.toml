@@ -19,12 +19,13 @@ readme = "README.md"
 requires-python = ">=3.10"
 # The package is MIT.  Its wheels also compile in HDF5, C-Blosc2, Zstandard
 # and `subtle` (BSD-3-Clause), LZ4 and rust-numpy (BSD-2-Clause), zlib and
-# `foldhash` (Zlib), `unicode-general-category` (Apache-2.0) and
-# `borrow-or-share` (MIT-0).  THIRD_PARTY_NOTICES reproduces the licence of
+# `foldhash` (Zlib), `unicode-general-category` (Apache-2.0),
+# `borrow-or-share` (MIT-0) and `unicode-normalization`'s Unicode data tables
+# (Unicode-3.0).  THIRD_PARTY_NOTICES reproduces the licence of
 # everything they compile in, generated from Cargo.lock by
 # .github/scripts/third_party_notices.py; the Homebrew formula states the same
 # expression.
-license = "MIT AND BSD-3-Clause AND BSD-2-Clause AND Zlib AND Apache-2.0 AND MIT-0"
+license = "MIT AND BSD-3-Clause AND BSD-2-Clause AND Zlib AND Apache-2.0 AND MIT-0 AND Unicode-3.0"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES"]
 authors = [
   { name = "Puyang Wang", email = "pauliwang411@gmail.com" },
