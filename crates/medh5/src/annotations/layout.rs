@@ -407,7 +407,9 @@ pub fn mask_problems(
     for i in 0..n {
         let bbox: Vec<f64> = boxes.index_axis(Axis(0), i).iter().copied().collect();
         let Ok(slices) = box_to_slices(&bbox, None) else { continue };
-        let extent: Vec<i64> = slices.iter().map(|(a, b)| b - a).collect();
+        // Saturating: a finite bound past the integers is the end of them, and
+        // a box from one end to the other overflowed the subtraction.
+        let extent: Vec<i64> = slices.iter().map(|(a, b)| b.saturating_sub(*a)).collect();
         let row: Vec<i64> = shapes.index_axis(Axis(0), i).iter().copied().collect();
         if row != extent {
             out.push(Problem::new(
@@ -566,5 +568,14 @@ mod tests {
         let found =
             mask_problems(&huge, &[0, 1], &column(&[1, 3], vec![1 << 20, 1 << 20, 1 << 10]), 1, Some(&[8, 8, 8]));
         assert!(found[0].message.contains("more than the 512"), "{}", found[0].message);
+    }
+
+    #[test]
+    fn s7_4_a_box_past_the_integers_is_a_finding_not_a_panic() {
+        // Finite, so not E406; its slices are the ends of the i64 range, and
+        // their difference overflowed (found by the open_validate fuzzer).
+        let boxes = ArrayD::from_shape_vec(IxDyn(&[1, 1, 2]), vec![-1e300, 1e300]).unwrap();
+        let found = mask_problems(&boxes, &[0, 1], &column(&[1, 1], vec![8]), 1, Some(&[8]));
+        assert_eq!((found[0].code, found[0].dataset.as_str()), ("E405", "mask_shapes"));
     }
 }
