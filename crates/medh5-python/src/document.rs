@@ -108,6 +108,42 @@ impl Members {
             _ => &mut doc.extra,
         }
     }
+
+    /// A copy of the members, taken under the document's guard and handed
+    /// to Python after it.
+    fn held(self, doc: &engine::SampleDocument) -> Held {
+        match self {
+            Members::Quality => Held::Quality(doc.quality.clone()),
+            members => Held::Json(members.json(doc).clone()),
+        }
+    }
+}
+
+/// The members of one mapping as the document held them.
+enum Held {
+    Quality(indexmap::IndexMap<String, medh5::curation::quality::QualityRecord>),
+    Json(Map<String, Value>),
+}
+
+impl Held {
+    /// `(key, value, token)` for each member, the token its canonical JSON.
+    fn list(self, py: Python<'_>) -> R<Bound<'_, PyList>> {
+        let out = PyList::empty(py);
+        match self {
+            Held::Quality(records) => {
+                for (k, v) in records {
+                    let token = medh5::json::canonical(&v.to_json());
+                    out.append((k, QualityRecord::wrap(v), token))?;
+                }
+            }
+            Held::Json(found) => {
+                for (k, v) in found {
+                    out.append((k, json_to_py(py, &v)?, medh5::json::canonical(&v)))?;
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// The live view of one free-form member mapping of `doc`.
@@ -418,38 +454,39 @@ impl SampleDocument {
     /// The members of `field` as `(key, value, token)`: the token is the
     /// member's canonical JSON, which `_replace_member` compares.
     fn _members<'py>(&self, py: Python<'py>, field: &str) -> R<Bound<'py, PyList>> {
-        let out = PyList::empty(py);
-        match Members::of(field)? {
-            Members::Quality => {
-                for (k, v) in self.read(py, |d| d.quality.clone())? {
-                    let token = medh5::json::canonical(&v.to_json());
-                    out.append((k, QualityRecord::wrap(v), token))?;
-                }
-            }
-            members => {
-                let found = self.read(py, |d| members.json(d).clone())?;
-                for (k, v) in found {
-                    out.append((k, json_to_py(py, &v)?, medh5::json::canonical(&v)))?;
-                }
-            }
-        }
-        Ok(out)
+        let members = Members::of(field)?;
+        self.read(py, |d| members.held(d))?.list(py)
     }
 
     /// Set (or replace) one member, converted as `SampleWriter.extra`
-    /// converts a value.
-    fn _set_member(&self, py: Python<'_>, field: &str, key: &str, value: &Bound<'_, PyAny>) -> R<()> {
-        match Members::of(field)? {
+    /// converts a value; the members as the edit left them, read under the
+    /// same guard (as `_members` reads them), so a view brought up to date
+    /// after an edit kept is never refused.
+    fn _set_member<'py>(
+        &self,
+        py: Python<'py>,
+        field: &str,
+        key: &str,
+        value: &Bound<'_, PyAny>,
+    ) -> R<Bound<'py, PyList>> {
+        let members = Members::of(field)?;
+        let held = match members {
             Members::Quality => {
                 let record = QualityRecord::arg(value)?;
-                self.edit(py, |d| d.quality.insert(key.to_string(), record))?;
+                self.edit(py, |d| {
+                    d.quality.insert(key.to_string(), record);
+                    members.held(d)
+                })?
             }
-            members => {
+            _ => {
                 let value = py_to_json(value)?;
-                self.edit(py, |d| members.json_mut(d).insert(key.to_string(), value))?;
+                self.edit(py, |d| {
+                    members.json_mut(d).insert(key.to_string(), value);
+                    members.held(d)
+                })?
             }
-        }
-        Ok(())
+        };
+        held.list(py)
     }
 
     /// Replace one member with `value`, if it is still the one read as
@@ -559,24 +596,31 @@ impl SampleDocument {
         replaced.ok_or_else(|| changed(field, key).into())
     }
 
-    /// Delete one member (`KeyError` when there is none).
-    fn _delete_member(&self, py: Python<'_>, field: &str, key: &str) -> R<()> {
-        let removed = match Members::of(field)? {
-            Members::Quality => self.edit(py, |d| d.quality.shift_remove(key).is_some())?,
-            members => self.edit(py, |d| members.json_mut(d).shift_remove(key).is_some())?,
-        };
-        if !removed {
-            return Err(PyKeyError::new_err(key.to_string()).into());
+    /// Delete one member (`KeyError` when there is none); the members left,
+    /// read under the same guard.
+    fn _delete_member<'py>(&self, py: Python<'py>, field: &str, key: &str) -> R<Bound<'py, PyList>> {
+        let members = Members::of(field)?;
+        let held = self.edit(py, |d| {
+            let removed = match members {
+                Members::Quality => d.quality.shift_remove(key).is_some(),
+                _ => members.json_mut(d).shift_remove(key).is_some(),
+            };
+            removed.then(|| members.held(d))
+        })?;
+        match held {
+            Some(held) => held.list(py),
+            None => Err(PyKeyError::new_err(key.to_string()).into()),
         }
-        Ok(())
     }
 
-    /// Delete every member.
-    fn _clear_members(&self, py: Python<'_>, field: &str) -> R<()> {
-        match Members::of(field)? {
-            Members::Quality => self.edit(py, |d| d.quality.clear()),
-            members => self.edit(py, |d| members.json_mut(d).clear()),
-        }
+    /// Delete every member; the members left, none.
+    fn _clear_members<'py>(&self, py: Python<'py>, field: &str) -> R<Bound<'py, PyList>> {
+        let members = Members::of(field)?;
+        self.edit(py, |d| match members {
+            Members::Quality => d.quality.clear(),
+            _ => members.json_mut(d).clear(),
+        })?;
+        Ok(PyList::empty(py))
     }
 
     /// A value as a member holds it: converted to JSON and back, detached

@@ -26,7 +26,8 @@ A copy of a view (``copy.copy``, ``dict(view)``, ``pickle``) is a plain
 document handed out.
 
 Threads may share a view.  A change nested in a member, the rewrite it makes
-(comparing the member's token and replacing it), and a view's reread of the
+(comparing the member's token and replacing it), an edit through a view
+with its reread of the members the edit left, and a view's reread of the
 document each happen in one step, under one lock: two threads editing one
 member each write their edit over the other's, never over a token the other
 has already spent, and never rewrite a container the other is changing.  A
@@ -46,7 +47,8 @@ __all__ = ["Members"]
 
 _LOCK = threading.RLock()
 """Held while a container nested in a member changes and the member is
-rewritten (`_Anchor.rewrite`), and while a view rereads the document
+rewritten (`_Anchor.rewrite`), while a view edits the document and takes
+the members the edit left, and while a view rereads the document
 (`Members._sync`).  Reentrant, so nested use on one thread never blocks
 itself."""
 
@@ -198,13 +200,18 @@ class Members(dict[str, Any]):
         view._sync()
         return view
 
-    def _sync(self) -> None:
+    def _sync(self, members: list[Any] | None = None) -> None:
         """Hold what the document holds, keeping the containers of a member
-        that has not changed (a caller may be holding them)."""
+        that has not changed (a caller may be holding them).  An edit hands
+        over *members* as it left them, read under its own guard: a view
+        brought up to date after an edit the document kept is never refused,
+        as a second read could be."""
         with _LOCK:
+            if members is None:
+                members = self._document._members(self._field)
             held: dict[str, Any] = {}
             anchors: dict[str, _Anchor] = {}
-            for key, value, token in self._document._members(self._field):
+            for key, value, token in members:
                 anchor = self._anchors.get(key)
                 if anchor is not None and anchor.token == token and not anchor.stale:
                     held[key] = anchor.root
@@ -217,19 +224,27 @@ class Members(dict[str, Any]):
 
     # -- mutation ----------------------------------------------------------------
 
+    def _converted(self, value: Any) -> Any:
+        """*value* as a member holds it, made before the lock, so the caller's
+        code runs outside it (a quality record is the engine's own).  An edit
+        and the reread of the members it left are one step under the lock, so
+        two threads' rereads land in the order of their edits."""
+        return value if self._field == "quality" else self._document._plain(value)
+
     def __setitem__(self, key: str, value: Any) -> None:
         if self._document is None:
             super().__setitem__(key, value)
             return
-        self._document._set_member(self._field, key, value)
-        self._sync()
+        value = self._converted(value)
+        with _LOCK:
+            self._sync(self._document._set_member(self._field, key, value))
 
     def __delitem__(self, key: str) -> None:
         if self._document is None:
             super().__delitem__(key)
             return
-        self._document._delete_member(self._field, key)
-        self._sync()
+        with _LOCK:
+            self._sync(self._document._delete_member(self._field, key))
 
     def __ior__(self, other: Any) -> Members:  # type: ignore[override,misc]
         self.update(other)
@@ -239,12 +254,25 @@ class Members(dict[str, Any]):
         if self._document is None:
             super().update(other, **kwargs)
             return
-        try:
-            for key, value in dict(other, **kwargs).items():
-                self._document._set_member(self._field, key, value)
-        finally:
-            # A value refused partway leaves those before it written.
-            self._sync()
+        # A value refused partway leaves those before it written.
+        given: list[tuple[Any, Any]] = []
+        refused: BaseException | None = None
+        for key, value in dict(other, **kwargs).items():
+            try:
+                given.append((key, self._converted(value)))
+            except BaseException as e:
+                refused = e
+                break
+        with _LOCK:
+            members = None
+            try:
+                for key, value in given:
+                    members = self._document._set_member(self._field, key, value)
+            finally:
+                if members is not None:
+                    self._sync(members)
+        if refused is not None:
+            raise refused
 
     def setdefault(self, key: str, default: Any = None) -> Any:
         if self._document is None:
@@ -258,7 +286,7 @@ class Members(dict[str, Any]):
             self._sync()
             if key in self:
                 return self[key]
-        value = default if self._field == "quality" else self._document._plain(default)
+        value = self._converted(default)
         with _LOCK:
             self._sync()
             if key not in self:
@@ -294,8 +322,8 @@ class Members(dict[str, Any]):
         if self._document is None:
             super().clear()
             return
-        self._document._clear_members(self._field)
-        self._sync()
+        with _LOCK:
+            self._sync(self._document._clear_members(self._field))
 
     def __reduce__(self) -> tuple[Any, ...]:
         return (dict, (dict(self),))

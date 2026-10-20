@@ -603,6 +603,42 @@ class TestOneThreadAtATime:
 
         hammered([edit] + [read] * 3, rounds=2000)
 
+    def test_a_view_edit_refused_changed_nothing_and_one_kept_is_not_refused(
+        self,
+    ):
+        """A thread setting and deleting keys of a document's `extra` while
+        others replace its `acquisition`: an edit that raises left the
+        document as it was, and one the document kept does not raise.  The
+        edit and the view's reread are one step, under the document's one
+        guard."""
+        from medh5.document import new_document
+
+        doc = new_document("s")
+        extra = doc.extra
+        kept: set[str] = set()
+        count = iter(range(10**9))
+        other = iter(range(10**9))
+
+        def edit() -> None:
+            key = f"k{next(count)}"
+            extra[key] = 0
+            kept.add(key)
+            del extra[key]
+            kept.discard(key)
+
+        def write() -> None:
+            doc.acquisition = {"n": next(other)}
+
+        hammered([edit] + [write] * 3, rounds=2000)
+        for _ in range(100):
+            try:
+                held = set(doc.extra)
+                break
+            except medh5.MEDH5Error:  # pragma: no cover - only while busy
+                continue
+        assert held == kept
+        assert set(extra) == kept
+
     @pytest.mark.parametrize("threads", [8])
     def test_threads_setting_one_default_all_get_it(self, threads: int):
         """Threads calling `setdefault` for one missing key, of a document's
