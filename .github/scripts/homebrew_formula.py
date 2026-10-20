@@ -18,7 +18,15 @@ from pathlib import Path
 # What the binary is licensed under: the package's own MIT, and the licences of
 # the libraries it links statically --- pyproject.toml's `license`, as Homebrew
 # spells an SPDX conjunction (THIRD_PARTY_NOTICES lists each library).
-LICENSES = ("MIT", "BSD-3-Clause", "BSD-2-Clause", "Zlib", "Apache-2.0", "MIT-0")
+LICENSES = (
+    "MIT",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "Zlib",
+    "Apache-2.0",
+    "MIT-0",
+    "Unicode-3.0",
+)
 
 # Homebrew's (OS, architecture) blocks and the Rust target built for each.
 # macOS on Intel is not among them (2.2.0 dropped it): there the formula
