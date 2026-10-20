@@ -34,8 +34,9 @@ use crate::h5::attrs::{self, AttrValue};
 use crate::h5::{data, ops};
 use crate::ids::validate_id;
 use crate::json::{float_repr, repr_str};
-use crate::sample::reader::{KeyKind, Sample};
+use crate::sample::reader::Sample;
 use crate::sample::writer::SampleWriter;
+use crate::transforms::model::can_invert;
 use crate::{Error, Result};
 
 /// One annotation a resample carried onto the target.
@@ -151,7 +152,7 @@ struct Geometry {
 }
 
 impl Geometry {
-    fn new(sample: &Sample, mapping: &Mapping, source: &Grid, target: &Grid) -> Result<Geometry> {
+    fn new(mapping: &Mapping, source: &Grid, target: &Grid) -> Result<Geometry> {
         let s = source.n_spatial();
         match mapping {
             Mapping::Affine(m) => {
@@ -164,9 +165,11 @@ impl Geometry {
                     forward: None,
                 })
             }
-            Mapping::Through(_) => {
-                let forward = sample.transform_between_as(&source.grid_id, &target.grid_id, Some(KeyKind::Grid))?;
-                let Some(transform) = forward else {
+            Mapping::Through(through) => {
+                // Points move by the inverse of the very path the image is
+                // sampled through, so they stay on the anatomy they marked;
+                // another path between the frames could be another mapping.
+                let Some(transform) = invert(&through.transform)? else {
                     return Ok(Geometry {
                         source: source.clone(),
                         target: target.clone(),
@@ -241,6 +244,18 @@ impl Geometry {
         let result = if world { target_world } else { self.target.world_to_index(&target_world)? };
         Ok(Array2::from_shape_vec((n, s), result)?)
     }
+}
+
+/// `path`'s inverse, when it can be evaluated: analytic, stored
+/// (`inverse_id`), or through the inverses of its steps.
+fn invert(path: &Transform) -> Result<Option<Transform>> {
+    if let Body::Inverse(inner) = &path.body {
+        return Ok(Some((**inner).clone()));
+    }
+    if !can_invert(path)? {
+        return Ok(None);
+    }
+    Ok(Some(Transform::inverse_of(path.clone())))
 }
 
 /// The homogeneous `(S+1, S+1)` matrix scaling by `factor`.
@@ -348,7 +363,9 @@ fn refused(item: &str, kind: &str, target: &str, why: &str) -> Error {
     ))
 }
 
-const NO_PATH: &str = "no transform path maps its coordinates from the source's frame into the target's";
+const NO_PATH: &str =
+    "the transform path the image is sampled through has no inverse that can be evaluated (analytic, \
+                       or stored and named by `inverse_id`), so nothing moves its coordinates with the image";
 const NOT_AFFINE: &str =
     "the transform path to the target is not affine, so its straight edges would not stay straight";
 
@@ -444,7 +461,7 @@ pub(super) fn prepare(
         claim(&output, taken)?;
         if !geometry.contains_key(grid) {
             let source = &sources[grid];
-            geometry.insert(grid.clone(), Geometry::new(sample, &mappings[grid], source, target)?);
+            geometry.insert(grid.clone(), Geometry::new(&mappings[grid], source, target)?);
         }
         check(annotation, &kind, &geometry[grid], *on_grid, target)?;
         let voxel = *on_grid && is_voxel(&kind) && (kind != "instances" || annotation.has_masks()?);

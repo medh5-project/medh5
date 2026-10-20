@@ -7,7 +7,8 @@
   and coverage. Voxel encodings move nearest in their own encoding, instances
   object by object under their own ids (an object with no voxel left is
   refused, never dropped), probability maps linearly; points and keypoints
-  map exactly, meshes along an affine path. A box is carried only where the
+  map exactly, by the inverse of the path the image is sampled through, and
+  meshes along an affine path. A box is carried only where the
   mapping keeps the axes and a contour only where its plane stays a grid
   plane; anything else is refused rather than approximated. Target voxels
   outside the source become an ignore region (§7.7). `--no-annotations`

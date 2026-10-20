@@ -1074,8 +1074,9 @@ class TestAnnotationsFollow:
                 to_frame="F0",
                 field=np.ascontiguousarray(field, dtype=np.float32),
                 field_grid="tgt",
+                inverse_id="back",
             )
-            # And back, so the mesh has a path into the target's frame.
+            # And its stored inverse, so the vertices could be moved.
             w.add_transform(
                 "back",
                 kind="displacement",
@@ -1086,10 +1087,70 @@ class TestAnnotationsFollow:
                     dtype=np.float32,
                 ),
                 field_grid="src",
+                inverse_id="t",
             )
             w.add_mesh("surface", vertices, faces, space="world", frame_uid="F0")
         with pytest.raises(MEDH5ValidationError, match="not affine"):
             resample(path, "img", onto="tgt")
+
+    @staticmethod
+    def displaced(path, back_shift, *, paired):
+        """`img` on `src` (F0), sampled onto `tgt` (F1) through a constant
+        displacement, with one transform the other way."""
+        shift = np.array([0.5, -0.25, 0.75])
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid("src", shape=SOURCE_SHAPE, spacing=(1.0,) * 3, frame_uid="F0")
+            w.add_image("img", SOURCE, grid="src", modality="CT")
+            w.add_grid("tgt", shape=(3, 4, 5), spacing=(1.0,) * 3, frame_uid="F1")
+            w.add_transform(
+                "t",
+                kind="displacement",
+                from_frame="F1",
+                to_frame="F0",
+                field=np.ascontiguousarray(
+                    np.broadcast_to(shift[:, None, None, None], (3, 3, 4, 5)),
+                    dtype=np.float32,
+                ),
+                field_grid="tgt",
+                inverse_id="back" if paired else None,
+            )
+            w.add_transform(
+                "back",
+                kind="displacement",
+                from_frame="F0",
+                to_frame="F1",
+                field=np.ascontiguousarray(
+                    np.broadcast_to(
+                        np.asarray(back_shift)[:, None, None, None], (3, *SOURCE_SHAPE)
+                    ),
+                    dtype=np.float32,
+                ),
+                field_grid="src",
+                inverse_id="t" if paired else None,
+            )
+            w.add_points("marks", np.array([[1.0, 2.0, 1.0]], np.float32), grid="src")
+        return shift
+
+    def test_S10_2_points_move_by_the_inverse_of_the_sampling_path(self, tmp_path):
+        """The image is sampled through `t`; the points move by its stored
+        inverse, so they stay on what they marked."""
+        path = tmp_path / "s.medh5"
+        shift = self.displaced(path, [-0.5, 0.25, -0.75], paired=True)
+        resample(path, "img", onto="tgt")
+        with medh5.open(path) as s:
+            moved = s.annotations["marks_on_tgt"].points
+        np.testing.assert_allclose(moved, [[1.0, 2.0, 1.0] - shift], atol=1e-5)
+
+    def test_S10_2_points_refuse_a_path_with_no_inverse(self, tmp_path):
+        """A transform the other way that is not declared `t`'s inverse is
+        another mapping: moving the points by it would put them off the
+        anatomy the resampled image shows."""
+        path = tmp_path / "s.medh5"
+        self.displaced(path, [3.0, 0.0, 0.0], paired=False)
+        before = path.read_bytes()
+        with pytest.raises(MEDH5ValidationError, match="'marks'.*no inverse"):
+            resample(path, "img", onto="tgt")
+        assert path.read_bytes() == before
 
     def test_S7_7_a_valid_mask_named_as_an_ignore_mask_is_carried(self, tmp_path):
         """An image's valid mask goes into its output's own; when an
