@@ -137,6 +137,7 @@ Documentation = "https://medh5.readthedocs.io/"
 # The released documentation's, not main's: PyPI keeps these with the release.
 "Specification 1.0" = "https://medh5.readthedocs.io/en/stable/spec/medh5-1.0/"
 "Specification 1.1" = "https://medh5.readthedocs.io/en/stable/spec/medh5-1.1/"
+"Specification 1.2" = "https://medh5.readthedocs.io/en/stable/spec/medh5-1.2/"
 
 [project.scripts]
 medh5 = "medh5.cli:main"

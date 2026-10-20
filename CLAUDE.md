@@ -65,21 +65,23 @@ CONTRIBUTING.md has the same chain; keep the two equal (a test compares them).
 
 ## The model
 
-**Format 1.1, package 2.0.** A `.medh5` file is **one subject at one or more
+**Format 1.2, package 2.2.** A `.medh5` file is **one subject at one or more
 timepoints**, with every image, annotation, transform and curation record about
 them. Not one scan — one subject. Most of the design follows from that: splitting
 by file is subject-safe, a change annotation has a referent, and registration
 between visits is an object in the file rather than a convention between
 filenames. 1.1 adds one optional profile, `clinical` — the subject's history on
 one clock, every event with when it happened *and* when it became known — and
-nothing else; a sample is written at the lowest version its content needs, so
-imaging alone is still 1.0.
+1.2 one annotation kind, `polylines` (open curves), and nothing else; a sample
+is written at the lowest version its content needs, so imaging alone is still
+1.0, and removing the last polylines annotation lowers the version again.
 
-`docs/spec/medh5-1.0.md` and `docs/spec/medh5-1.1.md` are **normative**. Code
-implements them; when they disagree, one of them is a bug. 1.0 Appendix C
-records the clauses corrected because implementing them showed the text was not
-implementable — including the four the Rust re-implementation found and the one
-1.1 found; 1.1 Appendix A records the changes to the reviewed 1.1 draft.
+`docs/spec/medh5-1.0.md`, `docs/spec/medh5-1.1.md` and `docs/spec/medh5-1.2.md`
+are **normative**. Code implements them; when they disagree, one of them is a
+bug. 1.0 Appendix C records the clauses corrected because implementing them
+showed the text was not implementable — including the four the Rust
+re-implementation found and the one 1.1 found; 1.1 Appendix A records the
+changes to the reviewed 1.1 draft, and 1.2 Appendix A those to its planned text.
 `docs/spec/task-cache-1.md` is the **separately versioned** task-and-cache
 contract (`medh5.task/1`, `medh5.cache/1`): nothing in it is a payload
 requirement.
@@ -97,7 +99,9 @@ and the CLI are layers over it, and all three read and write the same bytes.
   E8xx), `collection`, `dataset`, `sampling`, `conformance`; and for 1.1,
   `version` (1.1 §2: full, projection, unsupported), `clinical` (1.1 §3–§10:
   model, columns, tables, checks, schema, selection, augmentation) and
-  `companion` (task-cache-1: tasks, source pins, preflight row views, caches).
+  `companion` (task-cache-1: tasks, source pins, preflight row views, caches);
+  `convert` holds the conversion report and grouping, the 0.x migration, the
+  NIfTI converter and the layout of ITK's HDF5 transform files.
   `data/codes.json` is the §15.2 diagnostic code table (a test asserts the
   table and the spec agree); `data/` also holds the schema and vocabularies,
   embedded at compile time.
@@ -105,9 +109,10 @@ and the CLI are layers over it, and all three read and write the same bytes.
   (vendored) and the Blosc2 (32026) and Zstandard (32015) HDF5 filters.
 - **`crates/medh5-cli`** — the `medh5` command line (crates.io `medh5-cli`).
   The Python console script runs the same code through `_core.cli_main`;
-  the converters and the dataloader benchmark are Python, and the standalone
-  binary runs them through `Host`: `-m medh5.cli` under `MEDH5_PYTHON`, else
-  `python3` (`python` on Windows).
+  NIfTI converts in the engine (`convert::nifti`), the other converters and
+  the dataloader benchmark are Python, and the standalone binary runs those
+  through `Host`: `-m medh5.cli` under `MEDH5_PYTHON`, else `python3`
+  (`python` on Windows).
 - **`crates/medh5-python`** — the PyO3 extension `medh5._core` (not published;
   maturin builds it into the wheel). Engine handles live in a facade's
   `._handle`; result types are rebuilt as the 1.x Python classes.

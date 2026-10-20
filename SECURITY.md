@@ -37,7 +37,7 @@ finding against a crate or against what `pip install medh5` installs that has
 neither a fix nor a disposition here.
 
 An extra installs projects medh5 neither ships nor pins (PyTorch, MONAI,
-pydicom, highdicom, nibabel, h5py), and an advisory against one may have no fix
+pydicom, highdicom, PyArrow, h5py), and an advisory against one may have no fix
 for weeks. Such a finding is reported, in the weekly run and in the release
 run's summary, and dispositioned here, but it does not hold a medh5 release:
 the release would not change what that extra installs.
