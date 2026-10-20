@@ -639,6 +639,31 @@ class TestOneThreadAtATime:
         assert held == kept
         assert set(extra) == kept
 
+    def test_a_writers_acquisition_kept_is_not_refused(self, tmp_path: Path):
+        """A thread merging acquisition parameters through a writer while
+        another adds images to it: a call that raises left the document as
+        it was, and one the document kept returns the view it left, not a
+        refusal.  The view is read under the guard the edit took."""
+        image = np.zeros((16, 32, 32), np.int16)
+        with medh5.create(tmp_path / "w.medh5", sample_id="w") as w:
+            w.add_grid("g", shape=image.shape, spacing=(1.0, 1.0, 1.0))
+            kept: set[str] = set()
+            count = iter(range(10**9))
+            other = iter(range(10**9))
+
+            def merge() -> None:
+                key = f"k{next(count)}"
+                params = w.acquisition("CT", **{key: 0})
+                kept.add(key)
+                assert key in params
+
+            def write() -> None:
+                w.add_image(f"CT{next(other)}", image, grid="g", modality="CT")
+
+            hammered([merge, write], rounds=2000)
+            assert set(w.document.acquisition.get("CT", {})) == kept
+            w.abort()
+
     @pytest.mark.parametrize("threads", [8])
     def test_threads_setting_one_default_all_get_it(self, threads: int):
         """Threads calling `setdefault` for one missing key, of a document's

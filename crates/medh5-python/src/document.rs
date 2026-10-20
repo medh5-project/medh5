@@ -148,10 +148,27 @@ impl Held {
 
 /// The live view of one free-form member mapping of `doc`.
 fn live_members<'py>(doc: &Bound<'py, SampleDocument>, field: &str) -> PyResult<Bound<'py, PyAny>> {
+    members_view(doc.as_any(), field, None)
+}
+
+/// The view of `field` of `doc`, holding `members` (as `_members` lists
+/// them) when they were read already, or reading them.
+fn members_view<'py>(
+    doc: &Bound<'py, PyAny>,
+    field: &str,
+    members: Option<Bound<'py, PyList>>,
+) -> PyResult<Bound<'py, PyAny>> {
     static MEMBERS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
     let py = doc.py();
     let class = MEMBERS.get_or_try_init(py, || py.import("medh5._live")?.getattr("Members").map(Bound::unbind))?;
-    class.bind(py).call_method1("_of", (doc, field))
+    class.bind(py).call_method1("_of", (doc, field, members))
+}
+
+/// The `acquisition` view of `doc`, holding `acquisition`: what an edit left,
+/// read under the guard it took, so the view is not refused after it.
+pub(crate) fn acquisition_view<'py>(doc: &Bound<'py, PyAny>, acquisition: Map<String, Value>) -> R<Bound<'py, PyAny>> {
+    let members = Held::Json(acquisition).list(doc.py())?;
+    Ok(members_view(doc, "acquisition", Some(members))?)
 }
 
 /// `f` under the live views' lock (`medh5._live._LOCK`), which every change

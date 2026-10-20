@@ -800,8 +800,13 @@ impl SampleWriter {
         params: Option<&Bound<'py, PyDict>>,
     ) -> R<Bound<'py, PyAny>> {
         let map = kwargs_to_map(params)?;
-        slf.get().writer()?.acquisition(image_id, map);
-        Ok(Self::document_view(slf)?.getattr("acquisition")?.get_item(image_id)?)
+        let acquisition = {
+            let mut writer = slf.get().writer()?;
+            writer.acquisition(image_id, map);
+            writer.document().acquisition.clone()
+        };
+        let view = crate::document::acquisition_view(&Self::document_view(slf)?, acquisition)?;
+        Ok(view.get_item(image_id)?)
     }
 
     /// Set a namespaced extension member of the document.

@@ -192,12 +192,15 @@ class Members(dict[str, Any]):
         self._anchors = {}
 
     @classmethod
-    def _of(cls, document: Any, field: str) -> Members:
-        """The view of *field* of *document*."""
+    def _of(
+        cls, document: Any, field: str, members: list[Any] | None = None
+    ) -> Members:
+        """The view of *field* of *document*, holding *members* when an edit
+        handed them over (as `_sync` takes them)."""
         view = cls()
         view._document = document
         view._field = field
-        view._sync()
+        view._sync(members)
         return view
 
     def _sync(self, members: list[Any] | None = None) -> None:
