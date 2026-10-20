@@ -826,6 +826,88 @@ class TestOneThreadAtATime:
         assert doc.extra["log"]["seen"].get("other") == (1 if landed else None)
         assert doc.extra["log"]["items"] == list(items)
 
+    @staticmethod
+    def _edit_on_another_thread(edit: Callable[[], None]) -> Callable[[], None]:
+        """A hook that, the first time it runs, makes *edit* on another thread
+        and waits for it; it fails if the edit could not land."""
+        landed: list[bool] = []
+
+        def hook() -> None:
+            if landed:
+                return
+            other = threading.Thread(target=edit)
+            other.start()
+            other.join(timeout=5)
+            landed.append(not other.is_alive())
+            assert landed == [True], "the edit waited on the live views' lock"
+
+        return hook
+
+    def test_a_sort_is_not_kept_after_an_item_it_sorted_by_changed(self):
+        """A dict in a list changed on another thread while the list is
+        sorted by it: the order computed from the old value is not kept."""
+        from medh5.document import new_document
+
+        doc = new_document("s")
+        doc.extra["log"] = {"items": [{"k": 2}, {"k": 1}]}
+        items = doc.extra["log"]["items"]
+        first = items[0]
+        hook = self._edit_on_another_thread(lambda: first.__setitem__("k", 0))
+
+        def by_k(item: dict[str, int]) -> int:
+            hook()
+            return item["k"]
+
+        with pytest.raises(RuntimeError, match="changed on another thread"):
+            items.sort(key=by_k)
+        assert doc.extra["log"]["items"] == [{"k": 0}, {"k": 1}] == list(items)
+
+    def test_remove_does_not_take_an_item_that_changed_after_it_matched(self):
+        """A dict in a list that matched the value to remove, changed on
+        another thread before the removal: it is not removed, as it no
+        longer equals the value."""
+        from medh5.document import new_document
+
+        doc = new_document("s")
+        doc.extra["log"] = {"items": [{"a": 1}, {"a": 2}]}
+        items = doc.extra["log"]["items"]
+        first = items[0]
+        hook = self._edit_on_another_thread(lambda: first.__setitem__("a", 9))
+
+        class Matches:
+            __hash__ = None  # type: ignore[assignment]
+
+            def __eq__(self, other: object) -> bool:
+                found = other == {"a": 1}
+                hook()
+                return found
+
+        with pytest.raises(ValueError, match="not in list"):
+            items.remove(Matches())
+        assert doc.extra["log"]["items"] == [{"a": 9}, {"a": 2}] == list(items)
+
+    def test_a_standalone_records_callers_code_runs_outside_the_lock(self):
+        """A caller's object in a record no document handed out is converted
+        by `to_json` without the live views' lock, which guards nothing of
+        such a record: its conversion may wait on an edit of a document."""
+        from medh5.curation import Activity
+        from medh5.document import new_document
+
+        doc = new_document("s")
+        doc.extra["log"] = {"seen": {}}
+        seen = doc.extra["log"]["seen"]
+        hook = self._edit_on_another_thread(lambda: seen.__setitem__("other", 1))
+
+        class Value:
+            def to_json(self) -> int:
+                hook()
+                return 1
+
+        act = Activity("a", "import", params={})
+        act.params["x"] = Value()
+        assert act.to_json()["params"] == {"x": 1}
+        assert doc.extra["log"]["seen"] == {"other": 1}
+
     def test_a_key_the_document_cannot_hold_is_refused_before_any_change(self):
         """A nested dict refuses a key JSON has no spelling for as it is
         given, and the member stays editable: refused by the rewrite, it was

@@ -272,6 +272,13 @@ impl Held {
         self.cells.iter().all(|c| c.get().is_none())
     }
 
+    /// Whether the containers write through an anchor (`medh5._live`), and
+    /// so hold only what was converted for them.  A record no document
+    /// handed out holds the caller's own dicts, which no lock guards.
+    pub fn is_anchored(&self) -> bool {
+        self.anchor.get().is_some()
+    }
+
     /// Field `i`'s container, if it has been read.
     pub fn get(&self, i: usize) -> Option<&Py<PyAny>> {
         self.cells[i].get()
@@ -550,6 +557,7 @@ macro_rules! record_class {
             ) -> PyResult<Py<PyAny>> {
                 let made = Bound::new(py, Self::from_value(value).map_err(PyErr::from)?)?;
                 if let Some(anchor) = anchor {
+                    made.get().held.anchor(made.as_any(), &made.get().json, Some(anchor))?;
                     Self::anchor_containers(&made, anchor)?;
                 }
                 Ok(made.into_any().unbind())
@@ -563,9 +571,15 @@ macro_rules! record_class {
                 }
                 // Under the lock an edit to an anchored container holds with
                 // its rewrite (`medh5._live`): one state of every container.
-                let merged = $crate::document::under_live_lock(py, || {
-                    $crate::records::merged_json(py, $py, &self.json, Self::FIELDS, &self.held)
-                })?;
+                // A record no document handed out is read without it: its
+                // containers are the caller's, holding the caller's objects,
+                // whose conversion is the caller's code.
+                let merge = || $crate::records::merged_json(py, $py, &self.json, Self::FIELDS, &self.held);
+                let merged = if self.held.is_anchored() {
+                    $crate::document::under_live_lock(py, merge)?
+                } else {
+                    merge()?
+                };
                 let parse: fn(&serde_json::Value) -> medh5::Result<$engine> = $parse;
                 let dump: fn(&$engine) -> serde_json::Value = $dump;
                 let inner = parse(&merged)?;

@@ -515,12 +515,26 @@ class _NestedList(list[Any]):
             self._changed()
         return copy.deepcopy(value)
 
+    def _read(self) -> tuple[list[Any], str | None]:
+        """A copy of the list, and the member's token as it was then: any edit
+        to the member, a change to one of this list's items included, spends
+        the token."""
+        with _LOCK:
+            return list(self), self._anchor.token if self._anchor else None
+
+    def _still(self, before: list[Any], token: str | None) -> bool:
+        """Whether the list and its items are as `_read` read them."""
+        return _unchanged(self, before) and (
+            self._anchor is None or self._anchor.token == token
+        )
+
     def remove(self, value: Any) -> None:
         self._check()
         # Found in a copy before the lock (`==` is the caller's), and removed
-        # only if no other edit came in meanwhile; if one did, found again.
+        # only if no other edit came in meanwhile --- to the list or to an
+        # item of it; if one did, found again.
         while True:
-            before = list(self)
+            before, token = self._read()
             found = (
                 i for i, item in enumerate(before) if item is value or item == value
             )
@@ -529,7 +543,7 @@ class _NestedList(list[Any]):
                 raise ValueError("list.remove(x): x not in list")
             with _LOCK:
                 self._check()
-                if _unchanged(self, before):
+                if self._still(before, token):
                     super().__delitem__(at)
                     self._changed()
                     return
@@ -545,12 +559,13 @@ class _NestedList(list[Any]):
         # A sort that fails partway leaves a list part-sorted, which the next
         # edit would write through: sort a copy, and keep it only if it ends.
         # The copy is sorted before the lock (`key` is the caller's), and
-        # kept only if no other edit came in meanwhile.
-        before = list(self)
+        # kept only if no other edit came in meanwhile, to the list or to an
+        # item it was sorted by.
+        before, token = self._read()
         ordered = sorted(before, key=key, reverse=reverse)
         with _LOCK:
             self._check()
-            if not _unchanged(self, before):
+            if not self._still(before, token):
                 raise RuntimeError(
                     f"`{self._anchor.member if self._anchor else 'list'}` "
                     "changed on another thread while it was sorted; sort it again"
