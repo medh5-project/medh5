@@ -1114,3 +1114,75 @@ class TestAnnotationsFollow:
         with medh5.open(path) as s:
             carried = s.annotations[f"{name}_on_half"].read()
         assert carried.tolist() == ignore[ON_HALF].tolist()
+
+    def test_S8_2_a_world_box_slice_moves_by_the_index_map(self, tmp_path):
+        """A slice is a plane of the grid, whatever space its box is in: at
+        2 mm, source slice 1 lands between target slices 0 and 1."""
+
+        def boxes(z: float):
+            def write(w):
+                w.add_grid("even", shape=(4, 4, 4), spacing=(2.0,) * 3, frame_uid="F0")
+                w.add_boxes(
+                    "dets",
+                    np.array([[[1, 5], [0, 7], [z, z]]], np.float32),
+                    [1],
+                    grid="g",
+                    space="world",
+                    slice_index=[int(z)],
+                )
+
+            return write
+
+        path = annotated(tmp_path / "s.medh5", boxes=boxes(1.0))
+        with pytest.raises(MEDH5ValidationError, match="slice 1 of axis 2"):
+            resample(path, "img", onto="even")
+        path = annotated(tmp_path / "t.medh5", boxes=boxes(2.0))
+        resample(path, "img", onto="even")
+        with medh5.open(path) as s:
+            assert list(s.annotations["dets_on_even"].slice_index) == [1]
+
+    def test_S10_a_stored_affine_composite_carries_a_box_exactly(self, tmp_path):
+        path = tmp_path / "s.medh5"
+        box = np.array([[[0, 1], [1, 2], [0, 3]]], np.float32)
+        shift = np.eye(4)
+        shift[0, 3] = 1.0
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid("src", shape=(4, 4, 4), spacing=(1.0,) * 3, frame_uid="F0")
+            w.add_image(
+                "img", np.zeros((4, 4, 4), np.float32), grid="src", modality="CT"
+            )
+            w.add_grid("tgt", shape=(4, 4, 4), spacing=(1.0,) * 3, frame_uid="F1")
+            w.add_transform(
+                "a", kind="affine", from_frame="F1", to_frame="FM", matrix=shift
+            )
+            w.add_transform("b", kind="identity", from_frame="FM", to_frame="F0")
+            w.add_transform(
+                "c",
+                kind="composite",
+                from_frame="F1",
+                to_frame="F0",
+                components=["a", "b"],
+            )
+            w.add_boxes("dets", box, [1], grid="src")
+        resample(path, "img", onto="tgt")
+        with medh5.open(path) as s:
+            # F1 -> F0 adds 1 along x, so F0 -> F1 takes it away.
+            moved = s.annotations["dets_on_tgt"].boxes
+        assert moved.tolist() == [[[-1, 0], [1, 2], [0, 3]]]
+
+    def test_S8_world_coordinates_of_another_rank_are_refused(self, tmp_path):
+        """Chosen by frame alone, 3-D points in the frame of a 2-D grid have
+        no mapping that moves them."""
+        path = tmp_path / "s.medh5"
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid("src", shape=(4, 4), spacing=(1.0, 1.0), frame_uid="F0")
+            w.add_image("img", np.zeros((4, 4), np.float32), grid="src", modality="CT")
+            w.add_grid("tgt", shape=(4, 4), spacing=(1.0, 1.0), frame_uid="F1")
+            w.add_transform(
+                "t", kind="affine", from_frame="F1", to_frame="F0", matrix=np.eye(3)
+            )
+            w.add_points(
+                "marks", np.zeros((1, 3), np.float32), space="world", frame_uid="F0"
+            )
+        with pytest.raises(MEDH5ValidationError, match="3-D and grid 'src' is 2-D"):
+            resample(path, "img", onto="tgt")

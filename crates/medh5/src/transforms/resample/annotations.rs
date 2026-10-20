@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use indexmap::IndexMap;
-use ndarray::{Array2, ArrayD, Dimension, IxDyn};
+use ndarray::{Array2, ArrayD, IxDyn};
 use serde_json::{json, Value};
 
 use super::{blocks, linear_sample, unit_scale, Body, Mapping, ResamplePlan, Transform};
@@ -268,20 +268,7 @@ fn apply(m: &Array2<f64>, points: &Array2<f64>) -> Array2<f64> {
 /// the identity.
 fn path_matrix(transform: &Transform, s: usize) -> Result<Option<Array2<f64>>> {
     match &transform.body {
-        Body::Chain(steps) => {
-            let mut total: Option<Array2<f64>> = None;
-            for step in steps {
-                let Some(m) = path_matrix(step, s)? else {
-                    return Ok(None);
-                };
-                total = Some(match total {
-                    None => m,
-                    Some(t) if t.nrows() == m.nrows() => m.dot(&t),
-                    Some(_) => return Ok(None),
-                });
-            }
-            Ok(total)
-        }
+        Body::Chain(steps) => chain_matrix(steps, s),
         Body::Inverse(inner) => match path_matrix(inner, s)? {
             Some(m) => Ok(Some(inv(&m)?)),
             None => Ok(None),
@@ -289,9 +276,26 @@ fn path_matrix(transform: &Transform, s: usize) -> Result<Option<Array2<f64>>> {
         Body::Stored => match transform.kind() {
             "affine" => Ok(Some(transform.matrix()?)),
             "identity" => Ok(Some(Array2::eye(s + 1))),
+            "composite" if transform.check_chain().is_empty() => chain_matrix(&transform.components()?, s),
             _ => Ok(None),
         },
     }
+}
+
+/// Steps applied in order, as one matrix, when each is one.
+fn chain_matrix(steps: &[Transform], s: usize) -> Result<Option<Array2<f64>>> {
+    let mut total: Option<Array2<f64>> = None;
+    for step in steps {
+        let Some(m) = path_matrix(step, s)? else {
+            return Ok(None);
+        };
+        total = Some(match total {
+            None => m,
+            Some(t) if t.nrows() == m.nrows() => m.dot(&t),
+            Some(_) => return Ok(None),
+        });
+    }
+    Ok(total)
 }
 
 /// Where each source axis goes under a linear part that keeps the axes (a
@@ -474,6 +478,16 @@ fn check(annotation: &Annotation, kind: &str, geometry: &Geometry, on_grid: bool
     let id = &annotation.ann_id;
     let world = annotation.header.space.as_deref() == Some("world");
     let fail = |why: &str| Err(refused(id, kind, &target.grid_id, why));
+    if !on_grid {
+        // Chosen by its frame alone: its coordinates must be of the grid's rank.
+        let s = geometry.source.n_spatial();
+        if let Some(rank) = coordinate_rank(annotation, kind)?.filter(|r| *r != s) {
+            return fail(&format!(
+                "its coordinates are {rank}-D and grid {} is {s}-D, so no mapping of the grid moves them",
+                repr_str(&geometry.source.grid_id)
+            ));
+        }
+    }
     match kind {
         "labelmap" | "layers" | "bitmask" | "mask" | "probmap" => Ok(()),
         "instances" if annotation.has_masks()? => Ok(()),
@@ -481,11 +495,11 @@ fn check(annotation: &Annotation, kind: &str, geometry: &Geometry, on_grid: bool
             let Some(m) = geometry.linear(world) else {
                 return fail(if geometry.can_move() { NOT_AFFINE } else { NO_PATH });
             };
-            let Some(axes) = axis_map(m) else {
+            if axis_map(m).is_none() {
                 return fail("the mapping onto it turns the box axes, and a rotated box is no axis-aligned box");
-            };
+            }
             if kind == "boxes" && on_grid {
-                check_slices(annotation, geometry, &axes, &|why| refused(id, kind, &target.grid_id, why))?;
+                check_slices(annotation, geometry, &|why| refused(id, kind, &target.grid_id, why))?;
             }
             Ok(())
         }
@@ -571,17 +585,19 @@ fn check(annotation: &Annotation, kind: &str, geometry: &Geometry, on_grid: bool
 }
 
 /// Refuse a 2-D box whose slice does not land on a slice of the target.
-fn check_slices(
-    annotation: &Annotation,
-    geometry: &Geometry,
-    axes: &[(usize, f64)],
-    refuse: &dyn Fn(&str) -> Error,
-) -> Result<()> {
+fn check_slices(annotation: &Annotation, geometry: &Geometry, refuse: &dyn Fn(&str) -> Error) -> Result<()> {
     let Some(slices) = annotation.read_optional::<i64>("slice_index")? else {
         return Ok(());
     };
     let boxes = annotation.read_as::<f64>("boxes")?;
-    let index = geometry.index.as_ref().expect("checked by the caller");
+    // A slice is a plane of the grid, whatever space the box is in: it moves
+    // by the index map.
+    let Some(index) = geometry.index.as_ref() else {
+        return Err(refuse(NOT_AFFINE));
+    };
+    let Some(axes) = axis_map(index) else {
+        return Err(refuse("the mapping onto it turns the grid's slices, and a slice would land on no slice"));
+    };
     let s = index.nrows() - 1;
     for (i, k) in slices.iter().enumerate() {
         let Some(axis) = degenerate_axis(&boxes, i) else {
@@ -600,7 +616,25 @@ fn check_slices(
     Ok(())
 }
 
-/// The axis along which box `i` has no extent (`lo == hi`), if one.
+/// The width of a geometric annotation's coordinates, when it has them.
+fn coordinate_rank(annotation: &Annotation, kind: &str) -> Result<Option<usize>> {
+    let (name, axis) = match kind {
+        "points" | "keypoints" => ("points", None),
+        "contours" | "polylines" | "mesh" => ("vertices", None),
+        "obb" => ("centers", None),
+        "boxes" | "instances" => ("boxes", Some(1)),
+        _ => return Ok(None),
+    };
+    let Some(dataset) = annotation.optional_dataset(name)? else {
+        return Ok(None);
+    };
+    let shape = dataset.shape();
+    Ok(match axis {
+        Some(k) => shape.get(k).copied(),
+        None => shape.last().copied(),
+    })
+}
+
 /// Whether the target is the source grid's voxels: the same grid, or one of
 /// its shape whose index map is the identity.
 fn same_voxels(geometry: &Geometry, target: &Grid) -> bool {
@@ -611,6 +645,7 @@ fn same_voxels(geometry: &Geometry, target: &Grid) -> bool {
             }))
 }
 
+/// The axis along which box `i` has no extent (`lo == hi`), if one.
 fn degenerate_axis(boxes: &ArrayD<f64>, i: usize) -> Option<usize> {
     let s = boxes.shape()[1];
     (0..s).find(|k| boxes[[i, *k, 0]] == boxes[[i, *k, 1]])
@@ -973,8 +1008,8 @@ fn unravel(mut flat: usize, shape: &[usize]) -> Vec<usize> {
 /// every object holding its nearest source voxel, so two objects of one
 /// class stay two, and overlapping objects keep their overlap.  Each box is
 /// recomputed from its mask.  An object left with no voxel is refused.
-/// What is held is the objects' own voxels and their new crops, never a
-/// volume.
+/// What is held is the objects' stored crops and their new ones, never a
+/// volume or an entry per voxel.
 fn instances_payload(annotation: &Annotation, near: &Nearest, source: &[usize]) -> Result<Payload> {
     let n = annotation.n_objects()?;
     let boxes = annotation.boxes()?;
@@ -982,51 +1017,63 @@ fn instances_payload(annotation: &Annotation, near: &Nearest, source: &[usize]) 
     let ids = annotation.instance_ids()?;
     let scores = annotation.scores()?;
     let s = source.len();
-    // Each object voxel's objects, as an interned set: most voxels hold one
-    // object, so the sets are few.
-    let mut label: HashMap<usize, u32> = HashMap::new();
-    let mut sets: Vec<Vec<u32>> = vec![Vec::new()];
-    let mut interned: HashMap<Vec<u32>, u32> = HashMap::new();
+    // Each object's crop and where it starts; and for each source plane
+    // along the first axis, the objects that cross it, so a voxel asks only
+    // those.
+    let mut held: Vec<Option<(Vec<i64>, ArrayD<bool>)>> = Vec::with_capacity(n);
+    let mut by_plane: Vec<Vec<u32>> = vec![Vec::new(); source.first().copied().unwrap_or(0)];
     for i in 0..n {
         let Some(crop) = annotation.crop(i)? else {
+            held.push(None);
             continue;
         };
         let flat_box: Vec<f64> = boxes.slice(ndarray::s![i, .., ..]).iter().map(|v| f64::from(*v)).collect();
         let origin: Vec<i64> = box_to_slices(&flat_box, None)?.iter().map(|(lo, _)| *lo).collect();
-        for (at, on) in crop.indexed_iter() {
-            if !*on {
-                continue;
-            }
-            let voxel: Vec<i64> = at.slice().iter().zip(&origin).map(|(j, o)| *j as i64 + o).collect();
-            if voxel.iter().zip(source).any(|(v, m)| *v < 0 || *v >= *m as i64) {
-                continue;
-            }
-            let f = flat_index(voxel.iter().map(|v| *v as usize), source);
-            let held = label.get(&f).copied().unwrap_or(0);
-            let mut set = sets[held as usize].clone();
-            set.push(i as u32);
-            let next = sets.len() as u32;
-            let id = *interned.entry(set.clone()).or_insert_with(|| {
-                sets.push(set);
-                next
-            });
-            label.insert(f, id);
+        let first = origin[0].max(0) as usize;
+        let last = (origin[0] + crop.shape()[0] as i64).clamp(0, by_plane.len() as i64) as usize;
+        for plane in by_plane.iter_mut().take(last).skip(first) {
+            plane.push(i as u32);
         }
+        held.push(Some((origin, crop)));
     }
+    let holds = |object: usize, voxel: &[usize]| -> bool {
+        let Some((origin, crop)) = &held[object] else {
+            return false;
+        };
+        let mut local = Vec::with_capacity(s);
+        for ((v, o), m) in voxel.iter().zip(origin).zip(crop.shape()) {
+            let j = *v as i64 - o;
+            if j < 0 || j >= *m as i64 {
+                return false;
+            }
+            local.push(j as usize);
+        }
+        crop[IxDyn(&local)]
+    };
+    // Every (target voxel, object) the target holds, a block at a time.
+    let each_held = |visit: &mut dyn FnMut(&[usize], usize)| -> Result<()> {
+        near.each(|t, at| {
+            let Some(f) = at else {
+                return;
+            };
+            let voxel = unravel(f, source);
+            let mut c: Option<Vec<usize>> = None;
+            for object in &by_plane[voxel[0]] {
+                let o = *object as usize;
+                if holds(o, &voxel) {
+                    let c = c.get_or_insert_with(|| unravel(t, &near.shape));
+                    visit(c, o);
+                }
+            }
+        })
+    };
     // First the extent of each object on the target, then its crop.
     let mut lo = vec![vec![usize::MAX; s]; n];
     let mut hi = vec![vec![0usize; s]; n];
-    near.each(|t, at| {
-        let Some(set) = at.and_then(|f| label.get(&f)) else {
-            return;
-        };
-        let c = unravel(t, &near.shape);
-        for object in &sets[*set as usize] {
-            let o = *object as usize;
-            for k in 0..s {
-                lo[o][k] = lo[o][k].min(c[k]);
-                hi[o][k] = hi[o][k].max(c[k] + 1);
-            }
+    each_held(&mut |c, o| {
+        for k in 0..s {
+            lo[o][k] = lo[o][k].min(c[k]);
+            hi[o][k] = hi[o][k].max(c[k] + 1);
         }
     })?;
     for i in 0..n {
@@ -1046,16 +1093,9 @@ fn instances_payload(annotation: &Annotation, near: &Nearest, source: &[usize]) 
             ArrayD::from_elem(IxDyn(&extent), false)
         })
         .collect();
-    near.each(|t, at| {
-        let Some(set) = at.and_then(|f| label.get(&f)) else {
-            return;
-        };
-        let c = unravel(t, &near.shape);
-        for object in &sets[*set as usize] {
-            let o = *object as usize;
-            let local: Vec<usize> = c.iter().zip(&lo[o]).map(|(v, start)| v - start).collect();
-            crops[o][IxDyn(&local)] = true;
-        }
+    each_held(&mut |c, o| {
+        let local: Vec<usize> = c.iter().zip(&lo[o]).map(|(v, start)| v - start).collect();
+        crops[o][IxDyn(&local)] = true;
     })?;
     let mut objects = Vec::with_capacity(n);
     for (i, crop) in crops.into_iter().enumerate() {
