@@ -1864,10 +1864,12 @@ class TestTransforms:
 class TestResample:
     """`resample`: images onto another grid, recorded (§10.2, §11.1)."""
 
-    def test_the_command_and_the_function_write_the_same_file(self, capsys, tmp_path):
+    def test_the_command_and_the_function_write_the_same_file(
+        self, capsys, tmp_path, label_set, masks
+    ):
         from medh5.transforms import resample
 
-        by_command = write_sample(tmp_path / "a.medh5")
+        by_command = write_sample(tmp_path / "a.medh5", label_set=label_set, masks=masks)
         by_function = tmp_path / "b.medh5"
         by_function.write_bytes(by_command.read_bytes())
         argv = ["--image", "CT_tp0", "--spacing", "3,1.6,1.6", "--grid-id", "half"]
@@ -1881,6 +1883,28 @@ class TestResample:
             assert a.content_id == b.content_id
             (activity,) = a.document.provenance.activities_by_type("resample")
             assert activity.tool == "medh5 resample"
+            # The segmentation came along (W22-10 10.3), in both.
+            assert "organs_tp0_on_half" in a.annotations
+        assert "organs_tp0 -> organs_tp0_on_half (layers)" in out.out
+
+    def test_no_annotations_moves_the_images_alone(
+        self, capsys, tmp_path, label_set, masks
+    ):
+        path = write_sample(tmp_path / "s.medh5", label_set=label_set, masks=masks)
+        argv = ["--image", "CT_tp0", "--spacing", "3,1.6,1.6", "--grid-id", "half"]
+        code, out = run(capsys, "resample", str(path), *argv, "--no-annotations")
+        assert code == EXIT_OK, out.err
+        assert "not carried: organs_tp0" in out.out
+        code, out = run(
+            capsys, "resample", str(path), *argv[:2], "--onto", "half", "--suffix",
+            "_again", "--no-annotations", "--json",
+        )
+        assert code == EXIT_OK, out.err
+        report = json.loads(out.out)
+        assert report["annotations"] == []
+        assert report["not_carried"] == ["organs_tp0"]
+        with medh5.open(path) as s:
+            assert not [a for a in s.annotations if a.endswith(("_on_half", "_again"))]
 
     def test_json_is_the_report(self, capsys, tmp_path):
         path = write_sample(tmp_path / "s.medh5")

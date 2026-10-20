@@ -288,6 +288,7 @@ class TestAgreement:
         ):
             compare_voxel(sample.annotations["les_tp0"], sample.annotations["les_tp1"])
         assert exc.value.code == "E101"
+        assert "medh5 resample" in str(exc.value)
 
     def test_instances_on_two_visits_grids_are_refused(self, series):
         # Index boxes on two grids count different voxels; comparing them
@@ -300,6 +301,7 @@ class TestAgreement:
                 sample.annotations["les_tp0"], sample.annotations["les_tp1"]
             )
         assert exc.value.code == "E101"
+        assert "medh5 resample" in str(exc.value)
 
     def test_instances_match_on_declared_ids_first(self, tmp_path, label_set):
         path = write_raters(tmp_path / "raters.medh5", label_set)

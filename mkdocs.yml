@@ -137,6 +137,7 @@ nav:
       - Partial labels and coverage: guides/partial-labels.md
       - Longitudinal studies: guides/longitudinal.md
       - Registration between visits: guides/registration.md
+      - Resample onto another grid: guides/resample.md
       - Clinical history beside the images: guides/clinical.md
       - Train on clinical tasks: guides/clinical-training.md
       - Import from MEDS or FHIR: guides/clinical-import.md

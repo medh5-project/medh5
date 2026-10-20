@@ -202,8 +202,9 @@ def _stacked(
             raise MEDH5ValidationError(
                 f"{_where(references[0])} and {_where(reference)} are not on one "
                 "grid (shape, affine and space), so they cannot be stacked as "
-                "channels: load them as separate keys, and resample one onto the "
-                "other first if a model needs both"
+                "channels: load them as separate keys, or resample one onto the "
+                "other's grid first (`medh5 resample PATH --image ID --onto "
+                "GRID`) if a model needs both stacked"
             )
     arrays = [array for array, _ in read]
     out = dict(meta)
