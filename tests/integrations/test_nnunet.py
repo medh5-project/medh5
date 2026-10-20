@@ -526,8 +526,9 @@ class TestNnunetScaling:
             mask = np.zeros((4, 6, 6), bool)
             mask[1:3, 2:4, 2:4] = True
             w.add_segmentation("seg", grid="pet", masks={1: mask})
-        with pytest.raises(MEDH5ValidationError, match="channels' grid"):
+        with pytest.raises(MEDH5ValidationError, match="channels' grid") as caught:
             to_nnunetv2([path], tmp_path / "nn", dataset_name="D1")
+        assert "medh5 resample" in str(caught.value)
 
 
 class TestNnunetIgnore:
@@ -817,8 +818,9 @@ class TestNnunetDatasetLabels:
         path = self._case(
             tmp_path / "A.medh5", {1: organ}, searched=[1], label_grid=label_grid
         )
-        with pytest.raises(MEDH5ValidationError, match="channels' grid"):
+        with pytest.raises(MEDH5ValidationError, match="channels' grid") as caught:
             to_nnunetv2([path], tmp_path / "nn", dataset_name="D1")
+        assert "medh5 resample" in str(caught.value)
         assert not (tmp_path / "nn").exists()
 
     def test_S3_2_labels_on_another_lattice_of_the_space_are_refused(self, tmp_path):

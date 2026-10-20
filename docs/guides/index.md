@@ -30,6 +30,7 @@ minutes.
 |---|---|
 | **[Longitudinal studies](longitudinal.md)** | Timepoints, tracking one lesion across visits, paired sampling. |
 | **[Registration between visits](registration.md)** | Transforms, the frame graph, and what `None` means. |
+| **[Resample onto another grid](resample.md)** | Images and their annotations onto a grid or a spacing, recorded; and why the loaders never do it for you. |
 
 ## Clinical history (format 1.1)
 

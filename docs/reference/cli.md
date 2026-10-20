@@ -682,8 +682,8 @@ See [Migrate from 0.x](../guides/migrate-0x.md) for the two-pass procedure.
 ### `medh5 resample`
 
 ```
-medh5 resample PATH --image ID [--image ID ...] --onto GRID [--suffix S] [--interpolation linear|nearest|cubic] [--fill V] [--dtype T] [--out FILE] [--json]
-medh5 resample PATH --image ID --spacing S1,S2[,S3] --grid-id NEW [--suffix S] [--interpolation linear|nearest|cubic] [--fill V] [--dtype T] [--out FILE] [--json]
+medh5 resample PATH --image ID [--image ID ...] --onto GRID [--suffix S] [--interpolation linear|nearest|cubic] [--fill V] [--dtype T] [--no-annotations] [--out FILE] [--json]
+medh5 resample PATH --image ID --spacing S1,S2[,S3] --grid-id NEW [--suffix S] [--interpolation linear|nearest|cubic] [--fill V] [--dtype T] [--no-annotations] [--out FILE] [--json]
 ```
 
 Resample images onto another grid and record the derivation. `--onto` names a
@@ -713,6 +713,17 @@ interpolation, and every object written names it in `prov`. Without `--out`
 the file is amended in place; with it, the result is a new file, and an
 existing one is refused. The command and `medh5.transforms.resample` write the
 same bytes.
+
+The annotations on the source grids come along under the same suffix, each
+naming its source in `derived_from`, with its classes and coverage kept: voxel
+encodings nearest in their own encoding, instances object by object, a
+probability map linearly, points and keypoints exactly, meshes along an affine
+path only. A box goes only
+where the mapping keeps the axes, and a contour only where its plane lands on a
+grid plane; anything else is refused rather than approximated, and
+`--no-annotations` moves the images alone, listing what stayed behind as not
+carried. Target voxels outside the source become an ignore region (§7.7) of
+every class-bearing annotation carried.
 
 ## Storage
 

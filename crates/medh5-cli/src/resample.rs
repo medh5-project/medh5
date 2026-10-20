@@ -34,6 +34,9 @@ pub fn run(m: &ArgMatches, ctx: &mut Ctx) -> CmdResult {
     if let Some(out) = get_str(m, "out") {
         plan = plan.with_out(out);
     }
+    if flag(m, "no_annotations") {
+        plan = plan.with_annotations(false);
+    }
     let result = resample(Path::new(path), &plan).map_err(|e| sample_file_error(path, e))?;
     if flag(m, "json") {
         ctx.emit(&result.to_json(), true);

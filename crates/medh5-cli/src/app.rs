@@ -1005,6 +1005,11 @@ fn resample() -> Command {
             )
             .value_name("T"),
         )
+        .arg(flag(
+            "no_annotations",
+            "no-annotations",
+            "resample the images alone, leaving the annotations on their grids (listed as not carried)",
+        ))
         .arg(opt("out", "out", "write a new file here, and leave the source as it is").short('o').value_name("OUT"))
         .arg(json())
 }

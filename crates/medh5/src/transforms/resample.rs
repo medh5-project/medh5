@@ -40,6 +40,9 @@ use crate::sample::reader::{annotation_id, open_sample, KeyKind, Sample};
 use crate::sample::writer::{amend_into, GridOptions, ImageOptions, SampleWriter};
 use crate::{Error, Result, VERSION};
 
+mod annotations;
+pub use annotations::ResampledAnnotation;
+
 /// The interpolations a resample takes: `linear` (the default), `nearest`
 /// and `cubic`, the engine's SciPy-exact cubic B-spline.
 pub const RESAMPLE_INTERPOLATIONS: &[&str] = &["linear", "nearest", "cubic"];
@@ -76,6 +79,9 @@ pub struct ResamplePlan {
     pub dtype: Option<DType>,
     /// A new file to write; `None` amends the source in place.
     pub out: Option<PathBuf>,
+    /// Carry the annotations on the source grids onto the target (the
+    /// default); `false` moves the images alone.
+    pub annotations: bool,
 }
 
 impl ResamplePlan {
@@ -88,6 +94,7 @@ impl ResamplePlan {
             fill: 0.0,
             dtype: None,
             out: None,
+            annotations: true,
         }
     }
 
@@ -162,6 +169,11 @@ impl ResamplePlan {
         self
     }
 
+    pub fn with_annotations(mut self, annotations: bool) -> ResamplePlan {
+        self.annotations = annotations;
+        self
+    }
+
     /// The target grid's id: the existing grid's, or the new one's.
     pub fn target_grid_id(&self) -> &str {
         match &self.target {
@@ -211,6 +223,11 @@ pub struct Resampled {
     /// `T⁻¹`).  A source grid comparable with the target (§3.3 rule 4) is
     /// mapped by the affines alone and is not listed.
     pub transforms: IndexMap<String, Vec<String>>,
+    /// The annotations carried onto the target, in the sample's order.
+    pub annotations: Vec<ResampledAnnotation>,
+    /// The annotations on the source grids left where they are: every one
+    /// when the plan carries none.
+    pub not_carried: Vec<String>,
     /// Every object written, as a path in the sample (`images/CT_on_ref`).
     pub written: Vec<String>,
     /// The sum of every image's `filled_voxels`.
@@ -242,6 +259,8 @@ impl Resampled {
             "new_grid": self.new_grid,
             "images": images,
             "transforms": self.transforms,
+            "annotations": self.annotations.iter().map(ResampledAnnotation::to_json).collect::<Vec<_>>(),
+            "not_carried": self.not_carried,
             "written": self.written,
             "filled_voxels": self.filled_voxels,
             "content_id": self.content_id,
@@ -264,6 +283,19 @@ impl Resampled {
                 line.push_str(&format!(", {} voxel(s) filled, valid_mask {mask}", image.filled_voxels));
             }
             out.push(line);
+        }
+        for annotation in &self.annotations {
+            let mut line = format!("  {} -> {} ({})", annotation.source, annotation.annotation_id, annotation.kind);
+            if let Some(mask) = &annotation.ignore_mask {
+                line.push_str(&format!(", ignore_mask {mask}"));
+            }
+            out.push(line);
+            if let Some(note) = &annotation.note {
+                out.push(format!("    {note}"));
+            }
+        }
+        if !self.not_carried.is_empty() {
+            out.push(format!("  not carried: {}", self.not_carried.join(", ")));
         }
         for (grid, path) in &self.transforms {
             out.push(format!("  grid {} through {}", repr_str(grid), path.join(" -> ")));
@@ -340,6 +372,8 @@ struct Prepared {
     jobs: Vec<Job>,
     /// Source grid id to its mapping onto the target.
     mappings: IndexMap<String, Mapping>,
+    /// The annotations to carry.
+    carry: annotations::Carry,
 }
 
 fn prepare(sample: &Sample, plan: &ResamplePlan) -> Result<Prepared> {
@@ -450,7 +484,16 @@ fn prepare(sample: &Sample, plan: &ResamplePlan) -> Result<Prepared> {
         };
         mappings.insert(job.source_grid.grid_id.clone(), mapping);
     }
-    Ok(Prepared { target, new_grid, jobs, mappings })
+    let sources: IndexMap<String, Grid> =
+        jobs.iter().map(|job| (job.source_grid.grid_id.clone(), job.source_grid.clone())).collect();
+    let excluded: HashSet<String> = jobs.iter().filter_map(|job| job.source_mask.clone()).collect();
+    // Images and annotations are separate groups, so an annotation may share
+    // an image's id; what it may not share is another annotation's, the
+    // outputs' valid masks among them.
+    let mut annotation_ids: HashSet<String> = jobs.iter().filter_map(|job| job.mask.clone()).collect();
+    let carry =
+        annotations::prepare(sample, plan, &target, &mappings, &sources, &excluded, &suffix, &mut annotation_ids)?;
+    Ok(Prepared { target, new_grid, jobs, mappings, carry })
 }
 
 /// The grid at `spacing` over `source`'s extent: its voxel edges kept, not
@@ -772,6 +815,11 @@ fn write(sample: &Sample, writer: &mut SampleWriter, plan: &ResamplePlan, prepar
             }
         }
     }
+    for path in prepared.carry.inputs() {
+        if !inputs.contains(&path) {
+            inputs.push(path);
+        }
+    }
     if !prepared.new_grid {
         inputs.push(format!("grids/{}", target.grid_id));
     }
@@ -800,6 +848,7 @@ fn write(sample: &Sample, writer: &mut SampleWriter, plan: &ResamplePlan, prepar
     params.insert("interpolation".into(), json!(plan.interpolation));
     params.insert("fill".into(), fill_json(plan.fill));
     params.insert("dtype".into(), json!(plan.dtype.map(DType::name)));
+    params.insert("annotations".into(), json!(plan.annotations));
     if prepared.new_grid {
         let options = GridOptions {
             origin: Some(target.origin.clone()),
@@ -843,6 +892,8 @@ fn write(sample: &Sample, writer: &mut SampleWriter, plan: &ResamplePlan, prepar
             filled_voxels: filled,
         });
     }
+    let carried =
+        annotations::write(sample, writer, &prepared.carry, &prepared.mappings, target, &activity.id, &mut written)?;
     let mut fields = Map::new();
     fields.insert("tool".into(), json!("medh5 resample"));
     fields.insert("inputs".into(), json!(inputs));
@@ -865,6 +916,8 @@ fn write(sample: &Sample, writer: &mut SampleWriter, plan: &ResamplePlan, prepar
         new_grid: prepared.new_grid,
         images,
         transforms,
+        annotations: carried,
+        not_carried: prepared.carry.not_carried.clone(),
         written,
         filled_voxels,
         content_id: None,

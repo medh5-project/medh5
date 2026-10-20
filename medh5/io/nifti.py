@@ -360,6 +360,14 @@ def _seconds(geometry: Mapping[str, Any]) -> npt.NDArray[np.float64] | None:
     return np.asarray(values, dtype=np.float64) * SECONDS_PER_UNIT.get(unit, 1.0)
 
 
+_ONE_GRID = (
+    "one import puts every volume on one grid and a converter does not resample "
+    "silently, so resample before converting, or write each volume on a grid of "
+    "its own and move one onto the other with `medh5 resample`, which records it"
+)
+"""What a refusal of two grids in one import says to do instead."""
+
+
 def _same_grid(
     first: dict[str, Any], other: dict[str, Any], name: str, log: ConversionReport
 ) -> dict[str, Any]:
@@ -381,13 +389,12 @@ def _same_grid(
     if tuple(first["shape"]) != tuple(other["shape"]):
         raise MEDH5ValidationError(
             f"{name!r} has shape {other['shape']}, but the first volume has "
-            f"{first['shape']}; resample before converting"
+            f"{first['shape']}; {_ONE_GRID}"
         )
     key = _geometry_mismatch(first, other)
     if key is not None:
         raise MEDH5ValidationError(
-            f"{name!r} disagrees with the first volume on {key}; resample "
-            "before converting rather than letting a converter do it silently"
+            f"{name!r} disagrees with the first volume on {key}; {_ONE_GRID}"
         )
     ours, theirs = _seconds(first), _seconds(other)
     if ours is None or theirs is None or np.allclose(ours, theirs, atol=1e-6):
