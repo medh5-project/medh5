@@ -506,7 +506,7 @@ fn frames_of_timepoint<'py>(py: Python<'py>, grids: &Bound<'py, PyAny>, timepoin
 #[pyfunction]
 #[pyo3(signature = (
     path, image_ids, *, onto=None, spacing=None, grid_id=None, suffix=None, interpolation="linear", fill=0.0,
-    dtype=None, out=None
+    dtype=None, out=None, annotations=true
 ))]
 #[allow(clippy::too_many_arguments)]
 fn resample<'py>(
@@ -521,10 +521,12 @@ fn resample<'py>(
     fill: f64,
     dtype: Option<&Bound<'py, PyAny>>,
     out: Option<std::path::PathBuf>,
+    annotations: bool,
 ) -> R<Bound<'py, PyAny>> {
     let mut plan = rs::ResamplePlan::from_options(image_ids, onto, spacing, grid_id)?
         .with_interpolation(interpolation)
-        .with_fill(fill);
+        .with_fill(fill)
+        .with_annotations(annotations);
     if let Some(suffix) = suffix {
         plan = plan.with_suffix(suffix);
     }
