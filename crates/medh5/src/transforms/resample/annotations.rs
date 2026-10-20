@@ -436,6 +436,7 @@ pub(super) fn prepare(
         Ok(())
     };
     let mut items = Vec::new();
+    let mut reaches_outside: HashMap<String, bool> = HashMap::new();
     for (annotation, grid, on_grid) in &candidates {
         let id = &annotation.ann_id;
         let kind = annotation.kind().to_string();
@@ -451,9 +452,24 @@ pub(super) fn prepare(
             match &annotation.header.ignore_mask {
                 Some(mask) => Ignore::Carried(format!("{mask}{suffix}")),
                 None => {
-                    let new = format!("{output}_ignore");
-                    claim(&new, taken)?;
-                    Ignore::New(new)
+                    // A new mask is written, and its id taken, only where a
+                    // target voxel lies outside the source.
+                    let source = sources[grid].spatial_shape();
+                    let outside = match reaches_outside.get(grid) {
+                        Some(known) => *known,
+                        None => {
+                            let found = any_outside(&mappings[grid], &source, &target.spatial_shape())?;
+                            reaches_outside.insert(grid.clone(), found);
+                            found
+                        }
+                    };
+                    if outside {
+                        let new = format!("{output}_ignore");
+                        claim(&new, taken)?;
+                        Ignore::New(new)
+                    } else {
+                        Ignore::None
+                    }
                 }
             }
         } else {
@@ -748,6 +764,17 @@ fn flat_index(at: impl Iterator<Item = usize>, shape: &[usize]) -> usize {
 
 fn inside(point: ndarray::ArrayView1<f64>, shape: &[usize]) -> bool {
     point.iter().zip(shape).all(|(v, m)| *v >= -0.5 && *v <= *m as f64 - 0.5)
+}
+
+/// Whether any target voxel lies outside the source, stopping at the first.
+fn any_outside(mapping: &Mapping, source: &[usize], target: &[usize]) -> Result<bool> {
+    for block in blocks(target, &block_shape(target)) {
+        let (indices, _) = block_indices(&block);
+        if mapping.map(&indices)?.outer_iter().any(|point| !inside(point, source)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Write every carried annotation; what was written is added to `written`.

@@ -1186,3 +1186,21 @@ class TestAnnotationsFollow:
             )
         with pytest.raises(MEDH5ValidationError, match="3-D and grid 'src' is 2-D"):
             resample(path, "img", onto="tgt")
+
+    def test_S7_7_a_new_ignore_mask_takes_its_id_only_when_written(self, tmp_path):
+        """Onto a grid inside the source no ignore mask is written, so an
+        annotation already holding its would-be id is no collision; onto
+        one reaching past the source it is."""
+        one, _ = two_classes()
+
+        def write(w):
+            w.add_segmentation("seg", grid="g", masks={1: one})
+            for name in ("seg_on_half_ignore", "seg_on_wide_ignore"):
+                w.add_mask(name, np.zeros((8, 8, 8), bool), grid="g")
+
+        path = annotated(tmp_path / "s.medh5", seg=write)
+        report = resample(path, "img", onto="half")
+        by_source = {a.source: a for a in report.annotations}
+        assert by_source["seg"].ignore_mask is None
+        with pytest.raises(MEDH5ValidationError, match="seg_on_wide_ignore"):
+            resample(path, "img", onto="wide")
