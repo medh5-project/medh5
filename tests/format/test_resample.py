@@ -1202,6 +1202,55 @@ class TestAnnotationsFollow:
             carried = s.annotations[f"{name}_on_half"].read()
         assert carried.tolist() == ignore[ON_HALF].tolist()
 
+    @staticmethod
+    def _boxes_only(path, ignore):
+        """Instances whose objects are boxes alone: their masks dropped."""
+        from medh5.annotations.voxel import InstanceInput
+
+        lesion = np.zeros((8, 8, 8), bool)
+        lesion[2:5, 2:5, 2:5] = True
+        annotated(
+            path,
+            seg=lambda w: w.add_segmentation(
+                "les",
+                grid="g",
+                instances=[InstanceInput(class_id=1, instance_id=5, mask=lesion)],
+                ignore=ignore,
+            ),
+        )
+        with h5py.File(path, "r+") as f:
+            for name in ("mask_offsets", "mask_shapes", "mask_data"):
+                del f["annotations/les"][name]
+        fix(path, rewrite_digests=True, reason="keep the boxes alone")
+        with medh5.open(path) as s:
+            assert not s.annotations["les"].has_masks
+            return s.annotations["les"].header.ignore_mask
+
+    def test_S7_7_instances_carried_as_boxes_keep_their_ignore_region(self, tmp_path):
+        """Coverage is the annotation's whether or not its objects carry
+        masks: the copy still names what was not examined."""
+        ignore = np.zeros((8, 8, 8), bool)
+        ignore[0] = True
+        path = tmp_path / "s.medh5"
+        name = self._boxes_only(path, ignore)
+        resample(path, "img", onto="wide")
+        with medh5.open(path) as s:
+            assert s.annotations["les_on_wide"].header.ignore_mask == f"{name}_on_wide"
+            widened = s.annotations[f"{name}_on_wide"].read()
+        expected = np.zeros((8, 8, 10), bool)
+        expected[0] = True
+        expected[..., 8:] = True
+        assert widened.tolist() == expected.tolist()
+        path = tmp_path / "t.medh5"
+        assert self._boxes_only(path, None) is None
+        resample(path, "img", onto="wide")
+        with medh5.open(path) as s:
+            assert (
+                s.annotations["les_on_wide"].header.ignore_mask == "les_on_wide_ignore"
+            )
+            outside = s.annotations["les_on_wide_ignore"].read()
+        assert outside.sum() == 8 * 8 * 2 and outside[..., 8:].all()
+
     def test_S8_2_a_world_box_slice_moves_by_the_index_map(self, tmp_path):
         """A slice is a plane of the grid, whatever space its box is in: at
         2 mm, source slice 1 lands between target slices 0 and 1."""

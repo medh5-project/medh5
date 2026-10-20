@@ -469,7 +469,9 @@ pub(super) fn prepare(
         }
         check(annotation, &kind, &geometry[grid], *on_grid, target)?;
         let voxel = *on_grid && is_voxel(&kind) && (kind != "instances" || annotation.has_masks()?);
-        let ignore = if voxel && CLASS_VOXEL_KINDS.contains(&kind.as_str()) {
+        // Coverage is the annotation's, voxel masks or not: an `instances`
+        // carried as its boxes still names what was not examined.
+        let ignore = if *on_grid && CLASS_VOXEL_KINDS.contains(&kind.as_str()) {
             match &annotation.header.ignore_mask {
                 Some(mask) => Ignore::Carried(format!("{mask}{suffix}")),
                 None => {
@@ -839,7 +841,8 @@ pub(super) fn write(
     let target_spatial = target.spatial_shape();
     let mut nearest_by_grid: HashMap<String, Nearest> = HashMap::new();
     for item in &carry.items {
-        if item.voxel && !nearest_by_grid.contains_key(&item.grid) {
+        let needs_nearest = item.voxel || matches!(item.ignore, Ignore::New(_));
+        if needs_nearest && !nearest_by_grid.contains_key(&item.grid) {
             let source = carry.geometry[&item.grid].source.spatial_shape();
             nearest_by_grid.insert(item.grid.clone(), Nearest::new(&mappings[&item.grid], &source, &target_spatial)?);
         }
@@ -884,21 +887,18 @@ pub(super) fn write(
         } else {
             geometric_payload(annotation, &item.kind, geometry, item.on_grid)?
         };
-        if item.voxel && CLASS_VOXEL_KINDS.contains(&item.kind.as_str()) {
-            let near = &nearest_by_grid[&item.grid];
-            header.ignore_mask = match &item.ignore {
-                Ignore::Carried(mask) => Some(mask.clone()),
-                Ignore::New(mask) => match &near.outside {
-                    Some(outside) => {
-                        writer.add_mask(mask, outside.clone(), &target.grid_id, "other", Some(activity), None)?;
-                        written.push(format!("annotations/{mask}"));
-                        Some(mask.clone())
-                    }
-                    None => None,
-                },
-                Ignore::None => None,
-            };
-        }
+        header.ignore_mask = match &item.ignore {
+            Ignore::Carried(mask) => Some(mask.clone()),
+            Ignore::New(mask) => match &nearest_by_grid[&item.grid].outside {
+                Some(outside) => {
+                    writer.add_mask(mask, outside.clone(), &target.grid_id, "other", Some(activity), None)?;
+                    written.push(format!("annotations/{mask}"));
+                    Some(mask.clone())
+                }
+                None => None,
+            },
+            Ignore::None => None,
+        };
         write_carried(writer, annotation, &item.output, &header, &payload, target, item.on_grid, &overrides)?;
         written.push(format!("annotations/{}", item.output));
         results.push((
