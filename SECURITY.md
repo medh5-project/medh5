@@ -12,6 +12,14 @@ medh5 reads files that other people wrote, so a file that makes it crash, hang,
 exhaust memory or run code is a vulnerability, as is anything that leaks what
 `medh5 scrub` was asked to remove.
 
+## Supported versions
+
+Only the newest 2.2.x release receives fixes, security fixes among them. The
+2.0.x and 2.1.x lines are closed (2026-10-21): nothing is backported to them,
+and a finding against them is fixed by upgrading to the newest 2.2.x. The 2.2.x
+patches are tagged from `main` while no minor release is planned, or from
+`release/2.2` once a minor's work needs `main`.
+
 ## What is checked, and when
 
 `.github/workflows/advisories.yml` runs every week, on a pull request that
@@ -37,10 +45,10 @@ finding against a crate or against what `pip install medh5` installs that has
 neither a fix nor a disposition here.
 
 An extra installs projects medh5 neither ships nor pins (PyTorch, MONAI,
-pydicom, highdicom, PyArrow, h5py), and an advisory against one may have no fix
-for weeks. Such a finding is reported, in the weekly run and in the release
-run's summary, and dispositioned here, but it does not hold a medh5 release:
-the release would not change what that extra installs.
+pydicom, highdicom, PyArrow, h5py, hdf5plugin), and an advisory against one may
+have no fix for weeks. Such a finding is reported, in the weekly run and in the
+release run's summary, and dispositioned here, but it does not hold a medh5
+release: the release would not change what that extra installs.
 
 ## Opening a file you did not write
 

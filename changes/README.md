@@ -51,4 +51,8 @@ the release pull request and consumed by `build`.
 
 `python .github/scripts/changelog.py check` checks every fragment, and that
 `CHANGELOG.md` has nothing under [Unreleased]; CI's `lint` job runs it, and
-fails a pull request that adds no fragment.
+fails a pull request that adds no fragment. It also lists every line that
+promises something about a later release ("will", "next", "a later minor",
+"removed in", "until 3.0", "planned for", "deprecated", "the last line to
+support"): an entry says what its own release
+does, and a promise is the maintainer's to confirm before the release.

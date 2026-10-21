@@ -252,6 +252,17 @@ change as a fact, then one to three sentences, and goes in one section
 
 `python .github/scripts/changelog.py preview` prints what the next release's
 section will hold, and the documentation site shows it under [Unreleased].
+An entry states what its own release does. `changelog.py check` lists every
+line of a fragment that promises something about a later one ("will", "next",
+"a later minor", "removed in", "until 3.0", "planned for", "deprecated", "the
+last line to support"), and the release waits until the maintainer has
+confirmed each.
+
+Only the newest line receives fixes (`SECURITY.md`, "Supported versions").
+While no minor release is planned, `main` is that line and each patch is
+tagged from it: a patch adds no public API and no command-line flag, and the
+repository variable `API_RELEASE_TYPE=patch` has the API gates fail an
+addition as well as a break.
 
 The version lives in `[workspace.package] version` in `Cargo.toml`: every
 crate inherits it, maturin stamps it on the wheel, and the engine writes it into

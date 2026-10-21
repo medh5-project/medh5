@@ -903,13 +903,16 @@ class TestRepositoryGates:
         audit saw `main`'s lock and never the patch line's.  Each job audits
         both on the schedule, and a line not cut yet ends its job successfully
         at a step: a job-level `if:` would skip the job, and GitHub counts a
-        skipped check as passing."""
+        skipped check as passing.  The patch line is this release's: once
+        2.0.x and 2.1.x were closed, auditing `release/2.0` audited a line
+        that receives no fix, and missed `release/2.2`."""
         text = ADVISORIES.read_text(encoding="utf-8")
         jobs = _jobs(text)
         assert sorted(jobs) == ["pypi", "pypi-extras", "rustsec"]
+        line = "release/" + ".".join(_declared().split(".")[:2])
         for name, job in jobs.items():
             assert not re.search(r"^    if:", job, re.M), name
-            assert 'fromJSON(\'["main", "release/2.0"]\')' in job, name
+            assert f'fromJSON(\'["main", "{line}"]\')' in job, name
             assert "ref: ${{ matrix.ref }}" in job, name
             assert 'gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$REF"' in job, name
             # Only a missing line skips; a failed lookup fails the job.
@@ -974,6 +977,101 @@ class TestRepositoryGates:
         assert "needs: [ci, advisories]" in build.split("\n  publish:")[0]
         # The two builds upload in one run when CI is called; names must differ.
         assert "name: ci-dist" in ci and "name: dist" in release
+
+
+class TestDocumentationHeldToCode:
+    """Facts the documentation states about the code, held to the code.  Each
+    was wrong until 2.2.0's release day, and no test caught it."""
+
+    @staticmethod
+    def _requirements(requirements: list[str] | str) -> set[str]:
+        """The projects requirements name, normalised as PyPI does."""
+        if isinstance(requirements, str):
+            requirements = re.findall(r'^\s*"([^"]+)",?$', requirements, re.M)
+        names = (re.match(r"[A-Za-z0-9._-]+", r)[0] for r in requirements)  # type: ignore[index]
+        return {re.sub(r"[-_.]+", "-", name).lower() for name in names}
+
+    def test_the_model_names_the_newest_format_and_this_release(self):
+        """CLAUDE.md's model opened "Format 1.1, package 2.0" through all of
+        2.2.0's development, and named two normative specifications of three.
+        Its format is the engine's newest (`version::LATEST_VERSION`, which
+        `__format_version__` is) and its package the workspace's major and
+        minor; every `docs/spec/medh5-1.*.md` is named as normative."""
+        if (ROOT / "PKG-INFO").is_file():
+            return  # the sdist carries no CLAUDE.md
+        text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        found = re.search(
+            r"^\*\*Format (\d+\.\d+), package (\d+\.\d+)\.\*\*", text, re.M
+        )
+        assert found, "CLAUDE.md's model no longer opens with its versions"
+        version = (ROOT / "crates/medh5/src/version.rs").read_text(encoding="utf-8")
+        latest = re.search(
+            r'^pub const LATEST_VERSION: &str = "([^"]+)";', version, re.M
+        )
+        assert latest and latest[1] == medh5.__format_version__
+        assert found[1] == latest[1]
+        assert found[2] == ".".join(_declared().split(".")[:2])
+        model = text.split("## The model\n", 1)[1].split("\n## ", 1)[0]
+        normative = model.split("are **normative**", 1)[0].rsplit("\n\n", 1)[1]
+        specs = sorted((ROOT / "docs/spec").glob("medh5-1.*.md"))
+        assert specs
+        for spec in specs:
+            assert f"`docs/spec/{spec.name}`" in normative, spec.name
+
+    def test_security_names_what_the_package_and_its_extras_install(self):
+        """SECURITY.md listed nibabel among what an extra installs after no
+        extra installed it, and left out PyArrow, which one did.  What it says
+        `pip install medh5` installs is the package's dependencies, and what
+        it says the extras install is every extra's but `dev`'s."""
+        security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+        flat = " ".join(security.split())
+        package = re.search(r"that `pip install medh5` installs \(([^)]+)\)", flat)
+        extras = re.search(r"An extra installs projects [^(]+\(([^)]+)\)", flat)
+        assert package and extras
+
+        def named(listed: str) -> set[str]:
+            # The projects by the names their own pages give; PyPI's is torch.
+            spelled = {"pytorch": "torch"}
+            names = (n.strip().lower() for n in listed.split(","))
+            return {spelled.get(n, n) for n in names}
+
+        text = PYPROJECT.read_text(encoding="utf-8")
+        section = text.split("\ndependencies = [\n", 1)[1].split("\n]", 1)[0]
+        required = self._requirements(section)
+        assert named(package[1]) == required
+        wanted: set[str] = set()
+        for name, body in _extras().items():
+            if name != "dev":
+                wanted |= self._requirements(body)
+        assert named(extras[1]) == wanted - required
+
+    def test_every_specification_has_a_project_link(self):
+        """PyPI's project links had the 1.0 and 1.1 specifications, and not
+        1.2's, until release day.  Every normative `docs/spec/medh5-1.*.md`
+        has a link to its released page, and no link names another."""
+        text = PYPROJECT.read_text(encoding="utf-8")
+        urls = text.split("\n[project.urls]\n", 1)[1].split("\n[", 1)[0]
+        links = dict(re.findall(r'^"Specification ([\d.]+)" = "([^"]+)"$', urls, re.M))
+        specs = {
+            path.stem.removeprefix("medh5-")
+            for path in (ROOT / "docs/spec").glob("medh5-1.*.md")
+        }
+        assert specs and set(links) == specs
+        for version, url in links.items():
+            page = f"https://medh5.readthedocs.io/en/stable/spec/medh5-{version}/"
+            assert url == page, version
+
+    def test_only_the_newest_line_is_supported(self):
+        """The maintainer closed 2.0.x and 2.1.x on 2026-10-21.  SECURITY.md
+        says which line receives fixes, and it is this release's, the line the
+        weekly audit reads beside `main`."""
+        security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+        section = security.split("\n## Supported versions\n", 1)[1].split("\n## ", 1)[0]
+        prose = " ".join(section.split())  # as wrapped at any column
+        line = ".".join(_declared().split(".")[:2])
+        assert f"Only the newest {line}.x release receives fixes" in prose
+        assert f"`release/{line}`" in prose
+        assert "2.0.x and 2.1.x lines are closed" in prose
 
 
 class TestDistribution:
