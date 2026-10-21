@@ -244,33 +244,42 @@ fn empty_free_space(bytes: &mut [u8]) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Strict validation of `path` on a thread of its own, or `None` past
+    /// `limit`: a fixture that hangs --- the global heap's, on an HDF5
+    /// without its patch --- fails the test that reads it instead of hanging
+    /// the suite.
+    fn bounded(path: PathBuf, limit: std::time::Duration) -> Option<crate::validate::Report> {
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = send.send(crate::validate::validate_file(&path, "strict", None));
+        });
+        receive.recv_timeout(limit).ok().map(Result::unwrap)
+    }
+
     /// Each fixture is validated to a report with an error, never a panic,
-    /// and the report names what was planted: the file is refused at open,
-    /// or the planted dataset is the one that could not be read.
+    /// within 30 seconds, and the report names what was planted: the file is
+    /// refused at open, or the planted dataset is the one that could not be
+    /// read.  Each is [`bounded`], so one that hangs fails here.
     #[test]
     fn every_robustness_fixture_validates_to_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let paths = write(dir.path()).unwrap();
         assert_eq!(paths.len(), 5);
         for path in paths {
-            let started = std::time::Instant::now();
-            let report = crate::validate::validate_file(&path, "strict", None).unwrap();
-            let elapsed = started.elapsed();
+            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            let report = bounded(path, std::time::Duration::from_secs(30)).unwrap_or_else(|| panic!("{name} hung"));
             let errors: Vec<_> = report.diagnostics.iter().filter(|d| d.severity == "error").collect();
-            let name = path.file_stem().unwrap().to_string_lossy();
             assert!(
                 errors.iter().any(|d| d.code == "E001" || d.location.contains(GROUP) || d.message.contains(GROUP)),
                 "{name}: {:?}",
                 report.diagnostics
             );
-            assert!(elapsed < std::time::Duration::from_secs(30), "{name}: {elapsed:?}");
         }
     }
 
     /// HDF5 2.2.0 never returned from the first string it read in such a
-    /// file; the patched HDF5 refuses the heap, and the file with it.  Run on
-    /// a thread, so that a build without the patch fails here rather than
-    /// hanging the suite.
+    /// file; the patched HDF5 refuses the heap, and the file with it, as
+    /// unreadable and nothing else.
     #[test]
     fn a_global_heap_object_smaller_than_its_header_is_refused_in_bounded_time() {
         let dir = tempfile::tempdir().unwrap();
@@ -280,11 +289,7 @@ mod tests {
         let mut bytes = std::fs::read(&path).unwrap();
         empty_free_space(&mut bytes).unwrap();
         std::fs::write(&path, bytes).unwrap();
-        let (send, receive) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = send.send(crate::validate::validate_file(&path, "strict", None));
-        });
-        let report = receive.recv_timeout(std::time::Duration::from_secs(60)).expect("validation returns").unwrap();
+        let report = bounded(path, std::time::Duration::from_secs(60)).expect("validation returns");
         let codes: Vec<_> =
             report.diagnostics.iter().filter(|d| d.severity == "error").map(|d| d.code.as_str()).collect();
         assert_eq!(codes, ["E001"], "{:?}", report.diagnostics);
