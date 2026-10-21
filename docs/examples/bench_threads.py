@@ -1,4 +1,4 @@
-"""Measure reading through medh5 from one, two and four threads, and what one call costs.
+"""Measure reading through medh5 from one, two and four threads, and one call's cost.
 
 The same amount of work, split evenly over ``--threads`` threads, each with
 its own handles (the pattern ``docs/explanation/concurrency.md`` shows):
@@ -57,17 +57,28 @@ def build(out: Path, files: int, shape: tuple[int, int, int]) -> dict[str, list[
         for i in range(files):
             name = f"{codec}-{i}-{'x'.join(map(str, shape))}.medh5"
             if not (out / name).exists():
-                synthetic_sample(out, shape=shape, classes=8, codec=codec, index=False,
-                                 seed=20260815 + i, name=name)
+                synthetic_sample(
+                    out,
+                    shape=shape,
+                    classes=8,
+                    codec=codec,
+                    index=False,
+                    seed=20260815 + i,
+                    name=name,
+                )
             paths.append(out / name)
         written[codec] = paths
     return written
 
 
-def windows(seed: int, n: int, shape: tuple[int, ...], patch: int) -> list[tuple[slice, ...]]:
+def windows(
+    seed: int, n: int, shape: tuple[int, ...], patch: int
+) -> list[tuple[slice, ...]]:
     """``n`` random windows of ``patch`` voxels a side, inside ``shape``."""
     rng = np.random.default_rng(seed)
-    starts = rng.integers(0, np.maximum(1, np.array(shape) - patch + 1), size=(n, len(shape)))
+    starts = rng.integers(
+        0, np.maximum(1, np.array(shape) - patch + 1), size=(n, len(shape))
+    )
     return [tuple(slice(int(s), int(s) + patch) for s in start) for start in starts]
 
 
@@ -86,7 +97,7 @@ def run_threads(threads: int, work: Callable[[int, int], None], total: int) -> f
         barrier.wait()
         try:
             work(i, share[i])
-        except BaseException as e:  # noqa: BLE001 - reported below
+        except BaseException as e:
             errors.append(e)
 
     pool = [threading.Thread(target=body, args=(i,)) for i in range(threads)]
@@ -102,8 +113,9 @@ def run_threads(threads: int, work: Callable[[int, int], None], total: int) -> f
     return elapsed
 
 
-def workloads(paths: dict[str, list[Path]], args: argparse.Namespace,
-              shape: tuple[int, int, int]) -> dict[str, Callable[[int, int], None]]:
+def workloads(
+    paths: dict[str, list[Path]], args: argparse.Namespace, shape: tuple[int, int, int]
+) -> dict[str, Callable[[int, int], None]]:
     patch = args.patch
 
     def image(codec: str) -> Callable[[int, int], None]:
@@ -113,6 +125,7 @@ def workloads(paths: dict[str, list[Path]], args: argparse.Namespace,
                 ct = s.images["CT"]
                 for roi in windows(1000 + i, count, shape, patch):
                     ct.read(roi)
+
         return work
 
     def labels(i: int, count: int) -> None:
@@ -129,11 +142,17 @@ def workloads(paths: dict[str, list[Path]], args: argparse.Namespace,
                 s.grids["g"].shape  # noqa: B018 - the metadata is the work
                 s.images["CT"].dtype  # noqa: B018
 
-    return {"image": image("training"), "portable": image("portable"),
-            "labels": labels, "open": opening}
+    return {
+        "image": image("training"),
+        "portable": image("portable"),
+        "labels": labels,
+        "open": opening,
+    }
 
 
-def per_call_us(paths: dict[str, list[Path]], calls: int, repeats: int) -> dict[str, float]:
+def per_call_us(
+    paths: dict[str, list[Path]], calls: int, repeats: int
+) -> dict[str, float]:
     """Median microseconds per call, one thread, on an open sample."""
     found: dict[str, list[float]] = {"read_one_voxel": [], "contains": []}
     one = (slice(0, 1),) * 3
@@ -164,8 +183,11 @@ def measure(args: argparse.Namespace) -> dict[str, Any]:
         for threads in args.threads:
             times = [run_threads(threads, work, total) for _ in range(args.repeats)]
             seconds = statistics.median(times)
-            rows[str(threads)] = {"seconds": seconds, "per_s": total / seconds,
-                                  "runs": times}
+            rows[str(threads)] = {
+                "seconds": seconds,
+                "per_s": total / seconds,
+                "runs": times,
+            }
         one = rows[str(args.threads[0])]["seconds"]
         for row in rows.values():
             row["vs_first"] = row["seconds"] / one
@@ -196,11 +218,17 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     parser.add_argument("--shape", type=int, nargs=3, default=(192, 256, 256))
     parser.add_argument("--patch", type=int, default=64)
     parser.add_argument("--reads", type=int, default=512, help="windows per workload")
-    parser.add_argument("--opens", type=int, default=256, help="opens in the open workload")
-    parser.add_argument("--calls", type=int, default=2000, help="calls per timing in calls_us")
+    parser.add_argument(
+        "--opens", type=int, default=256, help="opens in the open workload"
+    )
+    parser.add_argument(
+        "--calls", type=int, default=2000, help="calls per timing in calls_us"
+    )
     parser.add_argument("--threads", type=int, nargs="+", default=(1, 2, 4))
     parser.add_argument("--repeats", type=int, default=5)
-    parser.add_argument("--out", help="where to write the samples (default: a temporary directory)")
+    parser.add_argument(
+        "--out", help="where to write the samples (default: a temporary directory)"
+    )
     parser.add_argument("--json", help="also write the results here")
     args = parser.parse_args(argv)
     results = measure(args)

@@ -208,11 +208,10 @@ class TestThreadBench:
         sys.modules["bench_threads"] = module
         spec.loader.exec_module(module)
         out = tmp_path / "out.json"
+        small = "--files 2 --shape 8 16 16 --patch 4 --reads 6 --opens 3 --calls 2"
         results = module.main(
-            ["--files", "2", "--shape", "8", "16", "16", "--patch", "4",
-             "--reads", "6", "--opens", "3", "--calls", "2", "--repeats", "1",
-             "--threads", "1", "2", "--out", str(tmp_path / "samples"),
-             "--json", str(out)]
+            [*small.split(), "--repeats", "1", "--threads", "1", "2"]
+            + ["--out", str(tmp_path / "samples"), "--json", str(out)]
         )
         assert json.loads(out.read_text())["conditions"]["files"] == 2
         for workload in ("image", "portable", "labels", "open"):
