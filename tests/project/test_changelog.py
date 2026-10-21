@@ -234,11 +234,19 @@ def test_check_lists_a_promise_about_a_later_release(tmp_path, monkeypatch, caps
         "plain.md",
         "<!-- area: cli -->\n### Fixed\n\n- **`--will` is a flag.** It works.\n",
     )
+    # Wrapped at 80 columns, a phrase spans two lines.
+    _fragment(
+        changes,
+        "wrapped.md",
+        "<!-- area: cli -->\n### Fixed\n\n- **A fix.** Its flag goes in a later\n"
+        "  release.\n",
+    )
     _fragment(changes, "lead.md", "**2.2.1 will require nothing new.**\n")
     _fragment(changes, "ci.md", "<!-- no entry: a later release will tell -->\n")
     assert changelog.promises(changes) == [
         "changes/w22-02-native-nifti-import.md:5: unlinked. The Python converter"
         " and the command line move onto it next.",
+        "changes/wrapped.md:4: - **A fix.** Its flag goes in a later",
         "changes/lead.md:1: **2.2.1 will require nothing new.**",
     ]
     assert changelog.main(["check"]) == 0

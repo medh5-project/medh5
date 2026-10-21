@@ -76,7 +76,8 @@ _CODE = re.compile(r"`+[^`\n]*`+")
 # Words that promise something about a later release.  An entry states what
 # its release does; a promise about the next one is the maintainer's to make,
 # and 2.2.0's said the converters move onto the engine "next" after they had.
-_PROMISE = re.compile(r"\b(?:will|next|later releases?|future)\b", re.I)
+# An entry wraps at 80 columns, so a phrase may span two lines.
+_PROMISE = re.compile(r"\b(?:will|next|later\s+releases?|future)\b", re.I)
 
 
 class FragmentError(Exception):
@@ -233,9 +234,15 @@ def promises(directory: Path = CHANGES) -> list[str]:
     found = []
     for path in paths:
         lines = path.read_text(encoding="utf-8").splitlines()
-        for number, line in enumerate(lines, 1):
-            if not line.startswith("<!--") and _PROMISE.search(_CODE.sub("", line)):
-                found.append(f"changes/{path.name}:{number}: {line.strip()}")
+        # Searched as one text, a line per line, so that a phrase wrapped
+        # onto the next line is found, and is reported at its first.
+        prose = "\n".join(
+            "" if line.startswith("<!--") else _CODE.sub("", line) for line in lines
+        )
+        numbers = {prose.count("\n", 0, m.start()) for m in _PROMISE.finditer(prose)}
+        found += [
+            f"changes/{path.name}:{n + 1}: {lines[n].strip()}" for n in sorted(numbers)
+        ]
     return found
 
 

@@ -1067,10 +1067,11 @@ class TestDocumentationHeldToCode:
         weekly audit reads beside `main`."""
         security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
         section = security.split("\n## Supported versions\n", 1)[1].split("\n## ", 1)[0]
+        prose = " ".join(section.split())  # as wrapped at any column
         line = ".".join(_declared().split(".")[:2])
-        assert f"Only the newest {line}.x release receives fixes" in section
-        assert f"`release/{line}`" in section
-        assert "2.0.x and 2.1.x lines are closed" in " ".join(section.split())
+        assert f"Only the newest {line}.x release receives fixes" in prose
+        assert f"`release/{line}`" in prose
+        assert "2.0.x and 2.1.x lines are closed" in prose
 
 
 class TestDistribution:
