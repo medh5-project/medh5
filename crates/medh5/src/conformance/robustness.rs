@@ -281,7 +281,9 @@ mod tests {
         empty_free_space(&mut bytes).unwrap();
         std::fs::write(&path, bytes).unwrap();
         let (send, receive) = std::sync::mpsc::channel();
-        std::thread::spawn(move || send.send(crate::validate::validate_file(&path, "strict", None)));
+        std::thread::spawn(move || {
+            let _ = send.send(crate::validate::validate_file(&path, "strict", None));
+        });
         let report = receive.recv_timeout(std::time::Duration::from_secs(60)).expect("validation returns").unwrap();
         let codes: Vec<_> =
             report.diagnostics.iter().filter(|d| d.severity == "error").map(|d| d.code.as_str()).collect();
