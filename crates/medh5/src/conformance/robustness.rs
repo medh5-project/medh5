@@ -244,16 +244,64 @@ fn empty_free_space(bytes: &mut [u8]) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Strict validation of `path` on a thread of its own, or `None` past
-    /// `limit`: a fixture that hangs --- the global heap's, on an HDF5
-    /// without its patch --- fails the test that reads it instead of hanging
-    /// the suite.
-    fn bounded(path: PathBuf, limit: std::time::Duration) -> Option<crate::validate::Report> {
-        let (send, receive) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = send.send(crate::validate::validate_file(&path, "strict", None));
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    use serde_json::Value;
+
+    /// The environment variable naming the file [`validate_in_a_child`]
+    /// validates, and the prefix of the line its report is printed on.
+    const CHILD: &str = "MEDH5_ROBUSTNESS_VALIDATE";
+    const REPORT: &str = "medh5-robustness-report: ";
+
+    /// Run by [`bounded`], in a process of its own: strict validation of the
+    /// file [`CHILD`] names, its report printed as one line of JSON.  With no
+    /// file named, it does nothing.
+    #[test]
+    fn validate_in_a_child() {
+        let Some(path) = std::env::var_os(CHILD) else { return };
+        let report = crate::validate::validate_file(Path::new(&path), "strict", None).unwrap();
+        println!("{REPORT}{}", report.to_json());
+    }
+
+    /// The error diagnostics of strict validation of `path`, run in a child
+    /// process this test binary starts, or `None` if it has not returned
+    /// within `limit`, when the child is killed.  A fixture that hangs ---
+    /// the global heap's, on an HDF5 without its patch --- holds HDF5's lock
+    /// while it does, so a thread of this process would leave every other
+    /// test that reads a file waiting with it.
+    fn bounded(path: &Path, limit: Duration) -> Option<Vec<Value>> {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "conformance::robustness::tests::validate_in_a_child", "--nocapture"])
+            .env(CHILD, path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let reader = std::thread::spawn(move || {
+            let mut out = String::new();
+            stdout.read_to_string(&mut out).map(|_| out)
         });
-        receive.recv_timeout(limit).ok().map(Result::unwrap)
+        let deadline = Instant::now() + limit;
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let out = reader.join().unwrap().unwrap();
+        assert!(status.success(), "{}: the child failed: {out}", path.display());
+        let line = out.lines().find_map(|l| l.strip_prefix(REPORT)).expect("the child prints its report");
+        let report: Value = serde_json::from_str(line).unwrap();
+        let errors = report["diagnostics"].as_array().unwrap().iter().filter(|d| d["severity"] == "error");
+        Some(errors.cloned().collect())
     }
 
     /// Each fixture is validated to a report with an error, never a panic,
@@ -267,12 +315,11 @@ mod tests {
         assert_eq!(paths.len(), 5);
         for path in paths {
             let name = path.file_stem().unwrap().to_string_lossy().into_owned();
-            let report = bounded(path, std::time::Duration::from_secs(30)).unwrap_or_else(|| panic!("{name} hung"));
-            let errors: Vec<_> = report.diagnostics.iter().filter(|d| d.severity == "error").collect();
+            let errors = bounded(&path, Duration::from_secs(30)).unwrap_or_else(|| panic!("{name} hung"));
+            let names = |d: &Value, key: &str| d[key].as_str().is_some_and(|s| s.contains(GROUP));
             assert!(
-                errors.iter().any(|d| d.code == "E001" || d.location.contains(GROUP) || d.message.contains(GROUP)),
-                "{name}: {:?}",
-                report.diagnostics
+                errors.iter().any(|d| d["code"] == "E001" || names(d, "location") || names(d, "message")),
+                "{name}: {errors:?}"
             );
         }
     }
@@ -289,10 +336,9 @@ mod tests {
         let mut bytes = std::fs::read(&path).unwrap();
         empty_free_space(&mut bytes).unwrap();
         std::fs::write(&path, bytes).unwrap();
-        let report = bounded(path, std::time::Duration::from_secs(60)).expect("validation returns");
-        let codes: Vec<_> =
-            report.diagnostics.iter().filter(|d| d.severity == "error").map(|d| d.code.as_str()).collect();
-        assert_eq!(codes, ["E001"], "{:?}", report.diagnostics);
+        let errors = bounded(&path, Duration::from_secs(60)).expect("validation returns");
+        let codes: Vec<_> = errors.iter().map(|d| d["code"].as_str().unwrap()).collect();
+        assert_eq!(codes, ["E001"], "{errors:?}");
     }
 
     /// Only a collection whose objects lead exactly to its end is edited, and
