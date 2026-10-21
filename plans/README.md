@@ -10,6 +10,7 @@ is to put there.
 |---|---|---|---|
 | 2.1.0 | minor: features, errata, deprecations | [2.1.0/README.md](2.1.0/README.md) | released 2026-10-15 |
 | 2.2.0 | minor: format 1.2, native converters, platforms, resampling | [2.2.0/README.md](2.2.0/README.md) | released 2026-10-20 |
+| 2.2.x | patch releases on `main`: fixes, performance, hardening | [2.2.x/README.md](2.2.x/README.md) | planned |
 | 2.0.x | patch line, cut on demand | this file, [the 2.0.x line](#the-20x-line) | 2.0.3 released |
 
 ## How to use a plan
@@ -37,12 +38,18 @@ is to put there.
 
 - `main` is the line of the next minor release. A patch line (`release/2.0`)
   exists only once a patch is needed (see [the 2.0.x line](#the-20x-line)).
-- A workstream works on `w21/<name>` (2.1.0) or `w22/<name>` (2.2.0), cut from
-  the latest `main`; the pull request's title starts with the workstream id
-  (`W21-02: …`). A workstream that lands as several pull requests pushes each
-  from its own branch (`w22/<name>`, `w22/<name>-2`, …), so the next one can
-  open while the last sits in the queue. A lane's brief names every branch its
-  workstreams need, and the session may push all of them. (In 2.1.0 each
+  While no minor is planned, `main` is the 2.2.x patch line instead (see
+  [Patch releases](#patch-releases)).
+- A workstream works on `w21/<name>` (2.1.0), `w22/<name>` (2.2.0) or
+  `p22/<name>` (2.2.x), cut from the latest `main`; the pull request's title
+  starts with the workstream id (`W21-02: …`, `P22-01: …`). A workstream that
+  lands as several pull requests pushes each from its own branch
+  (`w22/<name>`, `w22/<name>-2`, …), so the next one can open while the last
+  sits in the queue. A lane's brief names every branch its
+  workstreams need, and the session may push all of them. A branch carries one
+  pull request and is never reused for the next (in 2.2.0, one branch carried
+  three and ran 41 CI runs). Where the session's branch carries a suffix the
+  brief did not give, the brief records the name it has. (In 2.1.0 each
   session had one assigned branch; two lanes had to ask for a second, and a
   third held a finished workstream back until its first merged.)
 - From 2.1.0's W21-01 on, a workstream lands as **one pull request**
@@ -62,8 +69,9 @@ is to put there.
   each after testing it on top of `main` and of the pull requests ahead of it,
   so the merged tree is the tested tree. It needs `ci-ok`, not an approving
   review: every 2.1.0 pull request merged without one, so a session never
-  tells the maintainer a pull request "needs your approval". A workstream never
-  merges another workstream's branch into its own.
+  tells the maintainer a pull request "needs your approval". Nor does a relay
+  say the maintainer reviewed anything the maintainer did not write about. A
+  workstream never merges another workstream's branch into its own.
 - **Review before the queue.** Open the pull request ready for review, not as
   a draft, once its items pass the local gate: Codex reviews a draft only when
   it is marked ready (in 2.1.0, five and eight hours late). Then:
@@ -72,7 +80,12 @@ is to put there.
      so twelve merged with no automated review. If it failed, ask again with
      an `@codex review` comment.
   2. Fix or answer every finding, then arm auto-merge, which enqueues the
-     pull request once CI is green.
+     pull request once CI is green. A finding names one instance of a class
+     (an overflow, a path collision, a lock taken out of order): find every
+     instance in the change, fix them together, and list the sweep in the
+     reply. Push once per round, not once per finding: in 2.2.0, 148 findings
+     came in classes, a fix of only the named instance drew the next round,
+     and 69 % of pull-request CI runs were cancelled by the next push.
   3. A queued pull request cannot be pushed to, and only the maintainer can
      remove it from the queue. A finding that arrives while it is queued goes
      into a follow-up pull request at once (`W22-07 review: …`, as #63 was),
@@ -99,10 +112,17 @@ event arriving, so:
 - The coordinator runs an hourly sweep over every open pull request and every
   lane: a dropped pull request, a red head, or a lane quiet for more than an
   hour with work open gets a nudge, and a merged edge is relayed to the lanes
-  waiting on it.
-- Six lanes running at once share one account's usage limit; in 2.1.0 all six
-  stopped together for two to three and a half hours. Start each lane on the
-  pull request other lanes wait on.
+  waiting on it. The sweep also covers the bots' pull requests (the weekly
+  lock refresh), the last scheduled run of each fuzz target, and `main`'s last
+  CI: in 2.2.0 a red lock refresh and a red fuzz run were each found days
+  late, on release day.
+- Lanes running at once share one account's usage limit. In 2.1.0 six lanes
+  stopped together for two to three and a half hours; in 2.2.0 the weekly
+  limit stopped three for four days. Run at most three lanes at once, and
+  start each on the pull request other lanes wait on.
+- Commit and push work before a turn ends, even with the pull request open: a
+  cancelled CI run costs less than lost work. In 2.2.0 an environment reset
+  during a pause lost a lane's uncommitted work, which was written again.
 
 ### The local gate
 
@@ -340,6 +360,21 @@ before pushing.
   routine (`AtomicFile`, `write_atomic`, and from W21-05 `stage_file`).
 - Put a model identifier, a session transcript or a scratch path into a commit,
   a pull request or the repository.
+
+## Patch releases
+
+A patch fixes a wrong answer, a crash, a hang, a cost out of proportion to the
+file, the documentation or CI. It adds no public API, in Rust or Python, and
+no command-line flag; the format and the diagnostic code table stay as they
+are, and a new bound reports through an existing code. A performance change
+writes the same `content_id` for the same input, and its pull request records
+the measurement it claims. A fix reaches an older line only when it closes a
+hazard there, and only after the maintainer agrees.
+
+While no minor is planned, `main` is the patch line and each patch is tagged
+from it ([2.2.x](2.2.x/README.md)). If a feature must land first, a
+`release/X.Y` branch is cut from the last patch tag and the series moves
+there, as [the 2.0.x line](#the-20x-line) does.
 
 ## The 2.0.x line
 
