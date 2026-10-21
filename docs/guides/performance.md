@@ -287,25 +287,28 @@ and at 96³ the 2.0.0 machine's loader moved about 490 patches/s. `bench` times
 ran from 120 to 670 patches/s between runs: for a number to compare, time more
 batches (`medh5.bench.throughput(paths, batches=512, workers=4)`).
 
-**Threads.** [`bench_threads.py`](../examples/bench_threads.py) splits the same
-work over one, two and four threads, each with its own handles, on four 2.2.0
-samples like the one above. Seconds for the whole of it, median of six
-processes, on the same machine:
+**Threads.** [`bench_threads.py`](../examples/bench_threads.py) deals one
+fixed list of work over one, two and four threads, each with its own handles,
+on four 2.2.0 samples like the one above. Seconds for the whole of it, median
+of four processes, on the same machine:
 
 | Work | GIL build: 1 thread | 4 threads | Free-threaded: 1 thread | 4 threads |
 |---|---|---|---|---|
-| 512 windows of a `training` (Blosc2) CT | 1.21 s | 0.86 s | 1.18 s | 0.93 s |
-| 512 windows of a `portable` (gzip) CT | 6.27 s | 6.91 s | 6.24 s | 6.71 s |
-| 512 windows of the annotation, `dense()` | 1.94 s | 0.79 s | 1.91 s | 0.73 s |
-| 256 opens, each reading the grid and image metadata | 0.14 s | 0.24 s | 0.14 s | 0.52 s |
+| 512 windows of a `training` (Blosc2) CT | 0.79 s | 0.74 s | 1.26 s | 0.76 s |
+| 512 windows of a `portable` (gzip) CT | 6.16 s | 6.86 s | 6.20 s | 6.64 s |
+| 512 windows of the annotation, `dense()` | 2.40 s | 0.71 s | 2.34 s | 0.73 s |
+| 256 opens, each reading the grid and image metadata | 0.13 s | 0.25 s | 0.14 s | 0.52 s |
 
 Windows that decompress outside HDF5's lock (Blosc2, and the label planes'
 decoding) gain from threads; gzip, which HDF5 decompresses under its lock,
 loses about a tenth to the hand-offs, and opening loses most, because an open
 is many small HDF5 calls and each one changes hands. The free-threaded build
 (Python 3.14t) loses the most there: 2.1.0's free-threaded wheel ran with the
-GIL, and took 0.25 s at four threads. One thread is no slower than 2.1.0 on
-either build. [Threads or processes](../explanation/concurrency.md#threads-or-processes)
+GIL, and took 0.24 s at four threads. One thread is no slower than 2.1.0 on
+either build. The one-thread Blosc2 row moves between about 0.8 and 1.3 s
+with the process rather than the build: timed side by side in one process,
+the two builds read those windows in the same time.
+[Threads or processes](../explanation/concurrency.md#threads-or-processes)
 says which to choose.
 
 
