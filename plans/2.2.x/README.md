@@ -63,12 +63,20 @@ speedup), its fix may go into 2.2.1 instead.
 
 - **State at 2.2.0.**
   - #85 fixed one subtraction in `annotations/layout.rs`.
-  - `geometry::affine::box_to_slices` has 24 call sites in 7 files:
-    `annotations/{layout,read,read_geometric,encode}.rs`,
-    `curation/tracking.rs`, `transforms/resample/annotations.rs` and
-    `affine.rs` itself.
-  - Each of them turns a stored float bound into integer indices and then
-    does arithmetic on them.
+  - `geometry::affine::box_to_slices` turns a box's float bounds into
+    integer indices. Outside tests it has nine callers: eight in the engine,
+    in six files, and one in the Python binding:
+    - `annotations/layout.rs` (the one #85 fixed);
+    - `annotations/encode.rs`, two, one of which subtracts the bounds
+      unchecked (`hi - lo`);
+    - `annotations/read.rs`, two;
+    - `annotations/read_geometric.rs`;
+    - `curation/tracking.rs`, which subtracts unchecked and multiplies
+      (`(b - a)` then `product()`);
+    - `transforms/resample/annotations.rs`;
+    - `crates/medh5-python/src/geometry.rs` (`box_to_slices`).
+  - These nine are where the sweep starts, not where it ends: the same
+    arithmetic on stated values appears without that function.
   - The NIfTI reader already checks its own arithmetic (`convert/nifti/read.rs`,
     `header.rs`).
   - Release builds have `overflow-checks` off, so an overflow there is silent.
@@ -102,14 +110,25 @@ speedup), its fix may go into 2.2.1 instead.
   - The details of the HDF5 defect stay out of the public plan and the pull
     request, as W22-06 required, and the maintainer decides when to report it
     upstream.
+- **Where HDF5 is built.** `medh5-sys` does not build HDF5:
+  `hdf5-metno-src` builds it for `hdf5-metno-sys`, before `medh5-sys`'s
+  build script runs (its `build.rs` says so). So a patch shipped inside
+  `medh5-sys` would not reach the linked library. A patch reaches what the
+  workspace builds only through the crate that builds HDF5.
 - **Change.** Patch HDF5 (the maintainer chose this over checking files
   before HDF5 reads them, 2026-10-21).
-  - Carry a minimal patch to HDF5's global-heap decoder in `medh5-sys`,
-    listed as the Blosc2 filter's patches are
+  - Vendor `hdf5-metno-src` with a minimal patch to HDF5's global-heap
+    decoder, and point the workspace at it with `[patch.crates-io]`. The
+    patch is listed as the Blosc2 filter's patches are
     (`vendor/hdf5-blosc2/PATCHES.md`), and kept until it lands upstream.
-  - The patched source ships inside `medh5-sys`, so `cargo install
-    medh5-cli` from crates.io builds it too: a workspace `[patch.crates-io]`
-    does not reach a crate's dependents.
+  - That covers everything the release workflow builds: the wheels, the
+    sdist (which must carry the vendored crate), the standalone binaries
+    and the Homebrew formula, which installs those binaries.
+  - It does not cover a crates.io build (`cargo install medh5-cli`, or a
+    crate depending on `medh5`): `[patch]` does not reach dependents. Those
+    get the fix from an upstream HDF5 and `hdf5-metno-src` release, so the
+    defect is reported upstream with the patch.
+    `SECURITY.md` says which builds are patched until then.
   - HDF5's row in `SECURITY.md`'s native inventory says it is patched, and
     the test that compares the inventory with the lock follows.
   - The fuzz exclusion (`endless_global_heap`) is removed, so the job fuzzes
@@ -117,7 +136,9 @@ speedup), its fix may go into 2.2.1 instead.
   - The maintainer decides when the defect is reported upstream, and offers
     the patch with it.
 - **Tests.** A built file that hung 2.2.0 is refused in bounded time. The
-  test builds the file in the test; no input is committed.
+  test builds the file in the test; no input is committed. The release
+  workflow's smoke tests run it against the wheels and the standalone
+  binary.
 - **Changelog.** Security, area `validation`.
 - **Done when.** The exclusion is gone and the scheduled `open_validate` run is
   green.
@@ -290,7 +311,7 @@ At most three sessions at once (lessons §1).
 | File | Owner | Others touch it for |
 |---|---|---|
 | `crates/medh5/src/annotations/**`, `geometry/affine.rs` | P22-01 | P22-03 (tests only) |
-| `crates/medh5-sys/**`, `fuzz/**`, `.github/workflows/fuzz.yml` | P22-02, then P22-04 | — |
+| `crates/medh5-sys/**`, the vendored `hdf5-metno-src` and the workspace `[patch.crates-io]`, `fuzz/**`, `.github/workflows/fuzz.yml` | P22-02, then P22-04 | — |
 | `crates/medh5/src/transforms/resample*`, `sample/writer*.rs`, `convert/nifti/**` | P22-08 | P22-01 (checked arithmetic), P22-03 (#84's declines) |
 | `crates/medh5/src/h5/**`, `crates/medh5-python/src/**`, `medh5/_live.py` | P22-07 | P22-02 (if the guard sits in `h5/`) |
 | `docs/guides/performance.md` | P22-06 | P22-07, P22-08 (their rows) |
@@ -359,7 +380,7 @@ Settled on 2026-10-21:
 - **The line.** Patches are tagged from `main`, and `main` takes only what a
   patch may change until a 2.3.0 is planned. `release/2.2` is cut only if a
   feature must land first.
-- **The global heap (P22-02).** HDF5 is patched in `medh5-sys`, not guarded
-  by a check before HDF5 reads.
+- **The global heap (P22-02).** HDF5 is patched, not guarded by a check
+  before HDF5 reads.
 - **Older lines.** 2.0.x and 2.1.x are closed, with fixes only on 2.2.x
   (P22-05 says so in the repository).
