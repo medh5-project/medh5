@@ -989,6 +989,26 @@ class TestRepositoryGates:
         root = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
         assert patch.replace("../", "") in root
 
+    def test_a_change_to_a_fuzzed_reader_is_smoke_run(self):
+        """In 2.2.0 a red fuzz run went unseen for days, and only a change
+        under `fuzz/` ran the targets on its pull request.  A change to the
+        readers they fuzz most --- the converters, the annotations --- or to
+        the HDF5 they read with is smoke-run on its pull request too."""
+        text = FUZZ.read_text(encoding="utf-8")
+        trigger = re.search(
+            r"^  pull_request:\n    paths:\n((?:      - .+\n)+)", text, re.M
+        )
+        assert trigger
+        paths = re.findall(r"^      - (.+)$", trigger[1], re.M)
+        for reader in (
+            "fuzz/**",
+            "crates/medh5/src/convert/**",
+            "crates/medh5/src/annotations/**",
+            "vendor/hdf5-metno-src/**",
+            ".github/workflows/fuzz.yml",
+        ):
+            assert reader in paths, reader
+
     def test_the_release_runs_ci_on_the_tagged_commit(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")

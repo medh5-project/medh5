@@ -32,7 +32,8 @@ hdf5-metno-src = { path = "../vendor/hdf5-metno-src" }
 [profile.release]
 debug = 1
 
-# The corpus seeds: the conformance corpus's small files.
+# The corpus seeds: the conformance corpus's small files, and ITK transform
+# files the engine writes.
 [[bin]]
 name = "seed"
 path = "src/bin/seed.rs"
@@ -71,6 +72,13 @@ bench = false
 [[bin]]
 name = "nifti_header"
 path = "fuzz_targets/nifti_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "itk_transform"
+path = "fuzz_targets/itk_transform.rs"
 test = false
 doc = false
 bench = false

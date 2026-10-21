@@ -379,6 +379,13 @@ its version alone, `main` reads as the next minor's work. If a feature must
 land first, a `release/X.Y` branch is cut from the last patch tag and the
 series moves there, as [the 2.0.x line](#the-20x-line) does.
 
+Fuzzing is a gate, not a report. A red scheduled run of any target
+(`fuzz.yml`) is a finding the coordinator's sweep raises the hour it is seen,
+and a patch is not tagged until every target has a green `workflow_dispatch`
+run on the release pull request's head: the release checklist names that run.
+In 2.2.0 a red run had become normal, and a real overflow was found on release
+day only because the release session looked.
+
 ## The 2.0.x line
 
 Closed on 2026-10-21, with 2.1.x: fixes land on 2.2.x only. What follows is
