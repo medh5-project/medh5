@@ -153,12 +153,14 @@ median (2.1 h to 10.2 h, and 114 h for #76). In 2.1.0 the median was 1.8 hours.
   - The HDF5 lock's waiters are now cleared in a forked child.
 - **A rare segfault.** A C-library test segfaulted 24 times in 1,500 runs, on
   `main` too. It was fixed.
-- **Threads were slower than one.**
-  - Preflight took **3.6 s on one thread and 6.9 s on four**.
-  - HDF5 has one global lock, so no speedup was expected. Being twice as slow
-    was not expected.
+- **Its cost was never measured.**
   - Nobody measured, against 2.1.0, what detaching on every binding call and
-    the live views' locks cost a single thread.
+    the live views' locks cost, on one thread or on several.
+  - The only published figure for threads is 2.1.0's: a thread pool made
+    preflight slower (3.6 s on one thread, 6.9 s on four), so preflight runs
+    one subject at a time on one thread
+    (`docs/explanation/design-rationale.md`). No benchmark measures reading
+    from several threads, the use free-threading is for.
 
 ### 9. Performance was not measured at all
 

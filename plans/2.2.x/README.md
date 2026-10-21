@@ -42,7 +42,7 @@ The reasons are in [What 2.2.0 taught](what-2.2.0-taught.md), cited below as
 | Codex left 148 findings in classes, and fixing only the named instance meant another round. 69 % of pull-request CI runs were cancelled by the next push. | A finding is swept as a class, with the sweep listed in the reply, and each round is one push (Process). P22-01 does that for the overflow class across the engine. |
 | The fuzz job found a real overflow on release day, and only because the release session looked. Red had become normal. The global-heap hang is excluded in the fuzz target but still hangs a user. | P22-02 stops the hang in the engine and lifts the exclusion. P22-04 makes a red scheduled run something the coordinator sees and the release cannot pass. |
 | Stale docs (`CLAUDE.md`'s format version, `SECURITY.md`'s dependencies, the PyPI links) and a two-day-old red lock refresh were found on release day. | P22-05 adds tests that hold those to the code. The coordinator's sweep covers bot pull requests (Process). |
-| Nothing in 2.2.0 was measured. Preflight took 3.6 s on one thread and 6.9 s on four. Several paths hold whole volumes. | 2.2.2 measures first (P22-06), then fixes what the measurement shows (P22-07, P22-08) and refreshes the published numbers. |
+| Nothing in 2.2.0 was measured: not free-threading's cost on one thread or several, nor the NIfTI engine. Several paths hold whole volumes. | 2.2.2 measures first (P22-06), then fixes what the measurement shows (P22-07, P22-08) and refreshes the published numbers. |
 | About ten Codex findings were declined with reasons and never revisited. | P22-03 turns each decline into a test that pins the decision, or a fix. |
 | Sessions could not delete branches or reach Read the Docs. | Two settings for the maintainer ([Before the lanes start](#before-the-lanes-start-the-maintainer)). |
 
@@ -199,13 +199,19 @@ speedup), its fix may go into 2.2.1 instead.
 - **State at 2.2.0.**
   - `docs/guides/performance.md`'s numbers were measured with 2.0.0.
   - No 2.2.0 pull request recorded a timing.
-  - Preflight took 3.6 s on one thread and 6.9 s on four (lane D's
-    measurement).
+  - The only published thread figure is 2.1.0's preflight thread pool (3.6 s
+    on one thread, 6.9 s on four), which is why preflight runs on one
+    thread. No benchmark reads from several threads: `bench_preflight.py`
+    runs preflight once, with no thread count.
 - **Change.** Measure, and change no code:
   - `medh5 bench` and `docs/examples/bench_*.py`, on 2.1.0 and 2.2.0, on one
     machine;
   - NIfTI import and export through the engine against 2.1.0's nibabel path;
-  - one, two and four threads, on the GIL build and the free-threaded build;
+  - reading from one, two and four threads, on the GIL build and the
+    free-threaded build, through medh5 (`bench_io.py` times h5py): a new
+    `docs/examples/bench_threads.py` on the pattern
+    `docs/explanation/concurrency.md` shows, one handle per thread.
+    Preflight stays on one thread by design and is not a thread row;
   - the cost of detaching on every binding call, against 2.1.0, on one thread;
   - peak memory (RSS) of `resample` (linear and cubic), `from_nifti` with
     several volumes, and an enhanced DICOM import.
@@ -219,13 +225,14 @@ speedup), its fix may go into 2.2.1 instead.
     of more than 20 %. Runner timings are too noisy to gate on.
 - **Done when.** The table covers every row above and the page is refreshed.
 
-### P22-07 Threads never slower than one (2.2.2)
+### P22-07 What free-threading costs, removed where it is excess (2.2.2)
 
 - **State at 2.2.0.**
   - HDF5 runs one call at a time (one global lock).
   - Every binding call detaches (`crate::h5`), and live views take an `RLock`
     (`medh5/_live.py`).
-  - Four threads took twice as long as one on preflight.
+  - What that costs is unknown until P22-06's thread rows exist. If they
+    show neither problem below, P22-07 is dropped and the plan says so.
 - **Change.**
   - Find where the time goes (lock hand-offs, detach and attach per HDF5
     call, the views' locks) and remove the excess. For example, take the
@@ -235,8 +242,8 @@ speedup), its fix may go into 2.2.1 instead.
 - **Tests.** The free-threaded stress job still passes. A timing is a
   benchmark row, not a test.
 - **Done when.**
-  - Four threads take no longer than one, within noise, on the preflight and
-    read benchmarks.
+  - Four threads take no longer than one, within noise, on P22-06's thread
+    read benchmark.
   - One thread is no slower than 2.1.0 by more than noise.
 
 ### P22-08 Memory follows a chunk, not a volume (2.2.2)
