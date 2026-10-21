@@ -11,7 +11,7 @@ is to put there.
 | 2.1.0 | minor: features, errata, deprecations | [2.1.0/README.md](2.1.0/README.md) | released 2026-10-15 |
 | 2.2.0 | minor: format 1.2, native converters, platforms, resampling | [2.2.0/README.md](2.2.0/README.md) | released 2026-10-20 |
 | 2.2.x | patch releases on `main`: fixes, performance, hardening | [2.2.x/README.md](2.2.x/README.md) | planned |
-| 2.0.x | patch line, cut on demand | this file, [the 2.0.x line](#the-20x-line) | 2.0.3 released |
+| 2.0.x | patch line, cut on demand | this file, [the 2.0.x line](#the-20x-line) | 2.0.3 released; closed 2026-10-21 |
 
 ## How to use a plan
 
@@ -368,8 +368,9 @@ file, the documentation or CI. It adds no public API, in Rust or Python, and
 no command-line flag; the format and the diagnostic code table stay as they
 are, and a new bound reports through an existing code. A performance change
 writes the same `content_id` for the same input, and its pull request records
-the measurement it claims. A fix reaches an older line only when it closes a
-hazard there, and only after the maintainer agrees.
+the measurement it claims. Only the newest line receives fixes: the
+maintainer closed 2.0.x and 2.1.x on 2026-10-21, and an older line reopens
+only by the maintainer's decision.
 
 While no minor is planned, `main` is the patch line and each patch is tagged
 from it ([2.2.x](2.2.x/README.md)). If a feature must land first, a
@@ -377,6 +378,10 @@ from it ([2.2.x](2.2.x/README.md)). If a feature must land first, a
 there, as [the 2.0.x line](#the-20x-line) does.
 
 ## The 2.0.x line
+
+Closed on 2026-10-21, with 2.1.x: fixes land on 2.2.x only. What follows is
+the record of how 2.0.3 was cut, and the pattern a `release/2.2` would
+follow.
 
 `release/2.0` is created from the `v2.0.2` tag only when a 2.0.3 is wanted.
 A fix lands on `main` first; a cherry-pick pull request to `release/2.0`

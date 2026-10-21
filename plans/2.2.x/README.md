@@ -27,11 +27,11 @@ The reasons are in [What 2.2.0 taught](what-2.2.0-taught.md), cited below as
   - A performance change writes the same `content_id` as 2.2.0 for the same
     input. The conformance corpus and a before/after check in the pull
     request hold that.
-- **Backports.**
-  - None is planned. The release-day overflow (lessons §4) gave a wrong number
-    in a message in release builds, not a crash, and was fixed in 2.2.0.
-  - A later finding that is a hazard in 2.1.0 or 2.0.3 is raised with the
-    maintainer before any older line is touched.
+- **Older lines.** 2.0.x and 2.1.x are closed (the maintainer, 2026-10-21):
+  every fix lands on 2.2.x only, and nothing is backported. P22-05 makes the
+  repository say so. The release-day overflow (lessons §4) would not have
+  needed a backport anyway: release builds gave a wrong number in a message,
+  not a crash.
 
 ## What 2.2.0 taught, and how this plan answers it
 
@@ -101,18 +101,22 @@ speedup), its fix may go into 2.2.1 instead.
   - The details of the HDF5 defect stay out of the public plan and the pull
     request, as W22-06 required, and the maintainer decides when to report it
     upstream.
-- **Change.** One of these, as the maintainer chooses (Open questions, 2):
-  - **(a) Patch HDF5.** Carry a minimal patch to HDF5's global-heap decoder in
-    `medh5-sys`, listed as the Blosc2 filter's patches are
-    (`vendor/hdf5-blosc2/PATCHES.md`). It is offered upstream and kept until
-    it lands there.
-  - **(b) Check before HDF5 reads.** Bring the fuzz crate's predicate into the
-    engine. A collection HDF5 would loop on is refused before HDF5 reads it,
-    with the narrowest test that is never wrong in the unsafe direction.
-
-  Either way, the fuzz exclusion is removed, so the job fuzzes that path again.
-- **Tests.** A built file that hung 2.2.0 is refused, or read, in bounded
-  time. The test builds the file in the test; no input is committed.
+- **Change.** Patch HDF5 (the maintainer chose this over checking files
+  before HDF5 reads them, 2026-10-21).
+  - Carry a minimal patch to HDF5's global-heap decoder in `medh5-sys`,
+    listed as the Blosc2 filter's patches are
+    (`vendor/hdf5-blosc2/PATCHES.md`), and kept until it lands upstream.
+  - The patched source ships inside `medh5-sys`, so `cargo install
+    medh5-cli` from crates.io builds it too: a workspace `[patch.crates-io]`
+    does not reach a crate's dependents.
+  - HDF5's row in `SECURITY.md`'s native inventory says it is patched, and
+    the test that compares the inventory with the lock follows.
+  - The fuzz exclusion (`endless_global_heap`) is removed, so the job fuzzes
+    that path again.
+  - The maintainer decides when the defect is reported upstream, and offers
+    the patch with it.
+- **Tests.** A built file that hung 2.2.0 is refused in bounded time. The
+  test builds the file in the test; no input is committed.
 - **Changelog.** Security, area `validation`.
 - **Done when.** The exclusion is gone and the scheduled `open_validate` run is
   green.
@@ -161,7 +165,7 @@ speedup), its fix may go into 2.2.1 instead.
 - **Done when.** The new target has run 40 minutes green, and the release
   checklist names the fuzz run.
 
-### P22-05 Documentation held to the code (2.2.1)
+### P22-05 Documentation held to the code, and the older lines closed (2.2.1)
 
 - **State at 2.2.0.** These were wrong until release day, and no test caught
   them:
@@ -176,7 +180,16 @@ speedup), its fix may go into 2.2.1 instead.
   - every `docs/spec/medh5-1.*.md` has a project URL in `pyproject.toml`;
   - `changelog.py check` flags a fragment that says "next release", "later
     release" or "will", for the release checklist to confirm.
-- **Changelog.** `<!-- no entry: tests and documentation only -->`.
+- **Closing 2.0.x and 2.1.x.** The maintainer closed both lines (2026-10-21).
+  - `advisories.yml`'s weekly matrix audits `main` and `release/2.2` instead
+    of `main` and `release/2.0`; a line not cut yet still ends its job at
+    the first step. `test_packaging.py`'s
+    `test_the_weekly_audit_reads_every_line` follows.
+  - `SECURITY.md` gains "Supported versions": the newest 2.2.x gets fixes,
+    and earlier lines do not.
+  - The `release/2.0` branch stays, as the record of 2.0.3.
+- **Changelog.** Documentation, area `release`: only the newest 2.2.x
+  receives fixes.
 - **Done when.** Each test fails on 2.2.0's text before the fix. That is shown
   in the pull request by reverting one line.
 
@@ -257,8 +270,6 @@ At most three sessions at once (lessons §1).
 | C, settled and documented | P22-05 → P22-03 | `p22/docs-held`, `p22/declined` |
 
 - **Edges.**
-  - P22-02 waits for the maintainer's choice (Open questions, 2); lane A
-    starts on P22-01, so the choice can come meanwhile.
   - P22-04's new target runs after P22-01, so that it does not rediscover
     what P22-01 fixes.
   - P22-07 and P22-08 wait on P22-06's list.
@@ -275,7 +286,7 @@ At most three sessions at once (lessons §1).
 | `crates/medh5/src/transforms/resample*`, `sample/writer*.rs`, `convert/nifti/**` | P22-08 | P22-01 (checked arithmetic), P22-03 (#84's declines) |
 | `crates/medh5/src/h5/**`, `crates/medh5-python/src/**`, `medh5/_live.py` | P22-07 | P22-02 (if the guard sits in `h5/`) |
 | `docs/guides/performance.md` | P22-06 | P22-07, P22-08 (their rows) |
-| `CLAUDE.md`, `CONTRIBUTING.md`, `SECURITY.md`, `pyproject.toml`'s URLs | P22-05 | — |
+| `CLAUDE.md`, `CONTRIBUTING.md`, `SECURITY.md`, `pyproject.toml`'s URLs, `.github/workflows/advisories.yml`, `tests/project/test_packaging.py` | P22-05 | P22-02 (`SECURITY.md`'s HDF5 row) |
 
 ## Process
 
@@ -307,7 +318,7 @@ Made to plans/README.md with this plan, and summarised here.
   - no public API and no flag;
   - same `content_id`;
   - a performance claim is measured in its pull request;
-  - backports only for a hazard, raised with the maintainer.
+  - fixes for the newest line only (2.0.x and 2.1.x are closed).
 
 ## Before the lanes start (the maintainer)
 
@@ -319,7 +330,7 @@ Made to plans/README.md with this plan, and summarised here.
    itself.
 3. **The queue timeout.** Consider raising it to 150 minutes. #74 passed in
    126 and was dropped at 120.
-4. **The open questions below.**
+4. **The open question below.**
 
 ## Release checklist (the coordinator)
 
@@ -334,18 +345,17 @@ As 2.2.0's, plus:
    break.
 5. For 2.2.2: `docs/guides/performance.md` names the version it measured.
 
-## Open questions (the maintainer)
+## Decisions and open questions (the maintainer)
 
-Until the maintainer answers, the plan proceeds on the recommendation.
+Settled on 2026-10-21:
+
+- **The global heap (P22-02).** HDF5 is patched in `medh5-sys`, not guarded
+  by a check before HDF5 reads.
+- **Older lines.** 2.0.x and 2.1.x are closed, with fixes only on 2.2.x
+  (P22-05 says so in the repository).
+
+Open, and until answered the plan proceeds on the recommendation:
 
 1. **The line.** Patches are tagged from `main`, and `main` takes only fixes
    until a 2.3.0 is planned (recommended, and how this plan is written). The
    alternative is to cut `release/2.2` now and keep `main` open.
-2. **The global heap (P22-02).** Patch HDF5 in `medh5-sys` (a), or check
-   before HDF5 reads (b); and when the defect is reported upstream, since the
-   maintainer holds the inputs. Recommended: (a) if the patch is small,
-   because it fixes the cause and needs no scan of the file. P22-02 does not
-   start without this answer.
-3. **Older lines.** Whether `advisories.yml` keeps auditing `release/2.0`, or
-   2.0.x and 2.1.x are closed, with fixes only on 2.2.x. Recommended: keep
-   auditing until 2.2.1 ships, then decide.
