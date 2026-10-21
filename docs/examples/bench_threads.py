@@ -248,6 +248,22 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     )
     parser.add_argument("--json", help="also write the results here")
     args = parser.parse_args(argv)
+    counts = {
+        "--files": [args.files],
+        "--shape": args.shape,
+        "--patch": [args.patch],
+        "--reads": [args.reads],
+        "--opens": [args.opens],
+        "--calls": [args.calls],
+        "--threads": args.threads,
+        "--repeats": [args.repeats],
+    }
+    for flag, values in counts.items():
+        if any(v < 1 for v in values):
+            parser.error(f"{flag} takes positive integers")
+    if args.patch > min(args.shape):
+        # A window past the volume is clipped, and would time a smaller one.
+        parser.error(f"--patch {args.patch} is larger than --shape {min(args.shape)}")
     results = measure(args)
     if args.json:
         Path(args.json).write_text(json.dumps(results, indent=2, default=str) + "\n")

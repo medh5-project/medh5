@@ -220,3 +220,19 @@ class TestThreadBench:
             assert rows["1"]["vs_first"] == 1.0
             assert all(row["seconds"] > 0 for row in rows.values())
         assert set(results["calls_us"]) == {"read_one_voxel", "contains"}
+
+    @pytest.mark.parametrize(
+        "flags",
+        ["--shape 8 16 16 --patch 9", "--patch 0", "--threads 1 0", "--reads 0"],
+    )
+    def test_a_run_that_would_time_something_else_is_refused(self, flags, capsys):
+        import importlib.util
+
+        script = Path(__file__).parents[2] / "docs" / "examples" / "bench_threads.py"
+        spec = importlib.util.spec_from_file_location("bench_threads_flags", script)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with pytest.raises(SystemExit):
+            module.main(flags.split())
+        assert "--" in capsys.readouterr().err
