@@ -1151,7 +1151,9 @@ fn instances_payload(annotation: &Annotation, near: &Nearest, source: &[usize]) 
         };
         let mut local = Vec::with_capacity(s);
         for ((v, o), m) in voxel.iter().zip(origin).zip(crop.shape()) {
-            let j = *v as i64 - o;
+            // Checked: an origin at the start of the integers (a box from
+            // past them, with an empty crop) overflowed the subtraction.
+            let Some(j) = (*v as i64).checked_sub(*o) else { return false };
             if j < 0 || j >= *m as i64 {
                 return false;
             }
@@ -1432,6 +1434,54 @@ mod tests {
         let (c, s) = (0.3f64.cos(), 0.3f64.sin());
         let rotation_and_scale = ndarray::arr2(&[[2.0 * c, -3.0 * s], [2.0 * s, 3.0 * c]]);
         assert!(orthogonal(&rotation_and_scale));
+    }
+
+    /// An object whose box is one point past the integers' start on its
+    /// second axis, with the empty crop that box has: asking whether it
+    /// holds a target voxel subtracted `i64::MIN` from the voxel's index.
+    /// It holds none, so it is refused, as an object with no voxel is.
+    #[test]
+    fn s8_2_an_object_past_the_integers_holds_no_voxel() {
+        use crate::annotations::InstanceInput;
+        use crate::sample::{create, GridOptions, ImageOptions, SegmentationOptions, SegmentationSource};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.medh5");
+        let mut w = create(&path, Some("s"), None, "portable", &[]).unwrap();
+        w.add_grid("g", &[4, 5, 6], &[1.0; 3], GridOptions::default()).unwrap();
+        let ct = crate::array::NdArray::from_vec(&[4, 5, 6], vec![0i16; 120]).unwrap();
+        w.add_image("CT", &ct, "g", "CT", ImageOptions::default()).unwrap();
+        let mut mask = ArrayD::from_elem(IxDyn(&[4, 5, 6]), false);
+        mask[[1, 1, 1]] = true;
+        let object =
+            InstanceInput { class_id: 1, instance_id: 1, mask: Some(mask), bbox: None, crop: None, score: None };
+        w.add_segmentation("lesions", "g", SegmentationSource::Instances(vec![object]), SegmentationOptions::default())
+            .unwrap();
+        w.commit(true).unwrap();
+        {
+            let file = crate::h5::file::open_rw(&path).unwrap();
+            let group = file.group("annotations/lesions").unwrap();
+            let boxes = ndarray::arr3(&[[[0.5f32, 1.5], [-3e38, -3e38], [0.5, 1.5]]]);
+            group.dataset("boxes").unwrap().write(&boxes).unwrap();
+            group.dataset("mask_shapes").unwrap().write(&ndarray::arr2(&[[1i64, 0, 1]])).unwrap();
+            group.dataset("mask_offsets").unwrap().write(&ndarray::arr1(&[0i64, 0])).unwrap();
+            group.unlink("mask_data").unwrap();
+            group.new_dataset::<u8>().shape([0]).create("mask_data").unwrap();
+            drop(group);
+            // Re-attested, as a file made this way would be.
+            let root = file.as_group().unwrap();
+            crate::integrity::digest::stamp_digests(&root, "sha256", &["index"], false).unwrap();
+            let names = crate::sample::attr_name_map_of(&root).unwrap();
+            let id = crate::integrity::digest::compute_content_id(&root, &names, "sha256", None).unwrap();
+            attrs::write(&root, "content_id", &AttrValue::Str(id)).unwrap();
+            drop(root);
+            file.close().unwrap();
+        }
+        let out = dir.path().join("fine.medh5");
+        let plan = crate::transforms::resample::ResamplePlan::spacing(["CT"], "fine", vec![0.5; 3])
+            .with_interpolation("nearest")
+            .with_out(&out);
+        let err = crate::transforms::resample::resample(&path, &plan).unwrap_err();
+        assert!(err.to_string().contains("object 1 of annotation 'lesions' has no voxel"), "{err}");
     }
 
     #[test]

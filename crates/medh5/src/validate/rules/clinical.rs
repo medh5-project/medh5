@@ -89,7 +89,9 @@ fn scan_texts(group: &hdf5::Group, documents: &mut RawTable, links: Option<&RawT
                 continue;
             };
             if let Some((a, b)) = out.spans.get(&id) {
-                probes.extend([start, end].into_iter().filter(|p| *p > 0 && a + p < *b).map(|p| a + p));
+                // `p < b - a`, not `a + p < b`: a span is any `uint64` the
+                // file states, and the sum wrapped to a probe inside the text.
+                probes.extend([start, end].into_iter().filter(|p| *p > 0 && *p < b - a).map(|p| a + p));
             }
         }
     }

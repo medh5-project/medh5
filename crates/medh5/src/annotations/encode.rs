@@ -627,7 +627,9 @@ pub fn encode_instances(
         }
         if let Some(c) = &crop {
             let flat: Vec<f64> = bx.iter().map(|v| f64::from(*v)).collect();
-            let extent: Vec<i64> = box_to_slices(&flat, None)?.iter().map(|(lo, hi)| hi - lo).collect();
+            // Saturating, as `mask_problems` does: a box from one end of the
+            // integers to the other overflowed the subtraction.
+            let extent: Vec<i64> = box_to_slices(&flat, None)?.iter().map(|(lo, hi)| hi.saturating_sub(*lo)).collect();
             let given: Vec<i64> = c.shape().iter().map(|v| *v as i64).collect();
             if given != extent {
                 return Err(Error::coded(
@@ -939,7 +941,10 @@ fn instances_to_masks(payload: &Payload, spatial_shape: &[usize]) -> Result<Mask
         for ((lo, hi), extent) in box_to_slices(&bx, None)?.into_iter().zip(spatial_shape) {
             let (a, b) = (lo.max(0), hi.min(*extent as i64));
             inside.push((a, b));
-            local.push((a - lo, b - lo));
+            // Saturating: no crop fits a box that starts at the end of the
+            // integers (`mask_problems` holds a crop to its box), so only an
+            // object without one gets here, and it does not read `local`.
+            local.push((a.saturating_sub(lo), b.saturating_sub(lo)));
         }
         if inside.iter().any(|(a, b)| b <= a) {
             continue;
@@ -1181,6 +1186,31 @@ mod tests {
         m.insert(2, block(&shape, &[2, 14, 2], 6));
         m.insert(3, block(&shape, &[4, 4, 4], 3));
         m
+    }
+
+    fn wide(crop: Option<ArrayD<bool>>) -> InstanceInput {
+        let bbox = Some([-3e38, 3e38].repeat(3));
+        InstanceInput { class_id: 1, instance_id: 1, mask: None, bbox, crop, score: None }
+    }
+
+    /// A box from one end of the integers to the other: `hi - lo`
+    /// overflowed checking its crop's extent.  The extent saturates, as
+    /// `mask_problems` has it, and no crop is that large.
+    #[test]
+    fn s7_4_a_crop_for_a_box_past_the_integers_is_e405() {
+        let crop = ArrayD::from_elem(IxDyn(&[2, 2, 2]), true);
+        let err = encode_instances(&[wide(Some(crop))], Some(&[4, 5, 6]), true, None).unwrap_err();
+        assert_eq!(err.code(), Some("E405"));
+        assert!(err.to_string().contains(&format!("box spans ({0}, {0}, {0})", i64::MAX)), "{err}");
+    }
+
+    /// Painting a box-only object from past the integers' start subtracted
+    /// `i64::MIN` from the grid's first voxel.  It paints the grid.
+    #[test]
+    fn s7_4_a_box_past_the_integers_decodes_to_the_grid() {
+        let payload = encode_instances(&[wide(None)], Some(&[4, 5, 6]), false, None).unwrap();
+        let masks = payload_to_masks(&payload, Some(&[4, 5, 6]), None).unwrap();
+        assert!(masks[&1].iter().all(|v| *v));
     }
 
     #[test]

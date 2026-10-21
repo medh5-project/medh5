@@ -269,6 +269,43 @@ pub fn basename(name: &str) -> &str {
     name.rsplit('/').next().unwrap_or(name)
 }
 
+/// A chunked dataset of `dims` with no chunk written, as a file can state
+/// one of any extent: for tests of extents past a reader's arithmetic, which
+/// the high-level builder cannot make (it multiplies them).
+#[cfg(test)]
+pub(crate) fn unwritten(group: &hdf5::Group, name: &str, dtype: crate::array::DType, dims: &[u64]) -> hdf5::Dataset {
+    use crate::array::DType;
+    use crate::h5sys::{h5d, h5p, h5s, h5t};
+    let mut chunk = vec![1u64; dims.len()];
+    if let (Some(last), Some(n)) = (chunk.last_mut(), dims.last()) {
+        *last = (*n).min(1024);
+    }
+    let cname = std::ffi::CString::new(name).unwrap();
+    // SAFETY: under HDF5's lock; every identifier made here is closed here.
+    let id = locked(|| unsafe {
+        let tid = match dtype {
+            DType::U8 => *h5t::H5T_NATIVE_UINT8,
+            DType::U16 => *h5t::H5T_NATIVE_UINT16,
+            DType::I16 => *h5t::H5T_NATIVE_INT16,
+            DType::F32 => *h5t::H5T_NATIVE_FLOAT,
+            DType::F64 => *h5t::H5T_NATIVE_DOUBLE,
+            other => panic!("no unwritten {other:?} dataset"),
+        };
+        let dcpl = h5p::H5Pcreate(*h5p::H5P_CLS_DATASET_CREATE);
+        h5p::H5Pset_chunk(dcpl, chunk.len() as i32, chunk.as_ptr());
+        let space = h5s::H5Screate_simple(dims.len() as i32, dims.as_ptr(), std::ptr::null());
+        let id = h5d::H5Dcreate2(group.id(), cname.as_ptr(), tid, space, h5p::H5P_DEFAULT, dcpl, h5p::H5P_DEFAULT);
+        h5s::H5Sclose(space);
+        h5p::H5Pclose(dcpl);
+        if id >= 0 {
+            h5d::H5Dclose(id);
+        }
+        id
+    });
+    assert!(id >= 0, "HDF5 refused an unwritten dataset of {dims:?}");
+    group.dataset(name).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

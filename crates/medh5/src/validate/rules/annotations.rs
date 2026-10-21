@@ -719,13 +719,16 @@ fn overlap_edges(ds: &hdf5::Dataset, ignore_id: i64) -> Result<BTreeSet<(i64, i6
 fn overlap_edges_within(ds: &hdf5::Dataset, ignore_id: i64, budget: usize) -> Result<BTreeSet<(i64, i64)>> {
     let shape = ds.shape();
     let mut edges = BTreeSet::new();
-    if shape.len() < 2 || shape[0] < 2 || shape.iter().product::<usize>() == 0 {
+    // Not `product() == 0`: four layers on a grid of 2**62 voxels wrapped to
+    // exactly that, and the check passed what it never read.
+    if shape.len() < 2 || shape[0] < 2 || shape.contains(&0) {
         return Ok(edges);
     }
     let n_layers = shape[0];
     let rows = shape[1];
     let itemsize = data::dtype(ds)?.itemsize();
-    let per_row = n_layers * shape[2..].iter().product::<usize>() * itemsize;
+    // Saturating: a row past `usize` is a row over any budget.
+    let per_row = shape[2..].iter().fold(n_layers.saturating_mul(itemsize), |n, e| n.saturating_mul(*e));
     let step = (budget / per_row.max(1)).clamp(1, rows);
     let mut start = 0;
     while start < rows {
@@ -974,5 +977,17 @@ mod tests {
         assert_eq!(whole, BTreeSet::from([(1, 2)]));
         assert_eq!(overlap_edges_within(&ds, 65535, 64).unwrap(), whole);
         assert_eq!(overlap_edges_within(&ds, 65535, 1).unwrap(), whole);
+    }
+
+    /// Four layers of `2 x 2**62` voxels are `2**65`, which wrapped to 0:
+    /// the check took the dataset for empty and passed what it never read.
+    /// Its rows are past any read, so the check reports that it cannot read.
+    #[test]
+    fn s7_2_a_dataset_past_the_integers_is_not_taken_for_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = crate::h5::file::marked(|| hdf5::File::create(dir.path().join("layers.h5"))).unwrap();
+        let ds = crate::h5::unwritten(&file, "data", crate::array::DType::U8, &[4, 2, 1 << 62]);
+        let err = overlap_edges(&ds, 65535).unwrap_err();
+        assert!(err.to_string().contains("cannot be read"), "{err}");
     }
 }

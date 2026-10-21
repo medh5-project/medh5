@@ -541,8 +541,11 @@ fn measure(
     let Some(g) = grid else { return Ok((None, None)) };
     if ann.kind() == "instances" {
         let flat: Vec<f64> = obj.bbox.iter().map(|v| f64::from(*v)).collect();
-        let counted: i64 = box_to_slices(&flat, None)?.iter().map(|(a, b)| b - a).product();
-        return Ok((Some(counted as f64 * voxel_volume(&g.spacing)), None));
+        // In floating point: a box from one end of the integers to the other
+        // overflowed the subtraction, and two wide axes the product.
+        let counted: f64 =
+            box_to_slices(&flat, None)?.iter().map(|(a, b)| (i128::from(*b) - i128::from(*a)) as f64).product();
+        return Ok((Some(counted * voxel_volume(&g.spacing)), None));
     }
     Ok((Some(extent.iter().zip(&g.spacing).map(|(e, s)| e * s).product()), None))
 }
@@ -1005,7 +1008,7 @@ fn rounded_out(lo: &[f64], hi: &[f64]) -> Extent {
         .map(|(l, h)| {
             let start = snap(l + 0.5).floor() as i64;
             let stop = snap(h + 0.5).ceil() as i64;
-            (start, stop.max(start + 1))
+            (start, stop.max(start.saturating_add(1)))
         })
         .collect()
 }
@@ -1067,6 +1070,28 @@ mod tests {
         assert_eq!(rounded_out(&[0.5 + 1e-9], &[4.5 - 1e-9]), vec![(1, 5)]);
         assert_eq!(rounded_out(&[3.0], &[3.0]), vec![(3, 4)]);
         assert_eq!(rounded_out(&[2.5], &[2.5]), vec![(3, 4)]);
+    }
+
+    /// A box-only object's volume multiplied `b - a` over its axes, and
+    /// `i64::MAX - i64::MIN` overflowed.  It is measured in floating point.
+    #[test]
+    fn s7_4_a_box_past_the_integers_is_measured_without_a_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w.medh5");
+        crate::annotations::read::tests::wide_box(&path);
+        let sample = crate::sample::open_sample(&path).unwrap();
+        let tracking = build_tracks(&sample, None, true).unwrap();
+        let observation = &tracking.tracks[&1].observations[0];
+        assert_eq!(observation.voxel_count, None);
+        assert_eq!(observation.volume, Some((u64::MAX as f64).powi(3)));
+    }
+
+    /// A bound past the integers saturates to their end, and the voxel a
+    /// degenerate extent keeps overflowed past it.
+    #[test]
+    fn s7_4_an_extent_past_the_integers_rounds_out_without_a_panic() {
+        assert_eq!(rounded_out(&[1e300], &[1e300]), vec![(i64::MAX, i64::MAX)]);
+        assert_eq!(rounded_out(&[-1e300], &[1e300]), vec![(i64::MIN, i64::MAX)]);
     }
 
     #[test]
