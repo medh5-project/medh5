@@ -6,4 +6,4 @@
   `medh5 bench` row. A new example, `docs/examples/bench_threads.py`, times
   the same reads from one, two and four threads, and the guide gives its
   table: opening samples from four threads takes 1.9 times as long as from
-  one, and 3.8 times on the free-threaded build.
+  one, and 3.7 times on the free-threaded build.
