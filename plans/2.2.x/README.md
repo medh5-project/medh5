@@ -46,7 +46,7 @@ The reasons are in [What 2.2.0 taught](what-2.2.0-taught.md), cited below as
 | Codex left 148 findings in classes, and fixing only the named instance meant another round. 69 % of pull-request CI runs were cancelled by the next push. | A finding is swept as a class, with the sweep listed in the reply, and each round is one push (Process). P22-01 does that for the overflow class across the engine. |
 | The fuzz job found a real overflow on release day, and only because the release session looked. Red had become normal. The global-heap hang is excluded in the fuzz target but still hangs a user. | P22-02 stops the hang in the engine and lifts the exclusion. P22-04 makes a red scheduled run something the coordinator sees and the release cannot pass. |
 | Stale docs (`CLAUDE.md`'s format version, `SECURITY.md`'s dependencies, the PyPI links) and a two-day-old red lock refresh were found on release day. | P22-05 adds tests that hold those to the code. The coordinator's sweep covers bot pull requests (Process). |
-| Nothing in 2.2.0 was measured: not free-threading's cost on one thread or several, nor the NIfTI engine. Several paths hold whole volumes. | 2.2.2 measures first (P22-06), then fixes what the measurement shows (P22-07, P22-08, P22-09) and refreshes the published numbers. |
+| Nothing in 2.2.0 was measured: not free-threading's cost on one thread or several, nor the NIfTI engine. Several paths hold whole volumes. | P22-06 measures first, then P22-07, P22-08 and P22-09 fix what the measurement shows and refresh the published numbers: the free-threaded regression in 2.2.1, the rest in 2.2.2. |
 | About ten Codex findings were declined with reasons and never revisited. | P22-03 turns each decline into a test that pins the decision, or a fix. |
 | Sessions could not delete branches or reach Read the Docs. | Two settings for the maintainer ([Before the lanes start](#before-the-lanes-start-the-maintainer)). |
 
@@ -54,16 +54,16 @@ The reasons are in [What 2.2.0 taught](what-2.2.0-taught.md), cited below as
 
 | Release | Holds | Tagged when |
 |---|---|---|
-| 2.2.1 | P22-01 to P22-05: hostile input, declined findings, fuzz as a gate, docs held to code; and P22-07, the free-threaded regression | its six pull requests have merged and the release checklist passes |
-| 2.2.2 | P22-06, P22-08 and P22-09: performance, measured first | their three pull requests have merged |
+| 2.2.1 | P22-01 to P22-05: hostile input, declined findings, fuzz as a gate, docs held to code; P22-06, the measurement; and P22-07, the free-threaded regression it found | its seven pull requests have merged and the release checklist passes |
+| 2.2.2 | P22-08 and P22-09: memory and resampling time | their two pull requests have merged |
 
 2.2.1 does not wait for the rest of the performance work. If P22-06's
 measurement finds a regression against 2.1.0 that is a bug (a slower answer,
 not a missed speedup), its fix may go into 2.2.1 instead. It found one
 (#92): opening samples from four threads on the free-threaded build takes
 3.5 times one thread, twice 2.1.0's, so P22-07 moved to 2.2.1
-([Decisions](#decisions-the-maintainer)). P22-06 itself is a measurement and
-changes no code, so it ships with whichever patch follows its merge.
+([Decisions](#decisions-the-maintainer)). P22-07 waits on P22-06's list, and
+patches are tagged from `main` in order, so P22-06 ships in 2.2.1 too.
 
 ## Work items
 
@@ -223,7 +223,7 @@ changes no code, so it ships with whichever patch follows its merge.
 - **Done when.** Each test fails on 2.2.0's text before the fix. That is shown
   in the pull request by reverting one line.
 
-### P22-06 Measure 2.2.0 (2.2.2, start at once)
+### P22-06 Measure 2.2.0 (2.2.1, start at once)
 
 - **State at 2.2.0.**
   - `docs/guides/performance.md`'s numbers were measured with 2.0.0.
@@ -355,7 +355,7 @@ At most three sessions at once (lessons §1).
   - P22-09 follows P22-08, which owns the same files.
   - Nothing else waits.
 - **Critical paths.** Lane A is 2.2.1's critical path, with lane B's
-  P22-07 beside it. Lane B is 2.2.2's.
+  P22-06 and P22-07 beside it. Lane B's P22-08 and P22-09 are 2.2.2's.
 - **With two sessions.** Merge C into A after A's first pull request.
 
 ### Shared files (2.2.x)
@@ -427,7 +427,8 @@ As 2.2.0's, plus:
    is confirmed by the maintainer.
 4. `cargo semver-checks` and the Python API job show no addition, not only no
    break.
-5. For 2.2.2: `docs/guides/performance.md` names the version it measured.
+5. For 2.2.1 and 2.2.2: `docs/guides/performance.md` names the version it
+   measured.
 
 ## Decisions (the maintainer)
 
