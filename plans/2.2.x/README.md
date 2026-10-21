@@ -46,7 +46,7 @@ The reasons are in [What 2.2.0 taught](what-2.2.0-taught.md), cited below as
 | Codex left 148 findings in classes, and fixing only the named instance meant another round. 69 % of pull-request CI runs were cancelled by the next push. | A finding is swept as a class, with the sweep listed in the reply, and each round is one push (Process). P22-01 does that for the overflow class across the engine. |
 | The fuzz job found a real overflow on release day, and only because the release session looked. Red had become normal. The global-heap hang is excluded in the fuzz target but still hangs a user. | P22-02 stops the hang in the engine and lifts the exclusion. P22-04 makes a red scheduled run something the coordinator sees and the release cannot pass. |
 | Stale docs (`CLAUDE.md`'s format version, `SECURITY.md`'s dependencies, the PyPI links) and a two-day-old red lock refresh were found on release day. | P22-05 adds tests that hold those to the code. The coordinator's sweep covers bot pull requests (Process). |
-| Nothing in 2.2.0 was measured: not free-threading's cost on one thread or several, nor the NIfTI engine. Several paths hold whole volumes. | 2.2.2 measures first (P22-06), then fixes what the measurement shows (P22-07, P22-08) and refreshes the published numbers. |
+| Nothing in 2.2.0 was measured: not free-threading's cost on one thread or several, nor the NIfTI engine. Several paths hold whole volumes. | 2.2.2 measures first (P22-06), then fixes what the measurement shows (P22-07, P22-08, P22-09) and refreshes the published numbers. |
 | About ten Codex findings were declined with reasons and never revisited. | P22-03 turns each decline into a test that pins the decision, or a fix. |
 | Sessions could not delete branches or reach Read the Docs. | Two settings for the maintainer ([Before the lanes start](#before-the-lanes-start-the-maintainer)). |
 
@@ -54,12 +54,16 @@ The reasons are in [What 2.2.0 taught](what-2.2.0-taught.md), cited below as
 
 | Release | Holds | Tagged when |
 |---|---|---|
-| 2.2.1 | P22-01 to P22-05: hostile input, declined findings, fuzz as a gate, docs held to code | its five pull requests have merged and the release checklist passes |
-| 2.2.2 | P22-06 to P22-08: performance, measured first | its three pull requests have merged |
+| 2.2.1 | P22-01 to P22-05: hostile input, declined findings, fuzz as a gate, docs held to code; and P22-07, the free-threaded regression | its six pull requests have merged and the release checklist passes |
+| 2.2.2 | P22-06, P22-08 and P22-09: performance, measured first | their three pull requests have merged |
 
-2.2.1 does not wait for the performance work. If P22-06's measurement finds a
-regression against 2.1.0 that is a bug (a slower answer, not a missed
-speedup), its fix may go into 2.2.1 instead.
+2.2.1 does not wait for the rest of the performance work. If P22-06's
+measurement finds a regression against 2.1.0 that is a bug (a slower answer,
+not a missed speedup), its fix may go into 2.2.1 instead. It found one
+(#92): opening samples from four threads on the free-threaded build takes
+3.5 times one thread, twice 2.1.0's, so P22-07 moved to 2.2.1
+([Decisions](#decisions-the-maintainer)). P22-06 itself is a measurement and
+changes no code, so it ships with whichever patch follows its merge.
 
 ## Work items
 
@@ -250,7 +254,7 @@ speedup), its fix may go into 2.2.1 instead.
     of more than 20 %. Runner timings are too noisy to gate on.
 - **Done when.** The table covers every row above and the page is refreshed.
 
-### P22-07 What free-threading costs, removed where it is excess (2.2.2)
+### P22-07 What free-threading costs, removed where it is excess (2.2.1)
 
 - **State at 2.2.0.**
   - HDF5 runs one call at a time (one global lock).
@@ -258,6 +262,12 @@ speedup), its fix may go into 2.2.1 instead.
     (`medh5/_live.py`).
   - What that costs is unknown until P22-06's thread rows exist. If they
     show neither problem below, P22-07 is dropped and the plan says so.
+  - P22-06's rows (#92): on the free-threaded build, 256 opens with their
+    metadata take 0.52 s on four threads against 0.14 s on one, and 0.25 s
+    on 2.1.0's free-threaded wheel. On every build four threads open at
+    1.7 to 1.9 times one thread, and `portable` (gzip) windows read at 1.1
+    times. Windows of `training` images and `dense()` reads are faster on
+    four threads than on one.
 - **Change.**
   - Find where the time goes (lock hand-offs, detach and attach per HDF5
     call, the views' locks) and remove the excess. For example, take the
@@ -292,6 +302,42 @@ speedup), its fix may go into 2.2.1 instead.
 - **Done when.** Peak memory on P22-06's rows is about one image plus chunk
   buffers, and the measurement is in the pull request.
 
+### P22-09 Resampling time follows the work (2.2.2)
+
+Added on 2026-10-21 from P22-06's ranked list (#92, item 4).
+
+- **State at 2.2.0.**
+  - `resample` of a 512×512×256 `int16` CT to 512×512×512 takes 34 s
+    (nearest), 68 s (linear) and, carrying an eight-class annotation, 57 s,
+    91 s and 323 s (cubic), on one thread. That is about 0.25 µs a target
+    voxel for nearest without annotations, far more than reading the source
+    and writing and compressing the target cost.
+  - Carrying the annotation adds about 23 s whatever the interpolation.
+  - Where the time goes is not known. No profile has been taken.
+- **Change.**
+  - Profile first (the native CLI's `resample`, release profile), and record
+    the profile's top costs in the pull request.
+  - Remove what is excess: per-voxel work that does not depend on the voxel
+    (the inverse transform, the bounds and the kernel set up again for each
+    voxel), conversions between types, copies between blocks, and an
+    annotation carried class by class where one pass would do.
+  - The output stays the same: every voxel, `valid_mask` and carried
+    annotation is what 2.2.0 writes, so the `content_id` is 2.2.0's.
+  - No thread pool, which would be a new behaviour and needs its own
+    decision. No new flag.
+- **Tests.**
+  - A Python test checks the same `content_id` as 2.2.0 for nearest, linear
+    and cubic, with and without a carried annotation.
+  - The existing resample tests and the corpus pass unchanged.
+  - A timing is a benchmark row, not a test.
+- **Done when.**
+  - P22-06's resample rows are measured again in the pull request, before
+    and after, on one machine.
+  - The profile after the change spends most of its time reading,
+    interpolating, writing and compressing, and the pull request names
+    what remains outside those.
+  - Peak memory is no higher than P22-08 leaves it.
+
 ## Lanes
 
 At most three sessions at once (lessons §1).
@@ -299,15 +345,17 @@ At most three sessions at once (lessons §1).
 | Lane | Sequence | Branches |
 |---|---|---|
 | A, hostile input | P22-01 → P22-02 → P22-04 | `p22/overflow`, `p22/global-heap`, `p22/fuzz-gate` |
-| B, performance | P22-06 → P22-07 → P22-08 | `p22/measure`, `p22/threads`, `p22/memory` |
+| B, performance | P22-06 → P22-07 → P22-08 → P22-09 | `p22/measure`, `p22/threads`, `p22/memory`, `p22/resample` |
 | C, settled and documented | P22-05 → P22-03 | `p22/docs-held`, `p22/declined` |
 
 - **Edges.**
   - P22-04's new target runs after P22-01, so that it does not rediscover
     what P22-01 fixes.
   - P22-07 and P22-08 wait on P22-06's list.
+  - P22-09 follows P22-08, which owns the same files.
   - Nothing else waits.
-- **Critical paths.** Lane A is 2.2.1's critical path. Lane B is 2.2.2's.
+- **Critical paths.** Lane A is 2.2.1's critical path, with lane B's
+  P22-07 beside it. Lane B is 2.2.2's.
 - **With two sessions.** Merge C into A after A's first pull request.
 
 ### Shared files (2.2.x)
@@ -316,9 +364,9 @@ At most three sessions at once (lessons §1).
 |---|---|---|
 | `crates/medh5/src/annotations/**`, `geometry/affine.rs` | P22-01 | P22-03 (tests only) |
 | `crates/medh5-sys/**`, the vendored `hdf5-metno-src` and the workspace `[patch.crates-io]`, `fuzz/**`, `.github/workflows/fuzz.yml` | P22-02, then P22-04 | — |
-| `crates/medh5/src/transforms/resample*`, `sample/writer*.rs`, `convert/nifti/**` | P22-08 | P22-01 (checked arithmetic), P22-03 (#84's declines) |
+| `crates/medh5/src/transforms/resample*`, `sample/writer*.rs`, `convert/nifti/**` | P22-08, then P22-09 (`resample*`) | P22-01 (checked arithmetic), P22-03 (#84's declines) |
 | `crates/medh5/src/h5/**`, `crates/medh5-python/src/**`, `medh5/_live.py` | P22-07 | P22-02 (if the guard sits in `h5/`) |
-| `docs/guides/performance.md` | P22-06 | P22-07, P22-08 (their rows) |
+| `docs/guides/performance.md` | P22-06 | P22-07, P22-08, P22-09 (their rows) |
 | `CLAUDE.md`, `CONTRIBUTING.md`, `SECURITY.md`, `pyproject.toml`'s URLs, `.github/workflows/advisories.yml`, `tests/project/test_packaging.py` | P22-05 | P22-02 (`SECURITY.md`'s HDF5 row) |
 
 ## Process
@@ -392,3 +440,5 @@ Settled on 2026-10-21:
   before HDF5 reads.
 - **Older lines.** 2.0.x and 2.1.x are closed, with fixes only on 2.2.x
   (P22-05 says so in the repository).
+- **P22-06's list.** P22-07, the threading fix, goes into 2.2.1. Resampling's
+  speed becomes P22-09, in 2.2.2.
