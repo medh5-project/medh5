@@ -1,0 +1,13 @@
+{
+ "id": "import-offset-inf-extensions",
+ "generator": "medh5 2.1.0",
+ "nibabel": "5.4.2",
+ "numpy": "2.5.4",
+ "outcome": "refused",
+ "error": {
+  "type": "HeaderDataError",
+  "code": null,
+  "message": "failed to read extension header"
+ },
+ "files": []
+}

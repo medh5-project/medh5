@@ -1160,6 +1160,136 @@
    "options": {}
   },
   {
+   "id": "import-extension-past-offset-nii",
+   "call": "from_nifti",
+   "images": [
+    [
+     "image",
+     "inputs/extension-past-offset.nii"
+    ]
+   ],
+   "masks": [],
+   "out": "import-extension-past-offset-nii.medh5",
+   "options": {}
+  },
+  {
+   "id": "import-extension-past-offset",
+   "call": "from_nifti",
+   "images": [
+    [
+     "image",
+     "inputs/extension-past-offset.nii.gz"
+    ]
+   ],
+   "masks": [],
+   "out": "import-extension-past-offset.medh5",
+   "options": {}
+  },
+  {
+   "id": "import-offset-inf-extensions",
+   "call": "from_nifti",
+   "images": [
+    [
+     "image",
+     "inputs/offset-inf-extensions.nii.gz"
+    ]
+   ],
+   "masks": [],
+   "out": "import-offset-inf-extensions.medh5",
+   "options": {}
+  },
+  {
+   "id": "import-offset-inf-cut",
+   "call": "from_nifti",
+   "images": [
+    [
+     "image",
+     "inputs/offset-inf-cut.nii.gz"
+    ]
+   ],
+   "masks": [],
+   "out": "import-offset-inf-cut.medh5",
+   "options": {}
+  },
+  {
+   "id": "import-offset-inf-stray",
+   "call": "from_nifti",
+   "images": [
+    [
+     "image",
+     "inputs/offset-inf-stray.nii.gz"
+    ]
+   ],
+   "masks": [],
+   "out": "import-offset-inf-stray.medh5",
+   "options": {}
+  },
+  {
+   "id": "import-cine-units-0x4a",
+   "call": "from_nifti",
+   "images": [
+    [
+     "image",
+     "inputs/cine-units-0x4a.nii.gz"
+    ]
+   ],
+   "masks": [],
+   "out": "import-cine-units-0x4a.medh5",
+   "options": {}
+  },
+  {
+   "id": "import-cine-units-0x4b",
+   "call": "from_nifti",
+   "images": [
+    [
+     "image",
+     "inputs/cine-units-0x4b.nii.gz"
+    ]
+   ],
+   "masks": [],
+   "out": "import-cine-units-0x4b.medh5",
+   "options": {}
+  },
+  {
+   "id": "import-cine-units-0x52",
+   "call": "from_nifti",
+   "images": [
+    [
+     "image",
+     "inputs/cine-units-0x52.nii.gz"
+    ]
+   ],
+   "masks": [],
+   "out": "import-cine-units-0x52.medh5",
+   "options": {}
+  },
+  {
+   "id": "import-cine-units-0x8a",
+   "call": "from_nifti",
+   "images": [
+    [
+     "image",
+     "inputs/cine-units-0x8a.nii.gz"
+    ]
+   ],
+   "masks": [],
+   "out": "import-cine-units-0x8a.medh5",
+   "options": {}
+  },
+  {
+   "id": "import-cine-units-0xca",
+   "call": "from_nifti",
+   "images": [
+    [
+     "image",
+     "inputs/cine-units-0xca.nii.gz"
+    ]
+   ],
+   "masks": [],
+   "out": "import-cine-units-0xca.medh5",
+   "options": {}
+  },
+  {
    "id": "import-no-mapping-assumed",
    "call": "from_nifti",
    "images": [
@@ -3137,6 +3267,36 @@
    "options": {}
   },
   {
+   "id": "read-cine-units-0x4a.nii.gz",
+   "call": "read_nifti",
+   "path": "inputs/cine-units-0x4a.nii.gz",
+   "options": {}
+  },
+  {
+   "id": "read-cine-units-0x4b.nii.gz",
+   "call": "read_nifti",
+   "path": "inputs/cine-units-0x4b.nii.gz",
+   "options": {}
+  },
+  {
+   "id": "read-cine-units-0x52.nii.gz",
+   "call": "read_nifti",
+   "path": "inputs/cine-units-0x52.nii.gz",
+   "options": {}
+  },
+  {
+   "id": "read-cine-units-0x8a.nii.gz",
+   "call": "read_nifti",
+   "path": "inputs/cine-units-0x8a.nii.gz",
+   "options": {}
+  },
+  {
+   "id": "read-cine-units-0xca.nii.gz",
+   "call": "read_nifti",
+   "path": "inputs/cine-units-0xca.nii.gz",
+   "options": {}
+  },
+  {
    "id": "read-cine-usec.nii.gz",
    "call": "read_nifti",
    "path": "inputs/cine-usec.nii.gz",
@@ -3260,6 +3420,18 @@
    "id": "read-empty.nii",
    "call": "read_nifti",
    "path": "inputs/empty.nii",
+   "options": {}
+  },
+  {
+   "id": "read-extension-past-offset.nii",
+   "call": "read_nifti",
+   "path": "inputs/extension-past-offset.nii",
+   "options": {}
+  },
+  {
+   "id": "read-extension-past-offset.nii.gz",
+   "call": "read_nifti",
+   "path": "inputs/extension-past-offset.nii.gz",
    "options": {}
   },
   {
@@ -3410,6 +3582,24 @@
    "id": "read-not-gzip.nii.gz",
    "call": "read_nifti",
    "path": "inputs/not-gzip.nii.gz",
+   "options": {}
+  },
+  {
+   "id": "read-offset-inf-cut.nii.gz",
+   "call": "read_nifti",
+   "path": "inputs/offset-inf-cut.nii.gz",
+   "options": {}
+  },
+  {
+   "id": "read-offset-inf-extensions.nii.gz",
+   "call": "read_nifti",
+   "path": "inputs/offset-inf-extensions.nii.gz",
+   "options": {}
+  },
+  {
+   "id": "read-offset-inf-stray.nii.gz",
+   "call": "read_nifti",
+   "path": "inputs/offset-inf-stray.nii.gz",
    "options": {}
   },
   {

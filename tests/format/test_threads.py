@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import re
 import select
 import signal
 import threading
@@ -1075,6 +1076,38 @@ class TestOneThreadAtATime:
         assert hammered(calls, rounds=500) == 0
         assert len(payload.describe()["datasets"]) == threads
 
+    def test_a_payloads_size_and_repr_read_whole_while_its_datasets_change(self):
+        """Declined in 2.2.0's review (#76): `nbytes` and `repr` walk the
+        payload's dict through `values()` and `keys()`, which PyO3 takes as
+        a list in one call (`PyDict_Values`, `PyDict_Keys`), under the
+        dict's own lock on a free-threaded build.  No snapshot is needed:
+        threads resizing the dict while others read both never see a dict
+        change size under them."""
+        from medh5.annotations.base import AnnotationPayload
+
+        payload = AnnotationPayload("points")
+        datasets = payload.datasets
+        threads = 4
+
+        def edit(k: int) -> Callable[[], None]:
+            count = iter(range(10**9))
+
+            def call() -> None:
+                n = next(count)
+                datasets[f"{k}.{n}"] = np.zeros(1)
+                if n:
+                    del datasets[f"{k}.{n - 1}"]
+
+            return call
+
+        def read() -> None:
+            assert payload.nbytes >= 0
+            assert repr(payload).startswith("AnnotationPayload(")
+
+        calls = [edit(k) for k in range(threads)] + [read] * threads
+        assert hammered(calls, rounds=500) == 0
+        assert payload.nbytes == threads * np.zeros(1).nbytes
+
     def test_a_replaced_dict_is_not_read_as_the_payloads(self):
         """A thread replacing a payload's datasets, then editing the dict it
         replaced, while others describe the payload: no description holds
@@ -1239,6 +1272,41 @@ class TestShared:
             )
         finally:
             labels.unregister("test-fork-big")
+
+    def test_the_registry_is_reached_only_from_bindings_that_stay_attached(self):
+        """Declined in 2.2.0's review (#76): the engine's registry mutex is
+        left out of the fork barrier, because no thread can hold it across a
+        fork.  Its bindings run attached (none detaches), so a GIL build's
+        fork waits for the GIL and 3.14t's `PyOS_BeforeFork` stops the world
+        first; and nothing else in the engine reaches the registry.  A
+        binding that detaches, or an engine caller, reopens the finding."""
+        from tests.helpers import ROOT
+
+        source = (ROOT / "crates/medh5-python/src/labels.rs").read_text("utf-8")
+        bodies = re.findall(
+            r"^fn (registry_\w+)[^{]*\{\n(.*?)^\}$", source, re.M | re.S
+        )
+        assert {name for name, _ in bodies} == {
+            "registry_available",
+            "registry_load",
+            "registry_load_file",
+            "registry_register",
+            "registry_unregister",
+            "registry_describe",
+        }
+        for name, body in bodies:
+            assert "crate::h5(" not in body and ".detach(" not in body, name
+        engine = ROOT / "crates/medh5/src"
+        callers = [
+            path.relative_to(engine).as_posix()
+            for path in engine.rglob("*.rs")
+            if path.name != "registry.rs"
+            and re.search(
+                r"\bregistry::(?:load|register|unregister|describe|available)",
+                path.read_text("utf-8"),
+            )
+        ]
+        assert callers == []
 
     @pytest.mark.parametrize("threads", [8])
     def test_threads_naming_outputs_from_one_set_get_distinct_names(self, threads: int):

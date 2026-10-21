@@ -979,6 +979,34 @@ class TestBSpline:
         with pytest.raises(MEDH5ValidationError, match="is a B-spline"):
             write_itk_transform(tmp_path / "b.mat", bspline)
 
+    @pytest.mark.parametrize(
+        ("order", "name"),
+        [(3, "BSplineTransform_double_3_3"), (1, "BSplineTransform_double_3_3_1")],
+    )
+    def test_a_bspline_is_named_input_output_then_an_order_other_than_3(
+        self, tmp_path, order, name
+    ):
+        """Declined in 2.2.0's review (#82): the two numbers after the
+        precision are the input and output dimensions, as for every ITK
+        type, and the order follows only when it is not 3 --- what
+        SimpleITK 2.5.6 writes (`BSplineTransform_double_3_3_1` at order 1).
+        Read as dimension then order, `BSplineTransform_double_3_1` would
+        be an order-1 3-D spline; it is a 3-D to 1-D map, refused."""
+        tfm = _bspline_tfm(tmp_path / "b.tfm", _affine_coefficients(), order=order)
+        spline = read_itk_transform(tfm).bspline
+        assert spline is not None and spline.order == order and spline.name == name
+        out = tmp_path / "out.tfm"
+        write_itk_transform(out, read_itk_transform(tfm))
+        assert f"Transform: {name}\n" in out.read_text(encoding="utf-8")
+        with pytest.raises(MEDH5ValidationError, match="maps 3-D points to 1-D"):
+            read_itk_transform(
+                _bspline_tfm(
+                    tmp_path / "o.tfm",
+                    _affine_coefficients(),
+                    name="BSplineTransform_double_3_1",
+                )
+            )
+
 
 class TestItkCrossCheck:
     """Against SimpleITK's own reading and writing (CI's `test-itk` job)."""

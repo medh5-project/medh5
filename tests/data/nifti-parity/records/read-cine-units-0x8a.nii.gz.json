@@ -1,0 +1,94 @@
+{
+ "id": "read-cine-units-0x8a.nii.gz",
+ "generator": "medh5 2.1.0",
+ "nibabel": "5.4.2",
+ "numpy": "2.5.4",
+ "read": {
+  "geometry": {
+   "notes": [
+    [
+     "units",
+     "the file states its spatial unit as 'unreadable', so its lengths were read as millimetres, as NIfTI readers commonly do",
+     {
+      "xyz_units": "unreadable"
+     }
+    ]
+   ],
+   "spacing": [
+    2.0,
+    0.8999999761581421,
+    0.800000011920929
+   ],
+   "origin": [
+    10.0,
+    20.0,
+    5.0
+   ],
+   "direction": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     -1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "coord_system": "LPS",
+   "shape": [
+    3,
+    2,
+    3,
+    4
+   ],
+   "axis_order": [
+    3,
+    2,
+    1,
+    0
+   ],
+   "time_values": [
+    0.0,
+    1.0,
+    2.0
+   ],
+   "time_units": "s",
+   "time_measured": false,
+   "leading_kind": "time",
+   "leading_stated": false,
+   "b_values": null,
+   "channel_field": null,
+   "channel_values": null,
+   "stated_by": null,
+   "squeezed": [],
+   "units": "mm",
+   "dtype": "int16",
+   "rescale": null,
+   "plane_as_volume": null,
+   "header": {
+    "descrip": "",
+    "scl_slope": null,
+    "scl_inter": null
+   }
+  },
+  "array": {
+   "dtype": "<i2",
+   "shape": [
+    3,
+    2,
+    3,
+    4
+   ],
+   "sha256": "886f5cf5b08c89559caa83960c1bdc699e15dd9309944696fb5bfb8061b1dda8"
+  }
+ },
+ "outcome": "ok",
+ "files": []
+}
