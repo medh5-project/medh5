@@ -904,6 +904,20 @@ class TestBSpline:
         ]
         assert not back.is_linear and np.allclose(back.matrix, matrix)
 
+    def test_S10_5_a_lattice_past_the_integers_is_refused(self, tmp_path):
+        """2**32 control points an axis: NumPy's int64 product of the lattice
+        wrapped to 0, which an empty parameter list matched."""
+        fixed = [2.0**32] * 3 + [0.0] * 3 + [1.0] * 3 + [*np.eye(3).ravel()]
+        path = tmp_path / "vast.tfm"
+        path.write_text(
+            "#Insight Transform File V1.0\n#Transform 0\n"
+            "Transform: BSplineTransform_double_3_3\nParameters: \n"
+            "FixedParameters: " + " ".join(repr(float(v)) for v in fixed) + "\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(MEDH5ValidationError, match=f"takes {3 * 2**96} parameters"):
+            read_itk_transform(path)
+
     def test_S10_5_what_a_bspline_cannot_be_imported_as_is_refused(self, tmp_path):
         args: dict[str, Any] = {
             "transform_id": "reg",

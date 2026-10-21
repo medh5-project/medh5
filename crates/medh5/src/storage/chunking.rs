@@ -278,10 +278,13 @@ pub fn field_chunks(grid: &Grid, shape: &[usize], itemsize: usize) -> Result<Opt
 }
 
 /// Diagnostics for `medh5 info`: chunk bytes, count.
+///
+/// A count past 64 bits --- extents a file states, chunked finely --- is
+/// `null`, as an unknown count is, rather than a wrapped one.
 pub fn chunk_report(shape: &[usize], chunks: &[usize], itemsize: usize) -> Value {
-    let chunk_bytes: usize = chunks.iter().product::<usize>() * itemsize;
-    let n_chunks: usize = shape.iter().zip(chunks).map(|(s, c)| s.div_ceil((*c).max(1))).product();
-    let mib = crate::geometry::grid::round_to(chunk_bytes as f64 / 1024.0 / 1024.0, 3);
+    let chunk_bytes = chunks.iter().try_fold(itemsize, |n, c| n.checked_mul(*c));
+    let n_chunks = shape.iter().zip(chunks).try_fold(1usize, |n, (s, c)| n.checked_mul(s.div_ceil((*c).max(1))));
+    let mib = chunk_bytes.map(|b| crate::geometry::grid::round_to(b as f64 / 1024.0 / 1024.0, 3));
     json!({"chunks": chunks, "chunk_bytes": chunk_bytes, "chunk_mib": mib, "n_chunks": n_chunks})
 }
 
@@ -330,6 +333,19 @@ mod tests {
         let c =
             optimize_chunks(&[16, 24, 24], &kinds, &Patch::PerAxis(vec![8, 8, 8]), 2, Some(272_629_760), 0).unwrap();
         assert_eq!(c, vec![16, 8, 8]);
+    }
+
+    /// A file states any extents: a count of `2**62` chunks on each of two
+    /// axes wrapped to 0.  A count past 64 bits is `null`.
+    #[test]
+    fn s14_1_a_chunk_count_past_the_integers_is_null() {
+        let report = chunk_report(&[1 << 62, 1 << 62], &[1, 1], 1);
+        assert_eq!(report["n_chunks"], Value::Null);
+        assert_eq!(report["chunk_bytes"], json!(1));
+        let report = chunk_report(&[4, 4], &[1 << 62, 1 << 62], 8);
+        assert_eq!((report["n_chunks"].clone(), report["chunk_bytes"].clone()), (json!(1), Value::Null));
+        assert_eq!(report["chunk_mib"], Value::Null);
+        assert_eq!(chunk_report(&[64, 64], &[32, 16], 2)["n_chunks"], json!(8));
     }
 
     /// The ceiling holds from the start: the patch rounded up to a power of

@@ -180,7 +180,14 @@ pub fn slabs_within(shape: &[usize], itemsize: usize, prefix: &[usize], budget: 
     if rest.is_empty() || rest[0] == 0 {
         return out;
     }
-    let per_row = rest[1..].iter().product::<usize>() * itemsize;
+    // A file states any extents, and a row past `usize` wrapped.  No read
+    // holds one, in slabs or whole: the one selection of all of it is
+    // refused by the read, as more than a process can hold.
+    let Some(per_row) = rest[1..].iter().try_fold(itemsize, |n, e| n.checked_mul(*e)) else {
+        let mut sel: Vec<Index> = prefix.iter().map(|i| Index::At(*i as i64)).collect();
+        sel.push(Index::Slice(Slice::full()));
+        return vec![sel];
+    };
     if per_row > budget && rest.len() > 1 {
         for index in 0..rest[0] {
             let mut p = prefix.to_vec();
@@ -363,6 +370,17 @@ mod tests {
             let read: usize = sels.iter().map(|sel| selection_bytes(&shape, itemsize, sel)).sum();
             assert_eq!(read, whole, "{shape:?}");
         }
+    }
+
+    /// A row of `2**62 x 4` two-byte values wrapped its size to 0, and the
+    /// whole dataset became one slab.  It is still one selection, now on
+    /// purpose: no slab of it can be held, and the read refuses it.
+    #[test]
+    fn s14_a_row_past_the_integers_is_one_selection_the_read_refuses() {
+        let sels = slabs_within(&[3, 1 << 62, 4], 2, &[], 4096);
+        assert_eq!(sels, vec![vec![Index::Slice(Slice::full())]]);
+        let sels = slabs_within(&[2, 3, 1 << 62, 4], 2, &[1], 4096);
+        assert_eq!(sels, vec![vec![Index::At(1), Index::Slice(Slice::full())]]);
     }
 
     #[test]

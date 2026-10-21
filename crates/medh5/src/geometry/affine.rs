@@ -203,7 +203,9 @@ pub fn box_to_slices(bbox: &[f64], shape: Option<&[usize]>) -> Result<Vec<SliceB
         let mut start = (bbox[2 * k] + 0.5).floor() as i64;
         let mut stop = (bbox[2 * k + 1] + 0.5).floor() as i64;
         if let Some(extent) = shape {
-            let n = extent[k] as i64;
+            // An extent past `i64::MAX` wrapped negative, and `clamp` panics
+            // on a range whose bounds are reversed.  No index reaches it.
+            let n = i64::try_from(extent[k]).unwrap_or(i64::MAX);
             start = start.clamp(0, n);
             stop = stop.clamp(start, n);
         }
@@ -327,6 +329,15 @@ mod tests {
             }
         }
         assert_eq!(box_to_slices(&[0.0, 1.0, -0.5, 9.5], Some(&[4, 10])).unwrap(), vec![(0, 1), (0, 10)]);
+    }
+
+    /// An extent past `i64::MAX` wrapped negative, and clamping a slice to
+    /// it panicked on reversed bounds.  No index reaches it: it clips nothing.
+    #[test]
+    fn s8_1_an_extent_past_the_integers_clips_without_a_panic() {
+        let wide = [1usize << 63, usize::MAX];
+        assert_eq!(box_to_slices(&[-0.5, 3.5, 2.0, 1e300], Some(&wide)).unwrap(), vec![(0, 4), (2, i64::MAX)]);
+        assert_eq!(box_to_slices(&[-1e300, 1e300], Some(&[usize::MAX])).unwrap(), vec![(0, i64::MAX)]);
     }
 
     #[test]

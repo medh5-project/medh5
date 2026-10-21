@@ -411,3 +411,30 @@ fn s6_links_from_and_to_are_the_links_leaving_and_arriving() {
     assert_eq!(clinical.links_from("event", "no-such-event").count(), 0);
     assert_eq!(clinical.links_to("image", "no-such-image").count(), 0);
 }
+
+/// A link's span is any `uint64` its file states: the validator found where
+/// it falls in the text buffer as `start + span`, which wrapped past the
+/// buffer's end into it.  A span past the document is E814.
+#[test]
+fn s6_a_span_past_the_integers_is_e814_not_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = worked(dir.path());
+    {
+        let file = medh5::hdf5::File::open_rw(&path).unwrap();
+        let links = file.group("clinical/links").unwrap();
+        // The second document, which starts past the buffer's first byte:
+        // the first starts at 0, and nothing is added to it.
+        let ids = links.dataset("source_id/data").unwrap();
+        let mut bytes: Vec<u8> = ids.read_raw().unwrap();
+        let at = bytes.windows(15).position(|w| w == b"report0_text_v1").unwrap();
+        bytes[at + 14] = b'2';
+        ids.write(&bytes).unwrap();
+        for name in ["source_start", "source_end"] {
+            let valid: Vec<u8> = links.dataset(&format!("valid/{name}")).unwrap().read_raw().unwrap();
+            let far: Vec<u64> = valid.iter().map(|v| if *v == 1 { u64::MAX } else { 0 }).collect();
+            links.dataset(name).unwrap().write(&far).unwrap();
+        }
+    }
+    let report = validate_file(&path, "semantic", None).unwrap();
+    assert!(report.codes().contains(&"E814".to_string()), "{:?}", report.codes());
+}

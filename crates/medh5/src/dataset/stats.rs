@@ -271,7 +271,7 @@ impl DatasetStats {
             self.physical = other.physical;
         }
         self.samples += other.samples;
-        self.total_voxels += other.total_voxels;
+        self.total_voxels = self.total_voxels.saturating_add(other.total_voxels);
         self.failures.extend(other.failures.iter().cloned());
         for (key, moments) in &other.images {
             self.images.entry(key.clone()).or_default().merge(moments);
@@ -281,7 +281,7 @@ impl DatasetStats {
             if mine.key.is_none() {
                 mine.key.clone_from(&stats.key);
             }
-            mine.voxels += stats.voxels;
+            mine.voxels = mine.voxels.saturating_add(stats.voxels);
             mine.present_in += stats.present_in;
             mine.examined_in += stats.examined_in;
         }
@@ -509,7 +509,9 @@ pub fn stats_for(path: &Path, options: &StatsOptions) -> Result<DatasetStats> {
             if stats.key.is_none() {
                 stats.key = label_set.and_then(|l| l.by_id(class_id)).map(|c| c.key.clone());
             }
-            stats.voxels += voxels;
+            // Saturating: an index's counts are any `int64` its file states,
+            // and three of `2**63 - 1` wrapped the sum.
+            stats.voxels = stats.voxels.saturating_add(voxels);
             if voxels > 0 {
                 present.insert(class_id);
             }
@@ -524,7 +526,10 @@ pub fn stats_for(path: &Path, options: &StatsOptions) -> Result<DatasetStats> {
     }
     // Each measured image's own grid, once.
     for grid_id in measured {
-        out.total_voxels += sample.grid(&grid_id)?.spatial_shape().iter().map(|v| *v as u64).product::<u64>();
+        // A grid holds at most `2**63 - 1` voxels (§3.1); a cohort's sum
+        // saturates rather than wraps.
+        let voxels = sample.grid(&grid_id)?.spatial_shape().iter().map(|v| *v as u64).product::<u64>();
+        out.total_voxels = out.total_voxels.saturating_add(voxels);
     }
     Ok(out)
 }
@@ -556,8 +561,10 @@ fn for_each_block(
     // The spatial axes trail (§3.1), so the first of them is this one.
     let shape = image.shape()?;
     let axis = shape.len().saturating_sub(spatial.len());
-    let plane: usize = shape.iter().enumerate().filter(|(i, _)| *i != axis).map(|(_, n)| *n).product();
-    let fits = (SLAB_BYTES / (plane.max(1) * std::mem::size_of::<f64>())).max(1);
+    // Saturating: an image's extents are any its file states, and a plane
+    // past `usize` is a plane over the slab, read one at a time.
+    let plane = shape.iter().enumerate().filter(|(i, _)| *i != axis).fold(1usize, |n, (_, e)| n.saturating_mul(*e));
+    let fits = (SLAB_BYTES / plane.max(1).saturating_mul(std::mem::size_of::<f64>())).max(1);
     let per_read = image.chunks()?.and_then(|c| c.get(axis).copied()).unwrap_or(fits).clamp(1, fits);
     let stride = stride.max(1);
     for start in (0..spatial[0]).step_by(per_read) {
@@ -682,6 +689,48 @@ mod tests {
         #[allow(deprecated)] // the 2.x answer, held until 3.0
         let legacy = drawn.prevalence();
         assert_eq!(legacy, 0.0);
+    }
+
+    /// An image's extents are any its file states: a plane of `2**62 x 2**62`
+    /// values wrapped to 0, and the read was sized from that.  The plane is
+    /// read one at a time, and refused as more than a process holds.
+    #[test]
+    fn s11_3_an_image_past_the_integers_is_refused_not_a_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w.medh5");
+        crate::annotations::read::tests::wide_box(&path);
+        {
+            let file = crate::h5::file::open_rw(&path).unwrap();
+            let images = file.group("images").unwrap();
+            let ct = images.dataset("CT").unwrap();
+            let kept: Vec<_> = crate::h5::attrs::names(&ct)
+                .unwrap()
+                .into_iter()
+                .map(|name| (crate::h5::attrs::read(&ct, &name).unwrap().unwrap(), name))
+                .collect();
+            drop(ct);
+            images.unlink("CT").unwrap();
+            let ct = crate::h5::unwritten(&images, "CT", crate::array::DType::I16, &[4, 1 << 62, 1 << 62]);
+            for (value, name) in kept {
+                crate::h5::attrs::write(&ct, &name, &value).unwrap();
+            }
+            drop(images);
+            file.close().unwrap();
+        }
+        let err = stats_for(&path, &StatsOptions::default()).unwrap_err();
+        assert!(err.to_string().contains("more than this process can hold"), "{err}");
+    }
+
+    /// An index's counts are any `int64` its file states: three of
+    /// `2**63 - 1` wrapped a class's sum, as two grids of `2**63 - 1` voxels
+    /// did the cohort's.  A sum past 64 bits saturates.
+    #[test]
+    fn s11_3_a_count_past_the_integers_saturates() {
+        let mut a = DatasetStats { total_voxels: u64::MAX - 1, ..DatasetStats::default() };
+        a.classes.insert(1, ClassStats { voxels: i64::MAX as u64 * 2, ..ClassStats::new(1) });
+        let b = a.clone();
+        a.merge(&b).unwrap();
+        assert_eq!((a.total_voxels, a.classes[&1].voxels), (u64::MAX, u64::MAX));
     }
 
     #[test]

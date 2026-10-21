@@ -130,6 +130,11 @@ class TestBoxConvention:
                 box_to_slices(box, shape)
             assert exc.value.code == "E406"
 
+    def test_S8_1_an_extent_past_the_integers_clips_nothing(self):
+        """An extent past ``2**63 - 1`` wrapped negative, and clamping a
+        slice to it panicked."""
+        assert box_to_slices(np.array([[-0.5, 3.5]]), (2**63,)) == (slice(0, 4),)
+
     def test_S8_1_extent_is_voxel_count(self):
         box = slices_to_box([slice(12, 40), slice(0, 3)])
         extents = box[:, 1] - box[:, 0]

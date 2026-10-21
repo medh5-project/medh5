@@ -64,7 +64,15 @@ impl Instance {
     pub fn voxel_count(&self) -> Result<u64> {
         match &self.mask {
             Some(mask) => Ok(mask.iter().filter(|v| **v).count() as u64),
-            None => Ok(self.slices()?.iter().map(|(a, b)| (b - a).max(0) as u64).product()),
+            // Exact or refused, never wrapped: an axis from one end of the
+            // integers to the other spans 2**64 - 1 voxels, which a `u64`
+            // holds, and two such axes more than one counts.
+            None => self.slices()?.iter().try_fold(1u64, |n, (a, b)| {
+                let extent = (i128::from(*b) - i128::from(*a)).max(0) as u64;
+                n.checked_mul(extent).ok_or_else(|| {
+                    Error::Value(format!("{}: its box spans more voxels than 64 bits count", self.repr()))
+                })
+            }),
         }
     }
 
@@ -1834,7 +1842,10 @@ impl Annotation {
                     empty = true;
                     break;
                 }
-                local.push(((lo - have_lo) as usize, (hi - have_lo) as usize));
+                // Saturating, for the same reason as the painter's
+                // (`instances_to_masks`): only a crop reads it, and none fits
+                // a box that starts at the end of the integers.
+                local.push((lo.saturating_sub(*have_lo) as usize, hi.saturating_sub(*have_lo) as usize));
                 target.push(((lo - want_lo) as usize, (hi - want_lo) as usize));
             }
             if empty {
@@ -1934,4 +1945,70 @@ pub fn box_at(boxes: &ArrayD<f32>, i: usize) -> Result<Array2<f32>> {
     let row = boxes.index_axis(Axis(0), i).to_owned();
     let s = row.len() / 2;
     Ok(row.into_shape_with_order((s, 2))?)
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use crate::annotations::InstanceInput;
+    use crate::sample::{create, open_sample, GridOptions, SegmentationOptions, SegmentationSource};
+
+    #[allow(unused_imports)]
+    use super::*;
+
+    /// A box-only object from one end of the integers to the other on every
+    /// axis, as a file can state one: `float32` bounds of +-3e38 floor to
+    /// `i64::MIN` and `i64::MAX`.  Written with a mask, which is then
+    /// removed and the box widened.
+    pub(crate) fn wide_box(path: &std::path::Path) {
+        let mut w = create(path, Some("wide"), None, "portable", &[]).unwrap();
+        w.add_grid("g", &[4, 5, 6], &[1.0; 3], GridOptions::default()).unwrap();
+        let ct = crate::array::NdArray::from_vec(&[4, 5, 6], vec![0i16; 120]).unwrap();
+        w.add_image("CT", &ct, "g", "CT", crate::sample::ImageOptions::default()).unwrap();
+        let mut mask = ndarray::ArrayD::from_elem(ndarray::IxDyn(&[4, 5, 6]), false);
+        mask[[1, 1, 1]] = true;
+        let object =
+            InstanceInput { class_id: 1, instance_id: 1, mask: Some(mask), bbox: None, crop: None, score: None };
+        let source = SegmentationSource::Instances(vec![object]);
+        w.add_segmentation("lesions", "g", source, SegmentationOptions::default()).unwrap();
+        w.commit(true).unwrap();
+        let file = crate::h5::file::open_rw(path).unwrap();
+        let group = file.group("annotations/lesions").unwrap();
+        for name in ["mask_data", "mask_offsets", "mask_shapes"] {
+            group.unlink(name).unwrap();
+        }
+        let wide = ndarray::Array3::from_shape_vec((1, 3, 2), [-3e38f32, 3e38].repeat(3)).unwrap();
+        group.dataset("boxes").unwrap().write(&wide).unwrap();
+        drop(group);
+        file.close().unwrap();
+    }
+
+    /// The box spans `2**64 - 1` voxels an axis, which `b - a` overflowed:
+    /// one axis of it is a count a `u64` holds, three are refused.
+    #[test]
+    fn s7_4_a_box_past_the_integers_counts_exactly_or_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        wide_box(&dir.path().join("w.medh5"));
+        let sample = open_sample(&dir.path().join("w.medh5")).unwrap();
+        let mut object = sample.annotation("lesions").unwrap().instances().unwrap().remove(0);
+        let err = object.voxel_count().unwrap_err();
+        assert!(err.to_string().contains("more voxels than 64 bits count"), "{err}");
+        object.bbox = ndarray::array![[-3e38f32, 3e38]];
+        assert_eq!(object.voxel_count().unwrap(), u64::MAX);
+        object.bbox = ndarray::array![[-3e38f32, 3e38], [1.5, 2.5]];
+        assert_eq!(object.voxel_count().unwrap(), u64::MAX);
+        object.bbox = ndarray::array![[-3e38f32, 3e38], [1.5, 3.5]];
+        assert!(object.voxel_count().is_err(), "twice 2**64 - 1");
+    }
+
+    /// Painting the object subtracted its box's start from the window's:
+    /// `0 - i64::MIN` overflowed.  It paints the whole grid.
+    #[test]
+    fn s7_4_a_box_past_the_integers_paints_the_grid() {
+        let dir = tempfile::tempdir().unwrap();
+        wide_box(&dir.path().join("w.medh5"));
+        let sample = open_sample(&dir.path().join("w.medh5")).unwrap();
+        let ann = sample.annotation("lesions").unwrap();
+        let mask = ann.dense_class(1, &ann.window(None).unwrap()).unwrap();
+        assert_eq!((mask.shape(), mask.iter().all(|v| *v)), (&[4, 5, 6][..], true));
+    }
 }

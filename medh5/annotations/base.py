@@ -9,6 +9,7 @@ construction.
 
 from __future__ import annotations
 
+import math
 import warnings
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
@@ -76,7 +77,9 @@ class Instance:
     @property
     def voxel_count(self) -> int:
         if self.mask is None:
-            return int(np.prod([s.stop - s.start for s in self.slices], dtype=np.int64))
+            # Python's integers: a box from one end of the int64 range to
+            # the other overflowed NumPy's product.
+            return math.prod(s.stop - s.start for s in self.slices)
         return int(self.mask.sum())
 
     def __eq__(self, other: object) -> bool:

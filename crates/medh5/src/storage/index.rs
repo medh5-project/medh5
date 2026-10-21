@@ -209,6 +209,15 @@ pub fn build_index(
     let ids = annotation.resolve_classes(classes)?;
     let mut rng = Rng::new(seed);
     let shape = annotation.spatial_shape()?;
+    // `fg_coords` are `int32` (§14.3): an index past them wrapped, so a grid
+    // with one has no index.
+    if let Some(n) = shape.iter().find(|n| **n > 1 << 31) {
+        return Err(Error::Value(format!(
+            "annotation {}: an index stores int32 coordinates (§14.3), and an axis of {n} voxels has indices past \
+             them",
+            repr_str(&annotation.ann_id)
+        )));
+    }
     let factor = occupancy_factor.filter(|f| *f > 0);
     let mut tallies: Vec<Tally> = ids.iter().map(|_| Tally::new(&shape, factor)).collect();
     let mut picked: Vec<Array2<i32>> = Vec::with_capacity(ids.len());
@@ -519,4 +528,28 @@ pub fn read_indices(root: &hdf5::Group) -> Result<IndexMap<String, SamplingIndex
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `fg_coords` are `int32`, and a coordinate past them wrapped: a grid
+    /// with an axis of more than `2**31` voxels has no index.
+    #[test]
+    fn s14_3_a_grid_past_int32_coordinates_has_no_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w.medh5");
+        crate::annotations::read::tests::wide_box(&path);
+        {
+            let file = crate::h5::file::open_rw(&path).unwrap();
+            let grid = file.group("grids/g").unwrap();
+            attrs::write(&grid, "shape", &AttrValue::ints(&[(1 << 31) + 1, 5, 6])).unwrap();
+            drop(grid);
+            file.close().unwrap();
+        }
+        let sample = crate::sample::open_sample(&path).unwrap();
+        let err = build_index(&sample.annotation("lesions").unwrap(), None, 16, None, 0, None).unwrap_err();
+        assert!(err.to_string().contains("an axis of 2147483649 voxels"), "{err}");
+    }
 }

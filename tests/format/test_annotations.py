@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 
 import medh5
-from medh5.annotations.base import AnnotationPayload
+from medh5.annotations.base import AnnotationPayload, Instance
 from medh5.annotations.geometric import Polygon
 from medh5.annotations.voxel import (
     InstanceInput,
@@ -229,6 +229,14 @@ class TestInstanceMasks:
             sample.annotations["inst"].dense()
         assert exc.value.code == "E405"
         assert _codes(path) == ["E405"]
+
+    def test_S7_4_a_box_past_the_integers_counts_exactly(self) -> None:
+        """A box-only object's voxels were NumPy's int64 product of its
+        extents: an axis from one end of the integers to the other is
+        ``2**64 - 1`` voxels, which overflowed it."""
+        box = np.array([[-3e38, 3e38]] * 3, np.float32)
+        wide = Instance(index=0, instance_id=1, class_id=1, box=box)
+        assert wide.voxel_count == (2**64 - 1) ** 3
 
     def test_S7_4_a_mask_larger_than_the_grid_is_refused_before_it_is_allocated(
         self, objects: Path, tmp_path: Path

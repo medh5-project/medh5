@@ -366,7 +366,9 @@ def _bspline(
             "direction columns that are not orthonormal; a grid needs both"
         )
     p = np.array([float(v) for v in parameters])
-    count = n * int(np.prod(size))
+    # Python's integers: NumPy's product is int64, and a lattice of
+    # 2**32 x 2**32 control points wrapped it to 0.
+    count = n * math.prod(size)
     if p.size != count:
         raise MEDH5ValidationError(
             f"{where}: {name} on a lattice of {list(size)} takes {count} "

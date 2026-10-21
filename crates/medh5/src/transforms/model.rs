@@ -928,11 +928,18 @@ impl Transform {
         let selection = roi_selection(grid, roi.unwrap_or_default(), &owner)?;
         let vector_space = self.vector_space()?;
         let counts: Vec<usize> = selection.iter().map(|(a, b, step)| (b - a).div_ceil(*step)).collect();
+        // A field's grid is any size its file states: the answer is refused
+        // where no buffer holds it, before its size wraps or aborts.
+        data::ensure_holdable(&owner, &counts, size_of::<f64>())?;
         let mut out = ArrayD::<f64>::zeros(IxDyn(&counts));
         // The window on the other axes is the same for every slab.
         let rest: Vec<(usize, usize)> =
             selection.iter().zip(&spatial).skip(1).map(|((a, b, step), n)| halo(*a, *b, *step, *n)).collect();
-        let plane = rest.iter().map(|(a, b)| b - a).product::<usize>() * spatial.len() * size_of::<f64>();
+        let plane = rest
+            .iter()
+            .map(|(a, b)| b - a)
+            .chain([spatial.len(), size_of::<f64>()])
+            .fold(1usize, usize::saturating_mul);
         let planes = (budget / plane.max(1)).max(3);
         let (start, _, step) = selection[0];
         let per_slab = ((planes - 2) / step).max(1);
@@ -1098,6 +1105,10 @@ impl Transform {
         self.require_kind("bspline", "to_displacement_field()")?;
         let spatial = grid.spatial_shape();
         let s = grid.n_spatial();
+        // The grid is any size its file states: refused where the field
+        // cannot be held, before `total * s` wraps or the allocation aborts.
+        let shape: Vec<usize> = std::iter::once(s).chain(spatial.iter().copied()).collect();
+        data::ensure_holdable(&format!("a field on {} voxels", repr_int_tuple(&spatial)), &shape, size_of::<f64>())?;
         let total: usize = spatial.iter().product();
         let mut coords = Vec::with_capacity(total * s);
         for flat in 0..total {
@@ -1112,8 +1123,6 @@ impl Transform {
         let world = grid.index_to_world(&coords)?;
         let world = ArrayD::from_shape_vec(IxDyn(&[total, s]), world)?;
         let displacement = self.displacement_at(&world)?;
-        let mut shape = vec![s];
-        shape.extend(&spatial);
         let mut out = ArrayD::<f32>::zeros(IxDyn(&shape));
         for (flat, row) in displacement.outer_iter().enumerate() {
             let mut rest = flat;
@@ -1783,6 +1792,57 @@ mod tests {
         assert!(!Arc::ptr_eq(&alone.cubic, &cwarp.cubic));
         let inverse = Transform::inverse_of(both.clone());
         assert!(Arc::ptr_eq(&inverse.kept, &both.kept), "an inverse opens through the sample's caches");
+    }
+
+    /// A field on a grid of `2**62` voxels, as a file can state one: its
+    /// Jacobian is `2**65` bytes, which the allocation could not size.  It
+    /// is refused as more than a process holds.
+    #[test]
+    fn s10_a_jacobian_past_the_integers_is_refused_not_a_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let pair = crate::bench::synthetic_pair(dir.path(), &[9, 7, 6], "portable", 3).unwrap();
+        let huge = [1i64 << 30, 1 << 31, 2];
+        {
+            let file = crate::h5::file::open_rw(&pair).unwrap();
+            attrs::write(&file.group("grids/g_tp0").unwrap(), "shape", &AttrValue::ints(&huge)).unwrap();
+            let warp = file.group("transforms/warp").unwrap();
+            warp.unlink("field").unwrap();
+            crate::h5::unwritten(&warp, "field", crate::array::DType::F32, &[3, 1 << 30, 1 << 31, 2]);
+            drop(warp);
+            file.close().unwrap();
+        }
+        let sample = crate::sample::open_sample(&pair).unwrap();
+        let err = sample.transform("warp").unwrap().jacobian_determinant(None).unwrap_err();
+        assert!(err.to_string().contains("more than this process can hold"), "{err}");
+    }
+
+    /// A spline sampled onto a grid of `2**62` voxels: `total * s` wrapped,
+    /// and the allocation it sized could not be made.  Refused as more than
+    /// a process holds.
+    #[test]
+    fn s10_a_field_past_the_integers_is_refused_not_a_panic() {
+        use crate::sample::{create, GridOptions, ImageOptions, TransformSpec};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ffd.medh5");
+        let mut w = create(&path, Some("ffd"), None, "portable", &[]).unwrap();
+        w.add_grid("ct", &[4, 4, 4], &[1.0; 3], GridOptions::default()).unwrap();
+        let ct = crate::array::NdArray::from_vec(&[4, 4, 4], vec![0i16; 64]).unwrap();
+        w.add_image("CT", &ct, "ct", "CT", ImageOptions::default()).unwrap();
+        w.add_grid("cp", &[6, 6, 6], &[3.0; 3], GridOptions::default()).unwrap();
+        let spec = TransformSpec {
+            control_points: Some(ArrayD::<f64>::zeros(IxDyn(&[3, 6, 6, 6]))),
+            cp_grid: Some("cp".into()),
+            order: Some(3),
+            ..Default::default()
+        };
+        w.add_transform("ffd", "bspline", "a", "b", spec).unwrap();
+        w.commit(true).unwrap();
+        let sample = crate::sample::open_sample(&path).unwrap();
+        let mut huge = sample.grid("ct").unwrap().clone();
+        huge.shape = vec![1 << 30, 1 << 31, 2];
+        huge.check().unwrap();
+        let err = sample.transform("ffd").unwrap().to_displacement_field(&huge).unwrap_err();
+        assert!(err.to_string().contains("more than this process can hold"), "{err}");
     }
 
     /// A region was read and differenced as if it were the whole field, one-
