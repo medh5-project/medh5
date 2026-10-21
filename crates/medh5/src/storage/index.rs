@@ -549,7 +549,7 @@ mod tests {
             file.close().unwrap();
         }
         let sample = crate::sample::open_sample(&path).unwrap();
-        let err = build_index(&sample.annotation("lesions").unwrap(), None, 16, None, 0, None).unwrap_err();
+        let err = build_index(sample.annotation("lesions").unwrap(), None, 16, None, 0, None).unwrap_err();
         assert!(err.to_string().contains("an axis of 2147483649 voxels"), "{err}");
     }
 }
