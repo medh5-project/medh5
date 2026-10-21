@@ -12,7 +12,8 @@ The reasons are in [What 2.2.0 taught](what-2.2.0-taught.md), cited below as
   plus #86).
 - **Line.**
   - `main` is the 2.2.x line while no 2.3.0 is planned, and each patch is
-    tagged from it (`v2.2.1`, `v2.2.2`, …).
+    tagged from it (`v2.2.1`, `v2.2.2`, …); the maintainer settled this on
+    2026-10-21.
   - If a feature must land before the series ends, `release/2.2` is cut from
     the last 2.2.x tag first, and the rest of the series moves there, as
     [the 2.0.x line](../README.md#the-20x-line) does.
@@ -330,7 +331,6 @@ Made to plans/README.md with this plan, and summarised here.
    itself.
 3. **The queue timeout.** Consider raising it to 150 minutes. #74 passed in
    126 and was dropped at 120.
-4. **The open question below.**
 
 ## Release checklist (the coordinator)
 
@@ -345,17 +345,14 @@ As 2.2.0's, plus:
    break.
 5. For 2.2.2: `docs/guides/performance.md` names the version it measured.
 
-## Decisions and open questions (the maintainer)
+## Decisions (the maintainer)
 
 Settled on 2026-10-21:
 
+- **The line.** Patches are tagged from `main`, and `main` takes only what a
+  patch may change until a 2.3.0 is planned. `release/2.2` is cut only if a
+  feature must land first.
 - **The global heap (P22-02).** HDF5 is patched in `medh5-sys`, not guarded
   by a check before HDF5 reads.
 - **Older lines.** 2.0.x and 2.1.x are closed, with fixes only on 2.2.x
   (P22-05 says so in the repository).
-
-Open, and until answered the plan proceeds on the recommendation:
-
-1. **The line.** Patches are tagged from `main`, and `main` takes only fixes
-   until a 2.3.0 is planned (recommended, and how this plan is written). The
-   alternative is to cut `release/2.2` now and keep `main` open.
