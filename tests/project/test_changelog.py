@@ -263,6 +263,12 @@ def test_check_lists_a_promise_about_a_later_release(tmp_path, monkeypatch, caps
         "The last release to\n  support it.",
         "Removed in 3.0.",
         "An upcoming minor.",
+        "An annotation reserved for a later minor.",
+        "Kept for a later\n  patch.",
+        "A subsequent major drops it.",
+        "A deprecation that warns until 3.0.",
+        "Running without it is planned for 2.2.",
+        "`version::KINDS` is deprecated in the Rust crate.",
     ):
         assert changelog._PROMISE.search(line), line
     for line in (
@@ -271,5 +277,9 @@ def test_check_lists_a_promise_about_a_later_release(tmp_path, monkeypatch, caps
         "The latest release.",
         "It was removed from the list.",
         "The last line is supported.",
+        "Until now no fixture exercised it.",
+        "Following a chain of links.",
+        "It was reserved for the clinical profile.",
+        "The later revision is read.",
     ):
         assert not changelog._PROMISE.search(line), line

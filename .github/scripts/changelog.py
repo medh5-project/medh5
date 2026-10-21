@@ -77,11 +77,16 @@ _CODE = re.compile(r"`+[^`\n]*`+")
 # its release does; a promise about the next one is the maintainer's to make,
 # and 2.2.0's said the converters move onto the engine "next" after they had.
 # The phrases are plans/README.md's ("will require", "the last line to
-# support", "removed in") and their kin.  An entry wraps at 80 columns, so a
-# phrase may span two lines.
+# support", "removed in") and the forms the changelog has used: a later or
+# coming release of any kind ("a later minor"), a version something waits for
+# ("until 3.0", "planned for 2.2"), and a deprecation, which promises a
+# removal.  An entry wraps at 80 columns, so a phrase may span two lines.
+_RELEASE = r"(?:releases?|versions?|minors?|majors?|patch(?:es)?|lines?)"
 _PROMISE = re.compile(
-    r"\b(?:will|next|future|upcoming|later\s+(?:releases?|versions?)"
-    r"|removed\s+in|last\s+(?:line|release|version|minor)\s+to\s+support)\b",
+    r"\b(?:will|next|future|upcoming|deprecat\w*"
+    rf"|(?:later|subsequent|coming|forthcoming)\s+{_RELEASE}"
+    r"|removed\s+in|until\s+v?\d|(?:planned|scheduled|slated)\s+for"
+    r"|last\s+(?:line|release|version|minor)\s+to\s+support)\b",
     re.I,
 )
 
