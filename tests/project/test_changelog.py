@@ -253,7 +253,14 @@ def test_check_lists_a_promise_about_a_later_release(tmp_path, monkeypatch, caps
     out = capsys.readouterr().out
     assert "a promise for the maintainer to confirm" in out
     assert "w22-02-native-nifti-import.md:5:" in out and "lead.md:1:" in out
-    # plans/README.md's examples of a promise, and their kin.
+
+    # plans/README.md's examples of a promise, and their kin, read as
+    # `promises()` reads a fragment: a code span kept only as a version.
+    def promised(line: str) -> bool:
+        return bool(
+            changelog._PROMISE.search(changelog._CODE.sub(changelog._operand, line))
+        )
+
     for line in (
         "Next, the sampler.",
         "A later release adds it.",
@@ -269,8 +276,11 @@ def test_check_lists_a_promise_about_a_later_release(tmp_path, monkeypatch, caps
         "A deprecation that warns until 3.0.",
         "Running without it is planned for 2.2.",
         "`version::KINDS` is deprecated in the Rust crate.",
+        "Supported until `3.0`.",
+        "Removed in `v3.0`.",
+        "Read as before until `polylines` arrive in 2.2.0.",
     ):
-        assert changelog._PROMISE.search(line), line
+        assert promised(line), line
     for line in (
         "Nextflow reads it.",
         "A willing reader.",
@@ -281,5 +291,7 @@ def test_check_lists_a_promise_about_a_later_release(tmp_path, monkeypatch, caps
         "Following a chain of links.",
         "It was reserved for the clinical profile.",
         "The later revision is read.",
+        "It accepts `--will` and `--next`.",
+        "Until `polylines` were read, nothing was.",
     ):
-        assert not changelog._PROMISE.search(line), line
+        assert not promised(line), line

@@ -73,19 +73,21 @@ _AREA = re.compile(r"<!-- area: ([a-z-]+) -->")
 _NO_ENTRY = re.compile(r"<!-- no entry: \S.*? -->")
 _DASH = re.compile(r"(?<!-)---(?!-)")
 _CODE = re.compile(r"`+[^`\n]*`+")
+_VERSION = re.compile(r"v?\d+(?:\.(?:\d+|x))+")
 # Words that promise something about a later release.  An entry states what
 # its release does; a promise about the next one is the maintainer's to make,
 # and 2.2.0's said the converters move onto the engine "next" after they had.
 # The phrases are plans/README.md's ("will require", "the last line to
 # support", "removed in") and the forms the changelog has used: a later or
 # coming release of any kind ("a later minor"), a version something waits for
-# ("until 3.0", "planned for 2.2"), and a deprecation, which promises a
-# removal.  An entry wraps at 80 columns, so a phrase may span two lines.
+# ("until 3.0", "until `polylines` arrive in 2.2.0", "planned for 2.2"), and a
+# deprecation, which promises a removal.  An entry wraps at 80 columns, so a
+# phrase may span two lines.
 _RELEASE = r"(?:releases?|versions?|minors?|majors?|patch(?:es)?|lines?)"
 _PROMISE = re.compile(
     r"\b(?:will|next|future|upcoming|deprecat\w*"
     rf"|(?:later|subsequent|coming|forthcoming)\s+{_RELEASE}"
-    r"|removed\s+in|until\s+v?\d|(?:planned|scheduled|slated)\s+for"
+    r"|removed\s+in|until\b[^.;]{0,60}?\bv?\d+\.\d|(?:planned|scheduled|slated)\s+for"
     r"|last\s+(?:line|release|version|minor)\s+to\s+support)\b",
     re.I,
 )
@@ -234,6 +236,15 @@ def assemble(entries: list[Entry]) -> str:
     return "\n\n".join(blocks)
 
 
+def _operand(span: re.Match[str]) -> str:
+    """A code span as the promise scan reads it: a version stays a version
+    (`3.0` is what "until `3.0`" waits for), and anything else is one opaque
+    word, so code (`--will`) never promises and a phrase around it still reads.
+    """
+    text = span.group().strip("`").strip()
+    return text if _VERSION.fullmatch(text) else "code"
+
+
 def promises(directory: Path = CHANGES) -> list[str]:
     """Every line of a fragment, or of `lead.md`, that promises something about
     a later release, as `changes/NAME:LINE: TEXT`, code spans aside.
@@ -248,7 +259,8 @@ def promises(directory: Path = CHANGES) -> list[str]:
         # Searched as one text, a line per line, so that a phrase wrapped
         # onto the next line is found, and is reported at its first.
         prose = "\n".join(
-            "" if line.startswith("<!--") else _CODE.sub("", line) for line in lines
+            "" if line.startswith("<!--") else _CODE.sub(_operand, line)
+            for line in lines
         )
         numbers = {prose.count("\n", 0, m.start()) for m in _PROMISE.finditer(prose)}
         found += [
