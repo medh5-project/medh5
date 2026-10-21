@@ -124,11 +124,14 @@ pub fn read_itk_h5(path: &Path) -> Result<Vec<ItkEntry>> {
 /// Write `entries` as the ITK HDF5 transform file `path`, replacing it
 /// atomically (1.0 §14.4): numbered from 0, a composite with its type alone,
 /// as ITK writes one, and every string as ITK's variable-length ASCII.
+///
+/// Refused: no entries, and a type name that is empty, not ASCII, or holds a
+/// NUL, where HDF5 would end the stored string.
 pub fn write_itk_h5(path: &Path, entries: &[ItkEntry]) -> Result<()> {
     if entries.is_empty() {
         return Err(Error::invalid("an ITK transform file holds at least one transform"));
     }
-    if let Some(bad) = entries.iter().find(|e| !e.name.is_ascii() || e.name.is_empty()) {
+    if let Some(bad) = entries.iter().find(|e| !e.name.is_ascii() || e.name.is_empty() || e.name.contains('\0')) {
         return Err(Error::invalid(format!("{} is not an ITK transform type", repr_str(&bad.name))));
     }
     let staged = AtomicFile::create(path)?;
@@ -194,6 +197,19 @@ mod tests {
             zero.new_dataset_builder().with_data(fixed.view()).create("TranformFixedParameters").unwrap();
         }
         assert_eq!(read_itk_h5(&path).unwrap(), [affine()]);
+    }
+
+    /// HDF5 ends a variable-length string at its first NUL, so a type name
+    /// holding one would be read back cut short: it is refused, as a name
+    /// that is not ASCII is.
+    #[test]
+    fn itk_h5_a_type_name_holding_a_nul_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.h5");
+        let cut = ItkEntry::new("AffineTransform_double_3_3\0x", affine().parameters, affine().fixed_parameters);
+        let err = write_itk_h5(&path, &[cut]).unwrap_err().to_string();
+        assert!(err.contains("is not an ITK transform type"), "{err}");
+        assert!(!path.exists());
     }
 
     #[test]

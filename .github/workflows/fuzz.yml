@@ -3,8 +3,9 @@ name: Fuzz
 # The engine's readers, fuzzed: `open_validate` (any file through the
 # strictest validation), `clinical_columns` (a documents table's offsets and
 # bytes, read deferred and scanned), the Zstandard and Blosc2 filters
-# decoding chunks they did not write, and `nifti_header` (NIfTI headers and
-# files, gzip among them, read as the converter reads them).  A report or a
+# decoding chunks they did not write, `nifti_header` (NIfTI headers and
+# files, gzip among them, read as the converter reads them), and
+# `itk_transform` (any file read as an ITK HDF5 transform file).  A report or a
 # refusal is fine; a crash, a sanitizer's report, a timeout or running out of
 # memory fails the run.  The input that did it is not uploaded: a public
 # repository's artifacts are public, and a crashing input works as an exploit
@@ -15,11 +16,14 @@ on:
   schedule:
     - cron: "23 3 * * 2,5"
   workflow_dispatch:
-  # A change to the targets, to the HDF5 they read with, or to this workflow,
-  # is smoke-run on its pull request.
+  # A change to the targets, to the readers they fuzz most (the converters and
+  # the annotations), to the HDF5 they read with, or to this workflow, is
+  # smoke-run on its pull request.
   pull_request:
     paths:
       - fuzz/**
+      - crates/medh5/src/convert/**
+      - crates/medh5/src/annotations/**
       - vendor/hdf5-metno-src/**
       - .github/workflows/fuzz.yml
 
@@ -55,7 +59,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [open_validate, clinical_columns, zstd_filter, blosc2_filter, nifti_header]
+        target: [open_validate, clinical_columns, zstd_filter, blosc2_filter, nifti_header, itk_transform]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The Rust rust-toolchain.toml pins builds cargo-fuzz; the nightly, the
@@ -95,12 +99,14 @@ jobs:
           restore-keys: fuzz-corpus-${{ matrix.target }}-
       # Built as the targets are, so the run below reuses its build (HDF5's
       # among it) rather than compiling everything a second time.
-      - name: Seed the corpus from the conformance corpus
-        if: matrix.target == 'open_validate'
+      - name: Seed the corpus
+        if: matrix.target == 'open_validate' || matrix.target == 'itk_transform'
         working-directory: fuzz
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           cargo +"$FUZZ_TOOLCHAIN" fuzz build seed
-          target/x86_64-unknown-linux-gnu/release/seed corpus/open_validate
+          target/x86_64-unknown-linux-gnu/release/seed "$TARGET" "corpus/$TARGET"
       # A pull request's run is a smoke test; the schedule runs 40 minutes.
       # Leaks are not checked: HDF5 leaves blocks behind when a call fails,
       # which LeakSanitizer reports on nearly every malformed file.
