@@ -19,11 +19,6 @@ fn scratch() -> PathBuf {
 }
 
 fuzz_target!(|data: &[u8]| {
-    // HDF5 2.2.0 decodes such a global heap without end, before anything the
-    // engine could bound (see `medh5_fuzz`).
-    if medh5_fuzz::endless_global_heap(data) {
-        return;
-    }
     let path = scratch();
     std::fs::write(&path, data).expect("the scratch file is writable");
     let _ = medh5::validate::validate_file(&path, "strict", None);

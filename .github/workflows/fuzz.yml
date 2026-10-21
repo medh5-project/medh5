@@ -15,11 +15,12 @@ on:
   schedule:
     - cron: "23 3 * * 2,5"
   workflow_dispatch:
-  # A change to the targets, or to this workflow, is smoke-run on its pull
-  # request.
+  # A change to the targets, to the HDF5 they read with, or to this workflow,
+  # is smoke-run on its pull request.
   pull_request:
     paths:
       - fuzz/**
+      - vendor/hdf5-metno-src/**
       - .github/workflows/fuzz.yml
 
 permissions:
@@ -85,13 +86,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends "clang-$llvm" "libclang-rt-$llvm-dev"
           rm llvm.asc
           echo "CC=clang-$llvm" >> "$GITHUB_ENV"
-      # What the targets keep off HDF5's endless paths is tested on its own,
-      # with no dependency to build.
-      - name: Test the exclusions
-        working-directory: fuzz
-        run: |
-          rustc --edition 2021 --test src/lib.rs -o "$RUNNER_TEMP/exclusions"
-          "$RUNNER_TEMP/exclusions"
       # Each run saves the corpus it grew under its own key, and the next
       # restores the newest of its target's.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

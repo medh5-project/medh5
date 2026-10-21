@@ -3,7 +3,7 @@
 
 # Vendored C stays as upstream wrote it: its local changes are the ones its
 # PATCHES.md lists, and a whitespace fix would be one more.
-exclude: ^crates/medh5-sys/vendor/
+exclude: ^(crates/medh5-sys/)?vendor/
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks

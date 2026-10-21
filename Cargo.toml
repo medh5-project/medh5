@@ -54,6 +54,13 @@ pyo3 = { version = "0.29.3", features = ["abi3-py310"] }
 pyo3-build-config = "0.29.3"
 numpy = { version = "0.29.0", features = ["half"] }
 
+# HDF5 as `hdf5-metno-src` 0.10.4 packages it, with the one change
+# vendor/hdf5-metno-src/PATCHES.md lists.  `[patch]` reaches what this
+# workspace builds (the wheels, the sdist, the standalone binaries), not a
+# crate that depends on `medh5` from crates.io; SECURITY.md says which.
+[patch.crates-io]
+hdf5-metno-src = { path = "vendor/hdf5-metno-src" }
+
 [profile.release]
 lto = "thin"
 codegen-units = 4

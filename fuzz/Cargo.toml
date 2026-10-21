@@ -24,6 +24,11 @@ medh5-sys = { path = "../crates/medh5-sys" }
 # gzip for the NIfTI target's compressed files, as the engine inflates them.
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 
+# HDF5 with the workspace's patches (vendor/hdf5-metno-src/PATCHES.md): the
+# library the wheels and binaries link, not the one crates.io publishes.
+[patch.crates-io]
+hdf5-metno-src = { path = "../vendor/hdf5-metno-src" }
+
 [profile.release]
 debug = 1
 
