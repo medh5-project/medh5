@@ -367,6 +367,50 @@ def make_niftis() -> None:
     nib.save(nib.MGHImage(volume(np.float32), AFFINE), str(INPUTS / "not-nifti.mgh"))
     text("labels.json", json.dumps(LABELS))
     text("labels-small.json", json.dumps(LABELS_SMALL))
+    make_declined()
+
+
+def make_declined() -> None:
+    """Inputs added in 2.2.1 for the reviews declined in 2.2.0 to keep 2.1.0's
+    behaviour (P22-03): each pins what 2.1.0 did, not what a reader might
+    expect.  Added later, they leave every earlier input as it was."""
+    # An extension whose size runs past `vox_offset`, to the end of the
+    # file: nibabel reads it whatever the offset says, and loads the volume.
+    past = (
+        b"\x01\0\0\0"
+        + (64).to_bytes(4, "little")
+        + (6).to_bytes(4, "little")
+        + b"comment\0"
+    )
+    for name in ("extension-past-offset.nii", "extension-past-offset.nii.gz"):
+        write(name, volume(), extension=past)
+
+    # An infinite `vox_offset` with the extension flag set: nibabel reads
+    # extensions to the end of the stream, and its refusal depends on where
+    # the stream ends, so nothing could refuse it sooner with 2.1.0's text.
+    def infinite(name: str, body: bytes) -> None:
+        header = nib.Nifti1Header()
+        header.set_data_shape(SHAPE)
+        header.set_data_dtype(np.int16)
+        header["vox_offset"] = np.inf
+        raw = header.binaryblock + b"\x01\0\0\0" + body
+        (INPUTS / name).write_bytes(gzip.compress(raw, mtime=0))
+
+    one = (16).to_bytes(4, "little") + (6).to_bytes(4, "little") + b"comment\0"
+    infinite("offset-inf-extensions.nii.gz", one * 1000)
+    infinite("offset-inf-cut.nii.gz", one * 1000 + one[:12])
+    infinite("offset-inf-stray.nii.gz", one * 3 + b"xyz")
+
+    # `xyzt_units` with a reserved bit: nibabel takes the space code as the
+    # value modulo 8 and the time code as the rest, so a reserved bit leaves
+    # the time unit unknown, and the frames assumed.
+    series = volume(shape=(*SHAPE, 3))
+    for units in (0x4A, 0x4B, 0x52, 0x8A, 0xCA):
+
+        def reserved(header: Any, units: int = units) -> None:
+            header["xyzt_units"] = units
+
+        write(f"cine-units-{units:#04x}.nii.gz", series, pixdim4=2.5, edit=reserved)
 
 
 LABELS = {
@@ -591,6 +635,12 @@ def imports() -> list[dict[str, Any]]:
         "truncated.nii.gz", "not-gzip.nii.gz", "trailing.nii.gz",
         "pair-missing-img.hdr", "pair-short.hdr", "scan.txt", "not-nifti.mgh",
         "missing.nii",
+        "extension-past-offset.nii", "extension-past-offset.nii.gz",
+        "offset-inf-extensions.nii.gz", "offset-inf-cut.nii.gz",
+        "offset-inf-stray.nii.gz",
+        "cine-units-0x4a.nii.gz", "cine-units-0x4b.nii.gz",
+        "cine-units-0x52.nii.gz", "cine-units-0x8a.nii.gz",
+        "cine-units-0xca.nii.gz",
     ):  # fmt: skip
         stem = name.replace(".nii.gz", "").replace(".", "-")
         case(f"import-{stem}", [["image", name]])

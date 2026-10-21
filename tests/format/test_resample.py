@@ -1476,3 +1476,105 @@ class TestAnnotationsFollow:
         assert not [
             c for c in validate_file(path, level="integrity").codes if c[0] == "E"
         ]
+
+
+class TestDecisionsKept:
+    """Review findings on 2.2.0's resample (#84) declined with a reason; each
+    test pins the behaviour the reason chose, so a change to it is a decision
+    rather than a drift."""
+
+    @pytest.mark.parametrize("annotations", [True, False])
+    def test_S7_7_an_images_valid_mask_moves_with_it_and_is_not_left_behind(
+        self, tmp_path, annotations
+    ):
+        """A selected image's own valid mask goes into its output's valid
+        mask whether or not annotations are carried, so it is neither
+        carried as an annotation of its own nor listed in `not_carried`:
+        that list names what stayed on the source grids, and its content
+        did not."""
+        one, _ = two_classes()
+        fov = np.ones((8, 8, 8), bool)
+        fov[:3] = False
+        path = annotated(
+            tmp_path / "s.medh5",
+            seg=lambda w: w.add_segmentation("seg", grid="g", masks={1: one}),
+            fov=lambda w: w.add_mask("fov", fov, grid="g"),
+        )
+        with medh5.amend(path) as w:
+            image = np.ones((8, 8, 8), np.float32)
+            w.add_image("ct", image, grid="g", modality="CT", valid_mask="fov")
+        report = resample(path, "ct", onto="half", annotations=annotations)
+        assert "fov" not in report.not_carried
+        assert "fov" not in {a.source for a in report.annotations}
+        assert report.not_carried == (() if annotations else ("seg",))
+        (out,) = report.images
+        assert out.valid_mask is not None
+        with medh5.open(path) as s:
+            kept = s.annotations[out.valid_mask].read()
+            assert "fov_on_half" not in s.annotations
+        assert kept.tolist() == fov[ON_HALF].tolist()
+
+    def test_S7_7_a_path_for_an_ignore_mask_is_E413_as_the_validator_says(
+        self, tmp_path
+    ):
+        """§7.7's `ignore_mask` names the mask annotation by its id; the
+        validator looks it up as one, and `annotations/fov` is E413 there.
+        The resample refuses it with the same code rather than carry a
+        reference the source already fails on."""
+        one, _ = two_classes()
+        ignore = np.zeros((8, 8, 8), bool)
+        ignore[0] = True
+        path = annotated(
+            tmp_path / "s.medh5",
+            seg=lambda w: w.add_segmentation(
+                "seg", grid="g", masks={1: one}, ignore=ignore
+            ),
+        )
+        with medh5.open(path) as s:
+            name = s.annotations["seg"].header.ignore_mask
+        with h5py.File(path, "r+") as f:
+            f["annotations/seg"].attrs["ignore_mask"] = f"annotations/{name}"
+        assert "E413" in validate_file(path).codes
+        before = path.read_bytes()
+        with pytest.raises(MEDH5ValidationError, match="E413"):
+            resample(path, "img", onto="half")
+        assert path.read_bytes() == before
+
+    def test_S2_an_images_valid_mask_id_is_held_before_its_blocks_are_read(
+        self, tmp_path
+    ):
+        """Every output id is claimed before anything is written, so that a
+        refusal leaves the file as it was; whether an image's valid mask is
+        written is known only once its blocks are read.  Onto `half` none is
+        written, and its id is held anyway."""
+        path = annotated(tmp_path / "s.medh5")
+        report = resample(path, "img", onto="half", out=tmp_path / "copy.medh5")
+        assert report.images[0].valid_mask is None
+        with medh5.amend(path) as w:
+            w.add_mask("img_valid", np.ones((8, 8, 8), bool), grid="g")
+        with pytest.raises(
+            MEDH5ValidationError, match="another output of this resample"
+        ):
+            resample(path, "img", onto="half", suffix="_valid")
+
+    def test_resample_report_keeps_the_field_order_it_was_released_with(self):
+        """`ResampleReport` first shipped in 2.2.0, with `annotations` and
+        `not_carried` beside `images` and `transforms`, so that order is the
+        released one, and positional construction depends on it."""
+        from dataclasses import fields
+
+        from medh5.transforms import ResampleReport
+
+        assert [f.name for f in fields(ResampleReport)] == [
+            "path",
+            "activity_id",
+            "grid_id",
+            "new_grid",
+            "images",
+            "transforms",
+            "annotations",
+            "not_carried",
+            "written",
+            "filled_voxels",
+            "content_id",
+        ]

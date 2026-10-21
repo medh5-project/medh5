@@ -568,7 +568,7 @@ fn e3_the_engine_matches_2_1_0() {
             failures.insert(id.to_string(), first_difference(&expected, &got, ""));
         }
     }
-    assert_eq!(ran, 348, "every case ran");
+    assert_eq!(ran, 368, "every case ran");
     assert!(failures.is_empty(), "{} of {ran} cases differ:\n{failures:#?}", failures.len());
 }
 
