@@ -210,3 +210,42 @@ def test_the_command_line_reports_and_fails(tmp_path, monkeypatch, capsys) -> No
     _fragment(changes, "y.md", "<!-- area: cli -->\n### Nope\n\n- **Fix.**\n")
     assert changelog.main(["check"]) == 1
     assert "unknown section" in capsys.readouterr().err
+
+
+def test_check_lists_a_promise_about_a_later_release(tmp_path, monkeypatch, capsys):
+    """2.2.0's NIfTI entry said the converters "move onto it next" after the
+    pull request that moved them had merged, and 2.1.0's release notes said
+    2.2.0 "will require" Python 3.11 before anyone had decided it.  `check`
+    lists every such line for the maintainer to confirm, and passes."""
+    changes, log = _tree(tmp_path)
+    monkeypatch.setattr(changelog, "CHANGES", changes)
+    monkeypatch.setattr(changelog, "CHANGELOG", log)
+    # The entry as 2.2.0's fragment `w22-02-native-nifti-import.md` held it.
+    _fragment(
+        changes,
+        "w22-02-native-nifti-import.md",
+        "<!-- area: converters -->\n### Added\n\n"
+        "- **The engine reads and writes NIfTI.** nibabel is\n"
+        "  unlinked. The Python converter and the command line move onto it"
+        " next.\n",
+    )
+    _fragment(
+        changes,
+        "plain.md",
+        "<!-- area: cli -->\n### Fixed\n\n- **`--will` is a flag.** It works.\n",
+    )
+    _fragment(changes, "lead.md", "**2.2.1 will require nothing new.**\n")
+    _fragment(changes, "ci.md", "<!-- no entry: a later release will tell -->\n")
+    assert changelog.promises(changes) == [
+        "changes/w22-02-native-nifti-import.md:5: unlinked. The Python converter"
+        " and the command line move onto it next.",
+        "changes/lead.md:1: **2.2.1 will require nothing new.**",
+    ]
+    assert changelog.main(["check"]) == 0
+    out = capsys.readouterr().out
+    assert "a promise for the maintainer to confirm" in out
+    assert "w22-02-native-nifti-import.md:5:" in out and "lead.md:1:" in out
+    for line in ("Next, the sampler.", "A later release adds it.", "In future"):
+        assert changelog._PROMISE.search(line), line
+    for line in ("Nextflow reads it.", "A willing reader.", "The latest release."):
+        assert not changelog._PROMISE.search(line), line

@@ -47,7 +47,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: ${{ github.event_name == 'schedule' && fromJSON('["main", "release/2.0"]') || fromJSON('[""]') }}
+        ref: ${{ github.event_name == 'schedule' && fromJSON('["main", "release/2.2"]') || fromJSON('[""]') }}
     steps:
       - name: Whether the line exists
         id: line
@@ -92,7 +92,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: ${{ github.event_name == 'schedule' && fromJSON('["main", "release/2.0"]') || fromJSON('[""]') }}
+        ref: ${{ github.event_name == 'schedule' && fromJSON('["main", "release/2.2"]') || fromJSON('[""]') }}
     steps:
       - name: Whether the line exists
         id: line
@@ -153,7 +153,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: ${{ github.event_name == 'schedule' && fromJSON('["main", "release/2.0"]') || fromJSON('[""]') }}
+        ref: ${{ github.event_name == 'schedule' && fromJSON('["main", "release/2.2"]') || fromJSON('[""]') }}
     steps:
       - name: Whether the line exists
         id: line
