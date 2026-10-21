@@ -253,7 +253,23 @@ def test_check_lists_a_promise_about_a_later_release(tmp_path, monkeypatch, caps
     out = capsys.readouterr().out
     assert "a promise for the maintainer to confirm" in out
     assert "w22-02-native-nifti-import.md:5:" in out and "lead.md:1:" in out
-    for line in ("Next, the sampler.", "A later release adds it.", "In future"):
+    # plans/README.md's examples of a promise, and their kin.
+    for line in (
+        "Next, the sampler.",
+        "A later release adds it.",
+        "In future",
+        "medh5 2.2.0 will require Python 3.11.",
+        "2.1 is the last line to support Python 3.10.",
+        "The last release to\n  support it.",
+        "Removed in 3.0.",
+        "An upcoming minor.",
+    ):
         assert changelog._PROMISE.search(line), line
-    for line in ("Nextflow reads it.", "A willing reader.", "The latest release."):
+    for line in (
+        "Nextflow reads it.",
+        "A willing reader.",
+        "The latest release.",
+        "It was removed from the list.",
+        "The last line is supported.",
+    ):
         assert not changelog._PROMISE.search(line), line
