@@ -190,6 +190,25 @@ pub(crate) fn locked<T>(f: impl FnOnce() -> T) -> T {
     }
 }
 
+/// `cell`'s value, computed the first time under one take of HDF5's lock.
+///
+/// A value read on first use is many small HDF5 calls, and a call that takes
+/// and releases the lock hands it to any thread waiting for it: four threads
+/// opening samples spent most of their time passing the lock back and forth,
+/// and took three and a half times as long as one.  Taken once, the calls run
+/// back to back.  The value is computed before the cell is claimed, so no
+/// thread waits for a cell while another holds HDF5's lock to fill it --- a
+/// thread holding the lock may itself be filling another cell.  Two threads
+/// that race compute the value twice, and the first one set is kept.
+pub(crate) fn once<T>(cell: &std::sync::OnceLock<T>, init: impl FnOnce() -> T) -> &T {
+    if let Some(found) = cell.get() {
+        return found;
+    }
+    // A value another thread set first is dropped here, outside the lock.
+    let _ = cell.set(locked(init));
+    cell.get().expect("set above, or by the thread that won")
+}
+
 static WAIT: std::sync::OnceLock<fn(&mut dyn FnMut())> = std::sync::OnceLock::new();
 
 /// Set how a thread waits for HDF5's lock that another thread holds: `wait`
@@ -360,6 +379,46 @@ mod tests {
         holder.join().unwrap();
         waiter.join().unwrap();
         assert_eq!(waits_of(id), 1);
+    }
+
+    /// A thread holding HDF5's lock asks for a value another thread is about
+    /// to read: it reads the value itself rather than wait for the other
+    /// thread, which waits for the lock.  Claiming the cell first, as
+    /// `get_or_init` does, would leave each waiting for the other.
+    #[test]
+    fn once_never_waits_for_a_cell_while_another_thread_waits_for_the_lock() {
+        on_wait(recorded);
+        let cell: &'static std::sync::OnceLock<u32> = Box::leak(Box::new(std::sync::OnceLock::new()));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            locked(|| {
+                let reader = std::thread::spawn(move || *once(cell, || 2));
+                let id = reader.thread().id();
+                while waits_of(id) == 0 {
+                    std::thread::yield_now();
+                }
+                done_tx.send(*once(cell, || 1)).unwrap();
+                reader
+            })
+        });
+        let held = done_rx.recv_timeout(std::time::Duration::from_secs(30)).expect("the holder waited for the cell");
+        assert_eq!(held, 1);
+        // The other thread's value, read after, is dropped: the first set is kept.
+        assert_eq!(holder.join().unwrap().join().unwrap(), 1);
+    }
+
+    /// A value is read once, under HDF5's lock for all of its calls.
+    #[test]
+    fn once_reads_a_value_once_under_one_take_of_the_lock() {
+        let cell = std::sync::OnceLock::new();
+        let mut reads = 0;
+        let held = *once(&cell, || {
+            reads += 1;
+            crate::h5sys::LOCK.is_owned_by_current_thread()
+        });
+        assert!(held, "the value was read without HDF5's lock");
+        assert!(*once(&cell, || unreachable!("read twice")));
+        assert_eq!(reads, 1);
     }
 
     /// Set in the child process of the test that sets the environment HDF5

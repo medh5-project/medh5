@@ -361,7 +361,7 @@ impl SamplingIndex {
 
     fn table(&self) -> Result<&(Vec<i64>, HashMap<i64, usize>)> {
         let group = self.live()?;
-        match self.class_ids.get_or_init(|| {
+        match crate::h5::once(&self.class_ids, || {
             let ds = group.dataset("class_ids")?;
             let ids: Vec<i64> = data::read(&ds)?.cast::<i64>().iter().copied().collect();
             let positions = ids.iter().enumerate().map(|(i, c)| (*c, i)).collect();
@@ -395,7 +395,7 @@ impl SamplingIndex {
     /// Voxel count per class.
     pub fn voxel_counts(&self) -> Result<IndexMap<i64, i64>> {
         let group = self.live()?;
-        match self.counts.get_or_init(|| {
+        match crate::h5::once(&self.counts, || {
             let ids = self.class_ids()?;
             let counts: Vec<i64> = data::read(&group.dataset("voxel_counts")?)?.cast::<i64>().iter().copied().collect();
             Ok(ids.into_iter().zip(counts).collect())
