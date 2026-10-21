@@ -223,7 +223,13 @@ class TestThreadBench:
 
     @pytest.mark.parametrize(
         "flags",
-        ["--shape 8 16 16 --patch 9", "--patch 0", "--threads 1 0", "--reads 0"],
+        [
+            "--shape 8 16 16 --patch 9",
+            "--patch 0",
+            "--threads 1 0",
+            "--reads 0",
+            "--files 4 --threads 1 3",
+        ],
     )
     def test_a_run_that_would_time_something_else_is_refused(self, flags, capsys):
         import importlib.util

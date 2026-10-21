@@ -3,8 +3,10 @@
 One fixed list of work, the same at every thread count, dealt out over
 ``--threads`` threads, each with its own handles (the pattern
 ``docs/explanation/concurrency.md`` shows). Unit ``k`` reads file
-``k % --files``, so with up to ``--files`` threads each thread keeps to its
-own files:
+``k % --files`` and goes to thread ``k % threads``; a thread count must divide
+``--files`` or be a multiple of it, so each thread keeps to its own files and
+no row opens more handles than it has to. The whole list runs once, untimed,
+before the first row, so every row reads from the same page cache:
 
 - ``image`` --- a new ``--patch``\\ ³ window of a ``training`` (Blosc2) CT per
   read, the window path that decompresses outside HDF5's lock;
@@ -192,8 +194,7 @@ def measure_in(out: Path, args: argparse.Namespace) -> dict[str, Any]:
     results: dict[str, Any] = {}
     for name, work in workloads(paths, args, shape).items():  # type: ignore[arg-type]
         total = args.opens if name == "open" else args.reads
-        # warm the page cache, every file at least once
-        run_threads(1, work, min(total, max(args.files, total // 8)))
+        run_threads(1, work, total)  # untimed: every row reads warm pages
         rows: dict[str, Any] = {}
         for threads in args.threads:
             times = [run_threads(threads, work, total) for _ in range(args.repeats)]
@@ -261,6 +262,13 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     for flag, values in counts.items():
         if any(v < 1 for v in values):
             parser.error(f"{flag} takes positive integers")
+    for threads in args.threads:
+        if args.files % threads and threads % args.files:
+            # Thread k % threads would then cycle through every file.
+            parser.error(
+                f"--threads {threads} neither divides --files {args.files} "
+                "nor is a multiple of it"
+            )
     if args.patch > min(args.shape):
         # A window past the volume is clipped, and would time a smaller one.
         parser.error(f"--patch {args.patch} is larger than --shape {min(args.shape)}")
