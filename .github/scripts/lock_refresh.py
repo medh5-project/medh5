@@ -31,7 +31,9 @@ def native_crates(security: str) -> list[str]:
     """The crates the native inventory names in its "Built from" column, as
     `crate` version (a vendored source names none)."""
     table = security.split("\n## Native inventory\n", 1)[1].split("\n## ", 1)[0]
-    return sorted(set(re.findall(r"^\|[^|]+\|[^|]+\| `([\w-]+)` \S+ \|", table, re.M)))
+    return sorted(
+        set(re.findall(r"^\|[^|]+\|[^|]+\| `([\w-]+)` [^\s,|]+[^|]* \|", table, re.M))
+    )
 
 
 def locked(lock: str) -> dict[str, list[str]]:

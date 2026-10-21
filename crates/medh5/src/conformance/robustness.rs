@@ -7,7 +7,9 @@
 //! groups deeper than [`MAX_DEPTH`], a dataset naming a filter nobody
 //! registered, a Zstandard frame that decodes to far more than its chunk, a
 //! Blosc2 chunk that claims more than its dataset's chunk --- written by the
-//! engine's own writer and the HDF5 calls its unit tests make.  Random damage
+//! engine's own writer and the HDF5 calls its unit tests make, or one
+//! structure of HDF5's own edited in the bytes it wrote: a global heap object
+//! smaller than its header, which HDF5 2.2.0 decoded without end.  Random damage
 //! (`damaged.py`'s other mode) rarely produces these shapes.  They are not in
 //! the corpus: the limits they cross are this implementation's, not the
 //! specification's.
@@ -35,24 +37,33 @@ fn any_digest() -> AttrValue {
 /// What plants one fixture's structure in a valid sample.
 type Plant = fn(&hdf5::Group) -> Result<()>;
 
+/// What edits the bytes HDF5 wrote, once the file is closed.
+type Edit = fn(&mut [u8]) -> Result<()>;
+
 /// Write each fixture into `dir`, and return their paths.
 #[doc(hidden)]
 pub fn write(dir: &Path) -> Result<Vec<PathBuf>> {
     std::fs::create_dir_all(dir)?;
-    let fixtures: [(&str, Plant); 4] = [
-        ("deep-groups", deep_groups),
-        ("unregistered-filter", unregistered_filter),
-        ("zstd-frame-larger-than-its-chunk", zstd_bomb),
-        ("blosc2-chunk-larger-than-its-dataset-chunk", blosc2_overclaim),
+    let fixtures: [(&str, Plant, Option<Edit>); 5] = [
+        ("deep-groups", deep_groups, None),
+        ("unregistered-filter", unregistered_filter, None),
+        ("zstd-frame-larger-than-its-chunk", zstd_bomb, None),
+        ("blosc2-chunk-larger-than-its-dataset-chunk", blosc2_overclaim, None),
+        ("global-heap-object-smaller-than-its-header", heap_strings, Some(empty_free_space)),
     ];
     let mut out = Vec::new();
-    for (name, plant) in fixtures {
+    for (name, plant, edit) in fixtures {
         let path = dir.join(format!("{name}.medh5"));
         if path.exists() {
             std::fs::remove_file(&path)?;
         }
         base(&path, &SHAPE)?;
         mutate(&path, plant)?;
+        if let Some(edit) = edit {
+            let mut bytes = std::fs::read(&path)?;
+            edit(&mut bytes)?;
+            std::fs::write(&path, bytes)?;
+        }
         out.push(path);
     }
     Ok(out)
@@ -166,30 +177,191 @@ fn blosc2_overclaim(root: &hdf5::Group) -> Result<()> {
     write_raw_chunk(&ds, &chunk)
 }
 
+/// A string attribute on the planted group: one more object in the file's
+/// global heap, so that a collection has free space after its objects.
+fn heap_strings(root: &hdf5::Group) -> Result<()> {
+    let group = ops::new_group(root, GROUP)?;
+    attrs::write(&group, "note", &AttrValue::Str("a string in the global heap".into()))
+}
+
+/// The length of a global heap collection's header, and of each object's:
+/// the files the engine writes state lengths in 8 bytes.
+const HEAP_HEADER: usize = 16;
+
+/// Every global heap collection whose objects end in a free-space object
+/// gets that object's size set to 0.  HDF5 2.2.0 moved on by the size each
+/// object states, so the walk stayed where it was, and reading any string in
+/// the collection --- the file's own attributes among them --- never ended.
+/// A collection is edited only when its objects lead exactly to its end, so
+/// bytes that merely look like a signature are left alone.
+fn empty_free_space(bytes: &mut [u8]) -> Result<()> {
+    let u64_at = |bytes: &[u8], at: usize| -> Option<u64> {
+        Some(u64::from_le_bytes(bytes.get(at..at.checked_add(8)?)?.try_into().ok()?))
+    };
+    let mut edited = 0;
+    let mut at = 0;
+    while let Some(found) = bytes.get(at..).and_then(|rest| rest.windows(4).position(|w| w == b"GCOL")) {
+        let start = at + found;
+        at = start + 4;
+        let Some(size) = u64_at(bytes, start + 8).and_then(|size| usize::try_from(size).ok()) else { continue };
+        let Some(end) = start.checked_add(size).filter(|&end| end <= bytes.len()) else { continue };
+        if bytes[start + 4] != 1 || size < 4096 {
+            continue;
+        }
+        let mut object = start + HEAP_HEADER;
+        let mut free = None;
+        while object + HEAP_HEADER <= end {
+            let index = u16::from_le_bytes([bytes[object], bytes[object + 1]]);
+            let Some(stated) = u64_at(bytes, object + 8).and_then(|n| usize::try_from(n).ok()) else { break };
+            // An object's header, then its data padded to 8 bytes; the free
+            // space states its whole size, header included.
+            let need = match index {
+                0 => {
+                    free = Some(object);
+                    stated
+                }
+                _ => {
+                    stated.checked_add(7).map(|n| n & !7).and_then(|n| n.checked_add(HEAP_HEADER)).unwrap_or(usize::MAX)
+                }
+            };
+            if need == 0 {
+                break;
+            }
+            object = object.saturating_add(need);
+        }
+        if let (Some(free), true) = (free, object == end) {
+            bytes[free + 8..free + 16].fill(0);
+            edited += 1;
+        }
+    }
+    if edited == 0 {
+        return Err(Error::Io("no global heap collection with free space to edit".into()));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    use serde_json::Value;
+
+    /// The environment variable naming the file [`validate_in_a_child`]
+    /// validates, and the prefix of the line its report is printed on.
+    const CHILD: &str = "MEDH5_ROBUSTNESS_VALIDATE";
+    const REPORT: &str = "medh5-robustness-report: ";
+
+    /// Run by [`bounded`], in a process of its own: strict validation of the
+    /// file [`CHILD`] names, its report printed as one line of JSON.  With no
+    /// file named, it does nothing.
+    #[test]
+    fn validate_in_a_child() {
+        let Some(path) = std::env::var_os(CHILD) else { return };
+        let report = crate::validate::validate_file(Path::new(&path), "strict", None).unwrap();
+        println!("{REPORT}{}", report.to_json());
+    }
+
+    /// The error diagnostics of strict validation of `path`, run in a child
+    /// process this test binary starts, or `None` if it has not returned
+    /// within `limit`, when the child is killed.  A fixture that hangs ---
+    /// the global heap's, on an HDF5 without its patch --- holds HDF5's lock
+    /// while it does, so a thread of this process would leave every other
+    /// test that reads a file waiting with it.
+    fn bounded(path: &Path, limit: Duration) -> Option<Vec<Value>> {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "conformance::robustness::tests::validate_in_a_child", "--nocapture"])
+            .env(CHILD, path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let reader = std::thread::spawn(move || {
+            let mut out = String::new();
+            stdout.read_to_string(&mut out).map(|_| out)
+        });
+        let deadline = Instant::now() + limit;
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let out = reader.join().unwrap().unwrap();
+        assert!(status.success(), "{}: the child failed: {out}", path.display());
+        let line = out.lines().find_map(|l| l.strip_prefix(REPORT)).expect("the child prints its report");
+        let report: Value = serde_json::from_str(line).unwrap();
+        let errors = report["diagnostics"].as_array().unwrap().iter().filter(|d| d["severity"] == "error");
+        Some(errors.cloned().collect())
+    }
+
     /// Each fixture is validated to a report with an error, never a panic,
-    /// and the report names what was planted: the file is refused at open,
-    /// or the planted dataset is the one that could not be read.
+    /// within 30 seconds, and the report names what was planted: the file is
+    /// refused at open, or the planted dataset is the one that could not be
+    /// read.  Each is [`bounded`], so one that hangs fails here.
     #[test]
     fn every_robustness_fixture_validates_to_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let paths = write(dir.path()).unwrap();
-        assert_eq!(paths.len(), 4);
+        assert_eq!(paths.len(), 5);
         for path in paths {
-            let started = std::time::Instant::now();
-            let report = crate::validate::validate_file(&path, "strict", None).unwrap();
-            let elapsed = started.elapsed();
-            let errors: Vec<_> = report.diagnostics.iter().filter(|d| d.severity == "error").collect();
-            let name = path.file_stem().unwrap().to_string_lossy();
+            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            let errors = bounded(&path, Duration::from_secs(30)).unwrap_or_else(|| panic!("{name} hung"));
+            let names = |d: &Value, key: &str| d[key].as_str().is_some_and(|s| s.contains(GROUP));
             assert!(
-                errors.iter().any(|d| d.code == "E001" || d.location.contains(GROUP) || d.message.contains(GROUP)),
-                "{name}: {:?}",
-                report.diagnostics
+                errors.iter().any(|d| d["code"] == "E001" || names(d, "location") || names(d, "message")),
+                "{name}: {errors:?}"
             );
-            assert!(elapsed < std::time::Duration::from_secs(30), "{name}: {elapsed:?}");
         }
+    }
+
+    /// HDF5 2.2.0 never returned from the first string it read in such a
+    /// file; the patched HDF5 refuses the heap, and the file with it, as
+    /// unreadable and nothing else.
+    #[test]
+    fn a_global_heap_object_smaller_than_its_header_is_refused_in_bounded_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("heap.medh5");
+        base(&path, &SHAPE).unwrap();
+        mutate(&path, heap_strings).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        empty_free_space(&mut bytes).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let errors = bounded(&path, Duration::from_secs(60)).expect("validation returns");
+        let codes: Vec<_> = errors.iter().map(|d| d["code"].as_str().unwrap()).collect();
+        assert_eq!(codes, ["E001"], "{errors:?}");
+    }
+
+    /// Only a collection whose objects lead exactly to its end is edited, and
+    /// a file with none is an error rather than a fixture that plants nothing.
+    #[test]
+    fn the_heap_edit_touches_only_a_whole_collection() {
+        let mut collection = b"GCOL\x01\0\0\0".to_vec();
+        collection.extend(4096u64.to_le_bytes());
+        // One object of 5 bytes, padded to 8, then the free space: the rest.
+        collection.extend([1, 0, 1, 0, 0, 0, 0, 0]);
+        collection.extend(5u64.to_le_bytes());
+        collection.extend([0; 8]);
+        let rest = 4096 - collection.len() as u64;
+        collection.extend([0, 0, 0, 0, 0, 0, 0, 0]);
+        collection.extend(rest.to_le_bytes());
+        collection.resize(4096, 0);
+        let mut file = b"GCOL, but not a collection".to_vec();
+        file.extend(&collection);
+        let free = file.len() - 4096 + 40 + 8;
+        empty_free_space(&mut file).unwrap();
+        assert_eq!(file[free..free + 8], [0; 8]);
+        let mut truncated = collection[..4000].to_vec();
+        assert!(empty_free_space(&mut truncated).is_err());
+        assert_eq!(truncated, collection[..4000]);
     }
 }

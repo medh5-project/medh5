@@ -554,8 +554,24 @@ class TestRepositoryGates:
             "LZ4": "lz4-sys",
             "Zstandard": "zstd-sys",
         }
+        # HDF5 is built from a patched copy of its crate (P22-02): the lock
+        # names the copy, by path, and the row says it is patched.
+        patched = {"hdf5-metno-src": "vendor/hdf5-metno-src"}
         for library, crate in crates.items():
-            assert rows[library][1] == f"`{crate}` {locked[crate]}", library
+            row = f"`{crate}` {locked[crate]}"
+            if crate in patched:
+                row += f", patched: `{patched[crate]}`"
+            assert rows[library][1] == row, library
+        for crate, path in patched.items():
+            entry = lock.split(f'\nname = "{crate}"\n', 1)[1].split("\n\n", 1)[0]
+            assert "source = " not in entry, f"{crate} is locked from a registry"
+            manifest = (ROOT / path / "Cargo.toml").read_text(encoding="utf-8")
+            assert f'\nversion = "{locked[crate]}"\n' in manifest
+            workspace = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+            assert f'\n{crate} = {{ path = "{path}" }}\n' in workspace
+            changes = (ROOT / path / "PATCHES.md").read_text(encoding="utf-8")
+            assert f"`{crate}` {locked[crate]} as crates.io publishes it" in changes
+            assert f"HDF5 {rows['HDF5'][0]}" in changes
         # The -sys crates that carry their library's version in their own.
         assert locked["lz4-sys"].endswith(f"+lz4-{rows['LZ4'][0]}")
         assert locked["zstd-sys"].endswith(f"+zstd.{rows['Zstandard'][0]}")
@@ -807,7 +823,7 @@ class TestRepositoryGates:
         assert re.fullmatch(r"v\d+\.\d+\.\d+", revs["pre-commit-hooks"])
         assert int(revs["pre-commit-hooks"][1:].split(".")[0]) >= 6
         # Upstream's sources stay as upstream wrote them.
-        assert re.search(r"^exclude: \^crates/medh5-sys/vendor/$", config, re.M)
+        assert re.search(r"^exclude: \^\(crates/medh5-sys/\)\?vendor/$", config, re.M)
         lint = _jobs(CI.read_text(encoding="utf-8"))["lint"]
         assert re.search(r'pip install "pre-commit==\d+\.\d+\.\d+"', lint)
         assert "pre-commit run --all-files" in lint
@@ -945,8 +961,6 @@ class TestRepositoryGates:
         assert f"CFLAGS: {cflags}" in job
         assert "ASAN_OPTIONS: detect_leaks=0" in job
         assert 'llvm=$(rustc +"$FUZZ_TOOLCHAIN" -vV' in job
-        # What the targets exclude is tested in every run.
-        assert "rustc --edition 2021 --test src/lib.rs" in job
         # Only the pinned key is trusted, not whatever else the file holds.
         assert 'test "$primaries" = "$LLVM_KEY"' in job
         assert '"clang-$llvm" "libclang-rt-$llvm-dev"' in job
@@ -967,6 +981,13 @@ class TestRepositoryGates:
         targets = re.search(r"^        target: \[(.*)\]$", job, re.M)
         assert targets and [t.strip() for t in targets[1].split(",")] == declared
         assert "\n[workspace]\n" in fuzz and "publish = false" in fuzz
+        # And fuzzes the HDF5 that ships, patched as the root workspace
+        # patches it: a target that built crates.io's would hang where no
+        # wheel does, and need an exclusion again.
+        patch = 'hdf5-metno-src = { path = "../vendor/hdf5-metno-src" }'
+        assert f"\n[patch.crates-io]\n{patch}\n" in fuzz
+        root = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+        assert patch.replace("../", "") in root
 
     def test_the_release_runs_ci_on_the_tagged_commit(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -1869,13 +1890,14 @@ class TestDistribution:
         (tmp_path / "corpus").mkdir()
         write_sample(tmp_path / "corpus" / "case.medh5")
         assert damaged.main([binary, str(tmp_path / "corpus"), "--runs", "6"]) == 0
-        # The shapes of 2.0.2's denial-of-service bugs, as the binary writes
-        # them, each reported as an error within bounds; a valid file is not.
+        # The shapes of 2.0.2's denial-of-service bugs, and the global heap
+        # HDF5 2.2.0 never left (2.2.1), as the binary writes them, each
+        # reported as an error within bounds; a valid file is not.
         hostile = tmp_path / "robustness"
         subprocess.run(
             [binary, "conformance", "build", "--robustness", str(hostile)], check=True
         )
-        assert len(list(hostile.glob("*.medh5"))) == 4
+        assert len(list(hostile.glob("*.medh5"))) == 5
         corpus = [binary, str(tmp_path / "corpus"), "--runs", "1"]
         assert damaged.main([*corpus, "--structural", str(hostile)]) == 0
         # A valid file is not an error.  (What follows the colon is the

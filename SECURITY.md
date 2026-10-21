@@ -127,7 +127,7 @@ is the library's own, which is what advisories and scanners name.
 
 | Library | Version | Built from | Used for |
 |---|---|---|---|
-| HDF5 | 2.2.0 | `hdf5-metno-src` 0.10.4 | the container |
+| HDF5 | 2.2.0 | `hdf5-metno-src` 0.10.4, patched: `vendor/hdf5-metno-src` | the container |
 | zlib | 1.3.2 | `libz-sys` 1.1.29 | HDF5's deflate filter, C-Blosc2's zlib codec |
 | C-Blosc2 | 3.3.5 | vendored: `crates/medh5-sys/vendor/c-blosc2` | the Blosc2 codecs |
 | LZ4 | 1.10.0 | `lz4-sys` 1.11.1+lz4-1.10.0 | C-Blosc2's LZ4 codecs |
@@ -136,6 +136,15 @@ is the library's own, which is what advisories and scanners name.
 
 The HDF5-Blosc2 filter is the source `hdf5plugin` 7.1.0 ships, with the local
 changes `crates/medh5-sys/vendor/hdf5-blosc2/PATCHES.md` lists.
+
+HDF5 is the source `hdf5-metno-src` 0.10.4 packages, with the local changes
+`vendor/hdf5-metno-src/PATCHES.md` lists, which the workspace builds in place
+of the published crate. Every wheel, the sdist, every standalone binary and
+the Homebrew formula carry them. A build from crates.io does not
+(`cargo install medh5-cli`, or a crate that depends on `medh5`): it compiles
+the published `hdf5-metno-src`, and opening a crafted file can hang it until
+the change is released upstream. Install the wheel or a release binary to
+read files you did not write.
 
 When a library changes (a `-sys` crate is bumped, or a vendored source
 updated), update its row, then read every advisory against the new version.

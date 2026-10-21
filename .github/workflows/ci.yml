@@ -373,6 +373,12 @@ jobs:
           # builds from the sdist download that Rust, where any from
           # `rust-version` on builds it.
           assert f"{top}/rust-toolchain.toml" not in names, "the sdist pins a Rust"
+          # HDF5 as the wheels build it: the patched copy the workspace's
+          # `[patch.crates-io]` names, not the one crates.io publishes.
+          heap = f"{top}/vendor/hdf5-metno-src/ext/hdf5/src/H5HGcache.c"
+          assert heap in names, "the sdist lacks the patched HDF5"
+          with tarfile.open(sdist) as tar:
+              assert b"medh5:" in tar.extractfile(heap).read(), "the sdist's HDF5 is unpatched"
           PY
       - name: Build from the sdist alone, with that maturin, in a clean directory
         run: |
