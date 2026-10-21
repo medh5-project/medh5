@@ -21,8 +21,12 @@ The reasons are in [What 2.2.0 taught](what-2.2.0-taught.md), cited below as
   - It may fix a wrong answer, a crash, a hang, a cost out of proportion to
     the file, the documentation, or CI.
   - It adds no public API, in Rust or Python, and no command-line flag.
-    `cargo semver-checks` and the API snapshot hold the first. Review holds
-    the rest: a new name or flag fails review.
+    `cargo semver-checks` and the API snapshot hold the first, but only once
+    they check as a patch: with the workspace still at 2.2.0 on `main`,
+    `release.py`'s `api_baseline` calls the tree a minor, which may add.
+    The repository variable `API_RELEASE_TYPE=patch` makes it a patch
+    ([Before the lanes start](#before-the-lanes-start-the-maintainer)).
+    Review holds the rest: a new flag fails review.
   - The format stays 1.2, and the diagnostic code table keeps its 100 codes.
     A new bound reports through an existing code.
   - A performance change writes the same `content_id` as 2.2.0 for the same
@@ -359,6 +363,10 @@ Made to plans/README.md with this plan, and summarised here.
    itself.
 3. **The queue timeout.** Consider raising it to 150 minutes. #74 passed in
    126 and was dropped at 120.
+4. **The API gates.** Set the repository variable `API_RELEASE_TYPE` to
+   `patch`, so the `semver` and `python-api` jobs fail an addition, not only
+   a break. Clear it when a 2.3.0 is planned or `release/2.2` is cut (the
+   2.2.x line on a `release/` branch is a patch without it).
 
 ## Release checklist (the coordinator)
 

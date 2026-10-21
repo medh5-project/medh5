@@ -373,9 +373,11 @@ maintainer closed 2.0.x and 2.1.x on 2026-10-21, and an older line reopens
 only by the maintainer's decision.
 
 While no minor is planned, `main` is the patch line and each patch is tagged
-from it ([2.2.x](2.2.x/README.md)). If a feature must land first, a
-`release/X.Y` branch is cut from the last patch tag and the series moves
-there, as [the 2.0.x line](#the-20x-line) does.
+from it ([2.2.x](2.2.x/README.md)), and the repository variable
+`API_RELEASE_TYPE` is `patch`, so the API jobs check `main` as a patch: by
+its version alone, `main` reads as the next minor's work. If a feature must
+land first, a `release/X.Y` branch is cut from the last patch tag and the
+series moves there, as [the 2.0.x line](#the-20x-line) does.
 
 ## The 2.0.x line
 
