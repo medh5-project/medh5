@@ -270,15 +270,18 @@ mod tests {
     /// within `limit`, when the child is killed.  A fixture that hangs ---
     /// the global heap's, on an HDF5 without its patch --- holds HDF5's lock
     /// while it does, so a thread of this process would leave every other
-    /// test that reads a file waiting with it.
+    /// test that reads a file waiting with it.  The child is started through
+    /// [`crate::h5::spawn`]: a plain start could catch another test's file
+    /// between its open and its close-on-exec mark, and the child, which
+    /// runs for seconds, would hold that file's lock until it exits.
     fn bounded(path: &Path, limit: Duration) -> Option<Vec<Value>> {
-        let mut child = Command::new(std::env::current_exe().unwrap())
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
             .args(["--exact", "conformance::robustness::tests::validate_in_a_child", "--nocapture"])
             .env(CHILD, path)
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        let mut child = crate::h5::spawn(&mut command).unwrap();
         let mut stdout = child.stdout.take().unwrap();
         let reader = std::thread::spawn(move || {
             let mut out = String::new();
