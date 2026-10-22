@@ -309,7 +309,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("json.py"), "raise SystemExit(99)\n").unwrap();
         let python = NativeHost::python();
-        let planted = |command: &mut Command| command.current_dir(dir.path()).env_remove("PYTHONSAFEPATH").status();
+        let planted = |command: &mut Command| {
+            medh5::h5::spawn(command.current_dir(dir.path()).env_remove("PYTHONSAFEPATH"))?.wait()
+        };
         // Without the guard the planted module is what runs: the attack is real here.
         let Ok(unguarded) = planted(Command::new(&python).args(["-c", "import json"])) else {
             return; // no Python to hand anything to
@@ -539,7 +541,7 @@ mod tests {
             // A file just written can be busy (ETXTBSY) for as long as a
             // process another test forked meanwhile still holds it open.
             for _ in 0..200 {
-                match Command::new(&path).args(["-c", "__version__"]).output() {
+                match output(Command::new(&path).args(["-c", "__version__"])) {
                     Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
                         std::thread::sleep(std::time::Duration::from_millis(5))
                     }
