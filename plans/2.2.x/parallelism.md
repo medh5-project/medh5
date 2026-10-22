@@ -368,12 +368,32 @@ and documents, and adds no flag.
     at least 1.3 times faster, and list them in `.github/api-exceptions.txt`
     beside P22-11's names. Keep `workers.rs`'s rules: output in input order,
     byte for byte the one-process run's; a writing command's paths that name
-    one file go to one worker; a worker that dies fails only its file.
-    `task preflight` splits by subject and keeps task-cache-1's output order,
-    and never uses threads.
+    one file go to one worker; a worker that dies fails only its unit.
+  - **A worker gets a whole unit of the command, never a bare path.** The
+    unit is what the command computes without looking at another, and
+    anything shared across the cohort is computed once, by the parent,
+    before any worker starts, and handed to each worker as is. The
+    measurement in this item names, for each command, its unit and its
+    shared state, from the code:
+    - `migrate`: a subject's files, which become one sample, with the
+      cohort's one label set (`convert/legacy.rs` `migrate_paths`);
+    - `convert to-nnunet`: a case, with the dataset's label map and case
+      numbering fixed first; `dataset.json` is written by the parent;
+    - `task preflight`: a subject, keeping task-cache-1's output order, and
+      never threads;
+    - `splits`, `labels check`, `dataset check --deep` and `clinical
+      augment-cohort`: a file's reading, where the cohort-wide answer
+      (the assignment, the comparison, the cohort checks) is then made by
+      the parent from every worker's result;
+    - `scrub` and `conformance run`: a file, and a case.
+
+    A command whose unit cannot be cut this way from its code does not gain
+    the flag, and the pull request says why.
 - **Tests.** The recipe runs (`test_docs_python.py`). If D7 takes the flags:
   for each command that gains one, the text, `--json` and the exit code the
-  same at 1 and 4 workers, as the existing commands' tests do.
+  same at 1 and 4 workers, as the existing commands' tests do, on a cohort
+  where a unit spans several files (a subject's legacy files for `migrate`)
+  and the shared state matters (labels a file lacks, an uneven split).
 - **Changelog.** Documentation, or Added, area `cli`, if D7 takes the flags.
 - **Done when.** Every command listed has a number and a decision.
 
