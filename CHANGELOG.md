@@ -6,6 +6,70 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.1] — 2026-10-22
+
+**A patch release, with no format change.** Fixes for hostile input and one
+performance regression, and nothing else: the documented API is unchanged, the
+format stays 1.2 and the diagnostic code table keeps its codes, and what 2.2.0
+wrote, 2.2.1 writes with the same `content_id`. A crafted file can no longer
+hang a read inside HDF5, which the wheels and binaries now build with a fix;
+arithmetic on what a file states is exact, saturated or refused, never wrapped;
+and the ITK transform reader is fuzzed with the rest. Opening samples from
+several threads on the free-threaded build is back to 2.1.0's time. The
+performance guide is measured on 2.2, and only the newest 2.2.x receives fixes.
+
+### Security
+
+- **A crafted file no longer hangs opening or validating it.** One damaged
+  structure inside HDF5 made the library loop without end on the first read
+  of a string, so `medh5 validate`, opening the file from Python, and every
+  other read never returned. HDF5 is now built with a fix
+  (`vendor/hdf5-metno-src/PATCHES.md`), and the file is reported as
+  unreadable (`E001`). The wheels and the release binaries carry it; a build
+  from crates.io does not until HDF5 releases the fix (`SECURITY.md`).
+
+### Fixed
+
+- **Arithmetic on what a file states no longer overflows.** A box from one
+  end of the integers to the other, extents past 64 bits, a link span of
+  `2**64 - 1` and counts summed past 64 bits panicked in a debug build and
+  wrapped in a release one: the layers overlap check took four layers on a
+  grid of `2**62` voxels for empty and passed them unread, a box-only
+  object counted -1 voxels, and an index on a grid wider than `2**31` voxels
+  wrapped its coordinates. Each is now exact, saturated where that is still
+  the answer, or refused through the code that already covers the field.
+- **An ITK B-spline whose lattice overflows is refused.** NumPy's product of
+  `2**32` control points an axis wrapped to 0, and an empty parameter list
+  matched it.
+- **Writing an ITK HDF5 transform file refuses a type name holding a NUL.**
+  HDF5 ends a stored string at its first NUL, so the file kept a shorter name
+  than the one given, and read back as another transform type.
+
+### Performance
+
+- **Opening samples from several threads no longer slows down on the
+  free-threaded build.** In 2.2.0, four threads opening samples on Python
+  3.14t took 3.5 times as long as one thread, twice 2.1.0's time. Two
+  changes fix it. A value read on first use (a grid, an image's metadata, a
+  document) is now read under one take of HDF5's lock, and a thread no longer
+  waits on the value while another thread waits for the lock. An open also
+  takes the lock once for all of its calls. 256 opens from four threads now
+  take 0.25 s instead of 0.52 s, on 2.1.0's level, and 0.19 s instead of
+  0.26 s on the GIL build. One thread is unchanged.
+
+### Documentation
+
+- **Only the newest 2.2.x receives fixes.** `SECURITY.md` gains "Supported
+  versions": the 2.0.x and 2.1.x lines are closed, and nothing is backported
+  to them. The weekly advisory audit reads `main` and `release/2.2` in place
+  of `release/2.0`.
+- **The performance guide's numbers are 2.2.0's, measured beside 2.1.0's on
+  one machine.** 2.2.0 is within the run-to-run spread of 2.1.0 on every
+  `medh5 bench` row. A new example, `docs/examples/bench_threads.py`, times
+  the same reads from one, two and four threads, and the guide gives its
+  table. It found the free-threaded build's slow opens that this release
+  fixes (Performance).
+
 ## [2.2.0] — 2026-10-20
 
 **A minor release, and format 1.2.** 1.2 adds one annotation kind,

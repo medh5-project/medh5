@@ -2659,7 +2659,7 @@ medh5.dataset.Finding.message	field
 medh5.dataset.Finding.severity	field
 medh5.dataset.Finding.to_json	method	()
 medh5.dataset.Finding.where	field
-medh5.dataset.Manifest	class	(entries=<factory>, root=None, generator='medh5 2.2.0', format='1.2') bases=
+medh5.dataset.Manifest	class	(entries=<factory>, root=None, generator='medh5 2.2.1', format='1.2') bases=
 medh5.dataset.Manifest.__getitem__	method	(index)
 medh5.dataset.Manifest.__iter__	method	()
 medh5.dataset.Manifest.__len__	method	()
@@ -2778,7 +2778,7 @@ medh5.dataset.manifest.Entry.subject_id	field
 medh5.dataset.manifest.Entry.timepoints	field
 medh5.dataset.manifest.Entry.to_json	method	()
 medh5.dataset.manifest.GROUPABLE	constant	tuple
-medh5.dataset.manifest.Manifest	class	(entries=<factory>, root=None, generator='medh5 2.2.0', format='1.2') bases=
+medh5.dataset.manifest.Manifest	class	(entries=<factory>, root=None, generator='medh5 2.2.1', format='1.2') bases=
 medh5.dataset.manifest.Manifest.__getitem__	method	(index)
 medh5.dataset.manifest.Manifest.__iter__	method	()
 medh5.dataset.manifest.Manifest.__len__	method	()
