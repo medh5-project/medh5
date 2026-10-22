@@ -623,12 +623,30 @@ impl SampleWriter {
             ));
         }
         let payload = encode_mask(mask);
-        let mut header = AnnotationHeader::new("mask", task);
-        header.grid = Some(grid.to_string());
-        header.prov = prov.map(str::to_string);
-        header.check()?;
+        let header = mask_header(grid, task, prov)?;
         self.write_annotation(ann_id, &header, &payload, Some(&target), codec)?;
         Ok(())
+    }
+
+    /// The `mask` annotation [`add_mask`](Self::add_mask) writes, with its
+    /// `data` created empty for the caller to fill a region at a time
+    /// ([`data::write_region`]): what a derivation writes when the mask is
+    /// as large as the grid ([`crate::transforms::resample`]).  Every voxel is
+    /// the caller's to write; the commit digests what the regions wrote.
+    pub(crate) fn create_mask(
+        &mut self,
+        ann_id: &str,
+        grid: &str,
+        task: &str,
+        prov: Option<&str>,
+        codec: Option<&str>,
+    ) -> Result<hdf5::Dataset> {
+        let target = self.grid_ref(grid)?.clone();
+        let header = mask_header(grid, task, prov)?;
+        let empty = (DType::Bool, target.spatial_shape());
+        let (_, data) =
+            self.write_annotation_with(ann_id, &header, &Payload::new("mask"), Some(&empty), Some(&target), codec)?;
+        Ok(data.expect("created empty"))
     }
 
     pub(crate) fn write_annotation(
@@ -639,6 +657,34 @@ impl SampleWriter {
         grid: Option<&Grid>,
         codec: Option<&str>,
     ) -> Result<hdf5::Group> {
+        Ok(self.write_annotation_with(ann_id, header, payload, None, grid, codec)?.0)
+    }
+
+    /// [`write_annotation`](Self::write_annotation), with `data` of `empty`'s
+    /// dtype and shape created empty after the payload's datasets and chunked
+    /// as the payload's `data` would be, for the caller to fill a region at a
+    /// time: an annotation as large as its grid, written without holding it.
+    pub(crate) fn create_annotation(
+        &mut self,
+        ann_id: &str,
+        header: &AnnotationHeader,
+        payload: &Payload,
+        empty: (DType, Vec<usize>),
+        grid: Option<&Grid>,
+    ) -> Result<(hdf5::Group, hdf5::Dataset)> {
+        let (group, data) = self.write_annotation_with(ann_id, header, payload, Some(&empty), grid, None)?;
+        Ok((group, data.expect("created empty")))
+    }
+
+    fn write_annotation_with(
+        &mut self,
+        ann_id: &str,
+        header: &AnnotationHeader,
+        payload: &Payload,
+        empty: Option<&(DType, Vec<usize>)>,
+        grid: Option<&Grid>,
+        codec: Option<&str>,
+    ) -> Result<(hdf5::Group, Option<hdf5::Dataset>)> {
         validate_id(ann_id, "annotation id")?;
         header.refuse_reserved_attributes()?;
         let node = self.root()?.group("annotations")?;
@@ -651,34 +697,43 @@ impl SampleWriter {
         // or keep without the attributes it failed to write.
         let profile = resolve_profile(Some(codec.unwrap_or(&self.codec)))?;
         let group = ops::new_group(&node, ann_id)?;
-        let written = (|| -> Result<()> {
+        let layout_of = |name: &str, shape: &[usize], itemsize: usize| -> Result<data::Layout> {
+            let mut chunks = None;
+            if let Some(g) = grid {
+                if name == "data" && shape.len() >= g.n_spatial() {
+                    let proposed = self.chunks_for(g, itemsize, payload.stacked_axes)?;
+                    chunks = fit_chunks(&proposed, shape);
+                }
+            }
+            Ok(dataset_layout(shape, itemsize, &profile, Role::Label, chunks))
+        };
+        let written = (|| -> Result<Option<hdf5::Dataset>> {
             for (name, dataset) in &payload.datasets {
                 match dataset {
                     PayloadData::Strings(values) => {
                         data::create_strings(&group, name, values)?;
                     }
                     PayloadData::Array(array) => {
-                        let mut chunks = None;
-                        if let Some(g) = grid {
-                            if name == "data" && array.ndim() >= g.n_spatial() {
-                                let proposed = self.chunks_for(g, array.dtype().itemsize(), payload.stacked_axes)?;
-                                chunks = fit_chunks(&proposed, &array.shape());
-                            }
-                        }
-                        let layout =
-                            dataset_layout(&array.shape(), array.dtype().itemsize(), &profile, Role::Label, chunks);
+                        let layout = layout_of(name, &array.shape(), array.dtype().itemsize())?;
                         data::create(&group, name, array, &layout)?;
                     }
                 }
             }
+            let created = match empty {
+                Some((dtype, shape)) => {
+                    let layout = layout_of("data", shape, dtype.itemsize())?;
+                    Some(data::create_empty(&group, "data", *dtype, shape, &layout)?)
+                }
+                None => None,
+            };
             for (k, v) in header.attrs() {
                 crate::h5::attrs::write(&group, &k, &v)?;
             }
-            Ok(())
+            Ok(created)
         })();
-        self.or_unlink(&node, ann_id, written)?;
+        let created = self.or_unlink(&node, ann_id, written)?;
         self.annotation_kinds.insert(ann_id.to_string(), header.kind.clone());
-        Ok(group)
+        Ok((group, created))
     }
 
     /// Drop an annotation, and any index entry derived from it.
@@ -1497,6 +1552,15 @@ impl SampleWriter {
         }
         Ok(built)
     }
+}
+
+/// The header of a `mask` annotation on `grid`.
+fn mask_header(grid: &str, task: &str, prov: Option<&str>) -> Result<AnnotationHeader> {
+    let mut header = AnnotationHeader::new("mask", task);
+    header.grid = Some(grid.to_string());
+    header.prov = prov.map(str::to_string);
+    header.check()?;
+    Ok(header)
 }
 
 /// Convert an open voxel annotation to another encoding (§7.6).

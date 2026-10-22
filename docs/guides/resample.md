@@ -101,11 +101,6 @@ be a negative nobody found. They become the ignore region (§7.7) of every
 carried mask: its own ignore mask carried and widened, or a new
 `<output>_ignore` mask.
 
-An image goes a target chunk at a time. A carried mask is built whole on the
-target grid, in its own stored type, before it is written, as an image's
-`valid_mask` is; where one mask of the target is more than memory holds, pass
-`--no-annotations`.
-
 ```python
 from medh5.transforms import resample
 
@@ -117,6 +112,22 @@ with medh5.open("case.medh5") as s:
 
 `--no-annotations` (`annotations=False`) moves the images alone. The report
 then lists what stayed on its grid as `not_carried`.
+
+## What it holds in memory
+
+The target is written a chunk at a time: an image, its `valid_mask`, a carried
+mask or label map, and a new ignore mask each hold one target chunk, never a
+target volume. `linear` and `nearest` read only the part of the source image a
+chunk maps into; a carried annotation is read whole, in its stored type. A
+probability map is the exception on the target side, built whole on the target
+grid before it is written; where that is more than memory holds, pass
+`--no-annotations`.
+
+`cubic` costs more. Its B-spline prefilter runs over the whole source before the
+first target voxel is sampled, because a coefficient depends on every sample
+of its line. It holds two `float64` copies of the source while it filters and
+one after: sixteen bytes a source voxel at the peak, so about 1 GiB for a
+512×512×256 source, whatever its stored type.
 
 ## What the file records
 

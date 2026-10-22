@@ -293,33 +293,45 @@ fn element_of(dtype: DType) -> Result<Element> {
     })
 }
 
-/// The array's elements little-endian, first axis fastest: NIfTI's order.
-fn fortran_bytes(array: &NdArray) -> Vec<u8> {
-    macro_rules! bytes {
-        ($a:expr) => {{
-            let view = $a.view().reversed_axes();
-            let mut out =
-                Vec::with_capacity(view.len() * std::mem::size_of_val(&$a.first().copied().unwrap_or_default()));
-            for v in view.iter() {
-                out.extend_from_slice(&v.to_le_bytes());
+/// The array's elements little-endian, first axis fastest: NIfTI's order,
+/// written to `sink` a piece at a time rather than copied whole first.
+fn write_fortran(array: &NdArray, sink: &mut dyn Write) -> std::io::Result<()> {
+    const PIECE: usize = 1 << 20;
+    let mut piece: Vec<u8> = Vec::with_capacity(PIECE + 8);
+    macro_rules! each {
+        ($a:expr, $bytes:expr) => {{
+            for v in $a.view().reversed_axes().iter() {
+                piece.extend_from_slice(&$bytes(v));
+                if piece.len() >= PIECE {
+                    sink.write_all(&piece)?;
+                    piece.clear();
+                }
             }
-            out
         }};
     }
     match array {
-        NdArray::Bool(a) => a.view().reversed_axes().iter().map(|v| u8::from(*v)).collect(),
-        NdArray::I8(a) => bytes!(a),
-        NdArray::U8(a) => bytes!(a),
-        NdArray::I16(a) => bytes!(a),
-        NdArray::U16(a) => bytes!(a),
-        NdArray::I32(a) => bytes!(a),
-        NdArray::U32(a) => bytes!(a),
-        NdArray::I64(a) => bytes!(a),
-        NdArray::U64(a) => bytes!(a),
-        NdArray::F16(a) => bytes!(a),
-        NdArray::F32(a) => bytes!(a),
-        NdArray::F64(a) => bytes!(a),
+        NdArray::Bool(a) => each!(a, |v: &bool| [u8::from(*v)]),
+        NdArray::I8(a) => each!(a, |v: &i8| v.to_le_bytes()),
+        NdArray::U8(a) => each!(a, |v: &u8| v.to_le_bytes()),
+        NdArray::I16(a) => each!(a, |v: &i16| v.to_le_bytes()),
+        NdArray::U16(a) => each!(a, |v: &u16| v.to_le_bytes()),
+        NdArray::I32(a) => each!(a, |v: &i32| v.to_le_bytes()),
+        NdArray::U32(a) => each!(a, |v: &u32| v.to_le_bytes()),
+        NdArray::I64(a) => each!(a, |v: &i64| v.to_le_bytes()),
+        NdArray::U64(a) => each!(a, |v: &u64| v.to_le_bytes()),
+        NdArray::F16(a) => each!(a, |v: &half::f16| v.to_le_bytes()),
+        NdArray::F32(a) => each!(a, |v: &f32| v.to_le_bytes()),
+        NdArray::F64(a) => each!(a, |v: &f64| v.to_le_bytes()),
     }
+    sink.write_all(&piece)
+}
+
+/// [`write_fortran`]'s bytes, as one buffer.
+#[cfg(test)]
+fn fortran_bytes(array: &NdArray) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_fortran(array, &mut out).expect("a Vec takes every write");
+    out
 }
 
 /// `shape (4, 3, 2) does not fit in dim datatype`, nibabel's refusal of a
@@ -468,13 +480,13 @@ fn fault(_at: &'static str) -> std::io::Result<()> {
 
 /// The header, its extension flag and the voxels, as one NIfTI file at
 /// `path` --- gzip-compressed when it ends in `.gz`.
-fn save(path: &Path, header: &Header, voxels: &[u8]) -> Result<()> {
+fn save(path: &Path, header: &Header, voxels: &NdArray) -> Result<()> {
     let io = |e: std::io::Error| crate::error::os_error(&e, path);
     let body = |sink: &mut dyn Write| -> std::io::Result<()> {
         sink.write_all(&header.encode())?;
         fault("save")?;
         sink.write_all(&[0u8; 4])?;
-        sink.write_all(voxels)
+        write_fortran(voxels, sink)
     };
     let file = BufWriter::new(fs::File::create(path).map_err(io)?);
     let mut file = if path.to_string_lossy().ends_with(".gz") {
@@ -505,9 +517,8 @@ pub fn write_field(array: &NdArray, affine: &Array2<f64>, path: &Path) -> Result
     let mut header = image_header(&array.shape(), element, &rows)?;
     header.intent_code = INTENT_DISPVECT;
     header.xyzt_units = 2;
-    let voxels = fortran_bytes(array);
     let staged = crate::h5::file::StagedFile::create(path)?;
-    if let Err(err) = save(staged.path(), &header, &voxels) {
+    if let Err(err) = save(staged.path(), &header, array) {
         staged.abort();
         return Err(err);
     }
@@ -742,9 +753,8 @@ pub fn write_nifti(
     header.xyzt_units = if scale.is_some() { 2 } else { 0 } | temporal;
     let sidecar = sidecar_path(&target, ".json");
     let fields = volume_statements(&sidecar, !statements.is_empty())?;
-    let voxels = fortran_bytes(array);
     let staged = crate::h5::file::StagedFile::create(&target)?;
-    let written = save(staged.path(), &header, &voxels)
+    let written = save(staged.path(), &header, array)
         .and_then(|()| withdraw_volume_statements(&target, &sidecar, fields.as_ref()))
         .and_then(|kept| fault("withdrawn").map(|()| kept).map_err(|e| crate::error::os_error(&e, &target)));
     let kept = match written {
@@ -754,7 +764,6 @@ pub fn write_nifti(
             return Err(err);
         }
     };
-    drop(voxels);
     staged.commit()?;
     if !statements.is_empty() {
         let mut all = kept;

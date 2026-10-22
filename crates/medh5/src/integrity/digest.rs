@@ -31,6 +31,9 @@ use crate::{Error, Result};
 /// Slab size for streaming a large dataset through the hash.
 pub const STREAM_BYTES: usize = 32 * 1024 * 1024;
 
+/// The little-endian bytes a block is hashed in, a piece at a time.
+const LE_PIECE_BYTES: usize = 1 << 20;
+
 fn feed_header(hasher: &mut Hasher, path: &str, dtype_str: &str, shape: &[usize]) {
     hasher.update(path.as_bytes());
     hasher.update(b"\x00");
@@ -171,7 +174,9 @@ pub fn dataset_digest_inspected(
                 if let Some(f) = inspect.as_mut() {
                     f(&block)?;
                 }
-                hasher.update(&block.le_bytes());
+                // A piece at a time: a copy of the block beside it doubled
+                // what a digest holds.
+                block.for_each_le_piece(LE_PIECE_BYTES, &mut |bytes| hasher.update(bytes));
                 Ok(())
             })?;
             Ok(hasher.finish())

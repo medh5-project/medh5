@@ -20,6 +20,7 @@ from medh5.errors import MEDH5ValidationError
 from medh5.integrity import fix
 from medh5.transforms import resample
 from medh5.validate import validate_file
+from tests.helpers import stored_digests
 
 # The source of the SciPy comparison: a smooth, steep volume whose every
 # voxel differs.
@@ -1578,3 +1579,75 @@ class TestDecisionsKept:
             "filled_voxels",
             "content_id",
         ]
+
+
+# What 2.2.0 stored for the resamples below, object by object.  2.2.2 writes
+# the valid mask, the carried label map and its ignore mask a chunk of the
+# target at a time rather than whole, and stores the same content.  The
+# digests are of that content (§13.1); `content_id` also covers the document,
+# which records when the file was written, so it is not compared.
+STORED_BY_2_2_0: dict[str, str] = {
+    "annotations/img_linear_valid/data": (
+        "sha256:98fa2be5dc3bf57db25b4d3a6dbc98e8b24949a5049b62ec01965520726daeba"
+    ),
+    "annotations/img_nearest_valid/data": (
+        "sha256:e6632a90d401a1a58e32bc20b2be275e836bd5f7935fbdd33481ba6e40921af1"
+    ),
+    "annotations/seg/data": (
+        "sha256:6740098adbf0f16d0526b41218cab878e745e013054c85b467cf68e40db73d43"
+    ),
+    "annotations/seg_linear/data": (
+        "sha256:5f1c6d79add63fae0648d73cb2bc76e5d258ba01a971a16691cd89074c42dc60"
+    ),
+    "annotations/seg_linear_ignore/data": (
+        "sha256:a9deafb18abe92e581c6c43f61a2d3cec3884275367b7cb2535103134a373c3a"
+    ),
+    "annotations/seg_nearest/data": (
+        "sha256:338b1e8272d2b3c6b04c02765b1b3f794356c37b435b48201f1f2fb498f0adaf"
+    ),
+    "annotations/seg_nearest_ignore/data": (
+        "sha256:36d438160f897b3324ea232c6fadbb59a4d3b429751d301bc296822bce698aa9"
+    ),
+    "images/img": (
+        "sha256:15582b6c7eb3bda884fe78e70e55f43b69726f4132c42b7f113951b435808ac6"
+    ),
+    "images/img_linear": (
+        "sha256:a668d9dce23b88617b58d2893b8a82f8b74d554ca9efede955f1747cf3dd85dc"
+    ),
+    "images/img_nearest": (
+        "sha256:b84295d2d9b4b3777523fbb74152b08df2ae249ce00640b19749673f6d07cca2"
+    ),
+}
+
+
+class TestWrittenAChunkAtATime:
+    def test_S13_1_a_chunked_resample_stores_what_2_2_0_stored(self, tmp_path):
+        # Arithmetic, not a generator's stream, so the values never change.
+        index = np.arange(16 * 64 * 64).reshape(16, 64, 64)
+        image = (index * 7919 % 1000 / 7).astype(np.float32)
+        labels = index * 31 % 7 % 3
+        path = tmp_path / "s.medh5"
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid("g", shape=image.shape, spacing=(1.0,) * 3, frame_uid="F0")
+            w.add_image("img", image, grid="g", modality="CT")
+            masks = {1: labels == 1, 2: labels == 2}
+            w.add_segmentation("seg", grid="g", masks=masks, encoding="labelmap")
+            # Past the source along x, in chunks a quarter of the target.
+            w.add_grid(
+                "wide",
+                shape=(16, 64, 72),
+                spacing=(1.0,) * 3,
+                frame_uid="F0",
+                chunk_hint=(4, 32, 32),
+            )
+        for interpolation in ("nearest", "linear"):
+            report = resample(
+                path,
+                "img",
+                onto="wide",
+                interpolation=interpolation,
+                suffix=f"_{interpolation}",
+            )
+            assert report.images[0].valid_mask == f"img_{interpolation}_valid"
+            assert report.annotations[0].ignore_mask == f"seg_{interpolation}_ignore"
+        assert stored_digests(path) == STORED_BY_2_2_0

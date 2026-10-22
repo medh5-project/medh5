@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use flate2::read::MultiGzDecoder;
 
 use super::header::{Element, Header, Version, VoxOffset, NATIVE_BIG};
+use crate::array::NdArray;
 use crate::{Error, Result};
 
 /// How much of a file is read to recognise it.
@@ -477,9 +478,19 @@ impl Image {
     /// Read the voxels: exactly the bytes the header implies, from
     /// `vox_offset`, and never more.
     pub fn read_voxels(&self) -> Result<Voxels> {
+        match self.voxel_source()? {
+            VoxelSource::Read(voxels) => Ok(voxels),
+            VoxelSource::Stream(stream) => stream.into_voxels(self.dims()?),
+        }
+    }
+
+    /// Where the voxels come from: read already, where there are none to
+    /// stream (a scalar, an empty array), or a stream at their first byte.
+    /// A shape no array takes is refused here, before a byte is held.
+    pub(crate) fn voxel_source(&self) -> Result<VoxelSource> {
         let element = self.element();
         let big_endian = self.header.big_endian;
-        let empty = |shape: Vec<usize>| Voxels { element, big_endian, shape, bytes: Vec::new() };
+        let empty = |shape: Vec<usize>| VoxelSource::Read(Voxels { element, big_endian, shape, bytes: Vec::new() });
         let compressed = is_gzip(&self.image_name);
         if self.shape.is_empty() {
             // A shape of no dimensions is numpy's scalar: one element.  Where
@@ -495,7 +506,7 @@ impl Image {
             file.seek(SeekFrom::Start(self.offset))?;
             let mut bytes = vec![0; element.itemsize()];
             file.read_exact(&mut bytes)?;
-            return Ok(Voxels { element, big_endian, shape: Vec::new(), bytes });
+            return Ok(VoxelSource::Read(Voxels { element, big_endian, shape: Vec::new(), bytes }));
         }
         // NIfTI-2's seven 64-bit dimensions can name more bytes than even
         // an i128 counts: that array is one no machine holds.
@@ -526,48 +537,221 @@ impl Image {
         let wanted = u64::try_from(n_bytes).unwrap_or(u64::MAX);
         // nibabel named the file it read from, and a gzip stream's name is
         // empty (its `DeterministicGzipFile` wraps an opened file).
-        let source = if compressed { "" } else { self.image_name.as_str() };
-        let short = |got: u64| {
-            Error::Io(format!("Expected {n_bytes} bytes, got {got} bytes from {source}\n - could the file be damaged?"))
-        };
-        if self.shape.iter().any(|v| *v < 0) {
-            // Negative extents in pairs count positive bytes: nibabel read
-            // them, and numpy refused the shape.  Counted here, never held.
-            let got = if compressed {
-                let mut stream = MultiGzDecoder::new(BufReader::new(file));
-                skip(&mut stream, self.offset).map_err(gzip_error)?;
-                io::copy(&mut stream.take(wanted), &mut io::sink()).map_err(gzip_error)?
-            } else {
-                let length = file.metadata().map(|m| m.len()).unwrap_or(0);
-                length.saturating_sub(self.offset).min(wanted)
-            };
-            return Err(if got == wanted {
-                Error::Value("negative dimensions are not allowed".into())
-            } else {
-                short(got)
-            });
-        }
-        let bytes = if compressed {
+        let source = if compressed { String::new() } else { self.image_name.clone() };
+        let (reader, available): (Box<dyn Read>, Option<u64>) = if compressed {
             let mut stream = MultiGzDecoder::new(BufReader::new(file));
             skip(&mut stream, self.offset).map_err(gzip_error)?;
-            read_capped(&mut stream, wanted, None).map_err(gzip_error)?
+            (Box::new(stream), None)
         } else {
             let mut file = file;
             let length = file.metadata().map(|m| m.len()).unwrap_or(0);
             file.seek(SeekFrom::Start(self.offset))?;
-            let available = length.saturating_sub(self.offset);
-            read_capped(&mut BufReader::new(file), wanted, Some(available))?
+            (Box::new(BufReader::new(file)), Some(length.saturating_sub(self.offset)))
         };
-        if bytes.len() as u64 != wanted {
-            return Err(short(bytes.len() as u64));
+        let mut stream = VoxelStream { reader, wanted, available, compressed, source, element, big_endian };
+        #[cfg(test)]
+        STREAMS.with(|streams| {
+            let (live, most) = streams.get();
+            streams.set((live + 1, most.max(live + 1)));
+        });
+        if self.shape.iter().any(|v| *v < 0) {
+            // Negative extents in pairs count positive bytes: nibabel read
+            // them, and numpy refused the shape.  Counted here, never held.
+            let got = match stream.available {
+                None => io::copy(&mut (&mut stream.reader).take(wanted), &mut io::sink()).map_err(gzip_error)?,
+                Some(available) => available.min(wanted),
+            };
+            return Err(if got == wanted {
+                Error::Value("negative dimensions are not allowed".into())
+            } else {
+                stream.short(got)
+            });
         }
-        Ok(Voxels { element, big_endian, shape: self.dims()?, bytes })
+        Ok(VoxelSource::Stream(stream))
     }
 
     /// The shape as an array's, refused where a dimension is not one.
-    fn dims(&self) -> Result<Vec<usize>> {
+    pub(crate) fn dims(&self) -> Result<Vec<usize>> {
         self.shape.iter().map(|v| usize::try_from(*v).map_err(|_| too_big())).collect()
     }
+}
+
+/// Where an image's voxels come from.
+pub(crate) enum VoxelSource {
+    /// Read already: there were none to stream.
+    Read(Voxels),
+    /// Exactly `wanted` bytes to read.
+    Stream(VoxelStream),
+}
+
+impl VoxelSource {
+    /// Read the voxels through and keep none of them: the refusal a read
+    /// would meet, if any, in constant memory.  2.1.0 read a file's voxels
+    /// before anything else could refuse it, so a file with a damaged stream
+    /// and another problem is refused for the stream.
+    pub(crate) fn check(self) -> Result<()> {
+        match self {
+            VoxelSource::Read(_) => Ok(()),
+            VoxelSource::Stream(mut stream) => {
+                let got = io::copy(&mut (&mut *stream.reader).take(stream.wanted), &mut io::sink())
+                    .map_err(|e| stream.error(e))?;
+                if got == stream.wanted {
+                    Ok(())
+                } else {
+                    Err(stream.short(got))
+                }
+            }
+        }
+    }
+}
+
+/// A stream at an image's first voxel byte.
+pub(crate) struct VoxelStream {
+    pub reader: Box<dyn Read>,
+    /// The bytes the header implies.
+    pub wanted: u64,
+    /// The bytes the file holds past `vox_offset`; `None` for a gzip
+    /// stream, whose length is unknown until it is inflated.
+    pub available: Option<u64>,
+    compressed: bool,
+    /// The name a short read is reported against.
+    source: String,
+    pub element: Element,
+    pub big_endian: bool,
+}
+
+impl VoxelStream {
+    /// The refusal of a stream that ended `got` bytes in.
+    pub fn short(&self, got: u64) -> Error {
+        let (wanted, source) = (self.wanted, &self.source);
+        Error::Io(format!("Expected {wanted} bytes, got {got} bytes from {source}\n - could the file be damaged?"))
+    }
+
+    /// An error reading the stream, as the reader reports it.
+    pub fn error(&self, err: io::Error) -> Error {
+        if self.compressed {
+            gzip_error(err)
+        } else {
+            err.into()
+        }
+    }
+
+    /// The voxels' bytes, as `shape`.
+    pub fn into_voxels(mut self, shape: Vec<usize>) -> Result<Voxels> {
+        let bytes = read_capped(&mut *self.reader, self.wanted, self.available).map_err(|e| self.error(e))?;
+        if bytes.len() as u64 != self.wanted {
+            return Err(self.short(bytes.len() as u64));
+        }
+        Ok(Voxels { element: self.element, big_endian: self.big_endian, shape, bytes })
+    }
+
+    /// The voxels as an engine array of `shape`, decoded as they are read:
+    /// the bytes pass through a buffer of [`DECODE_BYTES`] into the array's
+    /// own, so an image is held once rather than as bytes and again as
+    /// values.  `None`, reading nothing, for a type the writer refuses
+    /// (complex, RGB), which [`Voxels::into_ndarray`] names.
+    pub fn into_array(mut self, shape: &[usize]) -> Result<Option<NdArray>> {
+        use Element as E;
+        let swap = self.element.has_byte_order() && self.big_endian != NATIVE_BIG;
+        let dims = ndarray::IxDyn(shape);
+        macro_rules! typed {
+            ($t:ty, $variant:ident) => {{
+                let values: Vec<$t> = self.decode(swap, <$t>::from_ne_bytes)?;
+                NdArray::$variant(ndarray::ArrayD::from_shape_vec(dims, values)?)
+            }};
+        }
+        Ok(Some(match self.element {
+            E::U8 => typed!(u8, U8),
+            E::I8 => typed!(i8, I8),
+            E::I16 => typed!(i16, I16),
+            E::U16 => typed!(u16, U16),
+            E::I32 => typed!(i32, I32),
+            E::U32 => typed!(u32, U32),
+            E::I64 => typed!(i64, I64),
+            E::U64 => typed!(u64, U64),
+            E::F32 => typed!(f32, F32),
+            E::F64 => typed!(f64, F64),
+            E::C64 | E::C128 | E::Rgb24 | E::Rgba32 => return Ok(None),
+        }))
+    }
+
+    /// Every `N`-byte unit of the stream as a `T`, swapped first where the
+    /// file's byte order is not this machine's.  Reserved as [`read_capped`]
+    /// reserves, and refused as [`Image::read_voxels`] refuses a stream that
+    /// ends early.
+    fn decode<T, const N: usize>(&mut self, swap: bool, from: fn([u8; N]) -> T) -> Result<Vec<T>> {
+        let reserve = self.wanted.min(self.available.unwrap_or(START_BYTES)) as usize / N;
+        let mut out: Vec<T> = Vec::new();
+        let _ = out.try_reserve_exact(reserve);
+        // Never smaller than an element, so a part of one left over is never all
+        // the buffer holds.
+        let mut buffer = vec![0u8; decode_bytes().max(N)];
+        let (mut pending, mut got) = (0usize, 0u64);
+        let mut stream = (&mut self.reader).take(self.wanted);
+        let failed = loop {
+            let n = match stream.read(&mut buffer[pending..]) {
+                Ok(0) => break None,
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => break Some(e),
+            };
+            got += n as u64;
+            pending += n;
+            let whole = pending - pending % N;
+            out.extend(buffer[..whole].chunks_exact(N).map(|c| {
+                let mut unit: [u8; N] = c.try_into().expect("a whole unit");
+                if swap {
+                    unit.reverse();
+                }
+                from(unit)
+            }));
+            buffer.copy_within(whole..pending, 0);
+            pending -= whole;
+        };
+        if let Some(err) = failed {
+            return Err(self.error(err));
+        }
+        if got != self.wanted {
+            return Err(self.short(got));
+        }
+        Ok(out)
+    }
+}
+
+/// What a stream of unknown length reserves up front: reading grows it.
+const START_BYTES: u64 = 64 << 20;
+
+/// The buffer voxels are decoded through.
+const DECODE_BYTES: usize = 1 << 20;
+
+#[cfg(test)]
+thread_local! {
+    /// [`DECODE_BYTES`], lowered by a test.
+    static TEST_DECODE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(DECODE_BYTES) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The voxel streams open now, and the most open at once, for the test
+    /// that an import holds one file open at a time.
+    pub(crate) static STREAMS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+impl Drop for VoxelStream {
+    fn drop(&mut self) {
+        STREAMS.with(|streams| {
+            let (live, most) = streams.get();
+            streams.set((live - 1, most));
+        });
+    }
+}
+
+fn decode_bytes() -> usize {
+    #[cfg(test)]
+    return TEST_DECODE_BYTES.with(|bytes| bytes.get());
+    #[cfg(not(test))]
+    DECODE_BYTES
 }
 
 /// Whether numpy makes an array of `shape`: no extent negative, and the
@@ -591,8 +775,7 @@ fn too_big() -> Error {
 /// Read `wanted` bytes or to the end, reserving no more than `available`
 /// (or a modest start, for a stream of unknown length) up front.
 fn read_capped(stream: &mut dyn Read, wanted: u64, available: Option<u64>) -> io::Result<Vec<u8>> {
-    const START: u64 = 64 << 20;
-    let reserve = wanted.min(available.unwrap_or(START)).min(usize::MAX as u64) as usize;
+    let reserve = wanted.min(available.unwrap_or(START_BYTES)).min(usize::MAX as u64) as usize;
     let mut out = Vec::new();
     // Up front only where the memory is there; reading grows it either way.
     let _ = out.try_reserve_exact(reserve);
@@ -877,6 +1060,49 @@ mod tests {
             bytes[168..176].copy_from_slice(&if big { far.to_be_bytes() } else { far.to_le_bytes() });
             std::fs::write(&path, &bytes).unwrap();
             assert_eq!(nifti(&path).offset, (1 << 53) + 1);
+        }
+    }
+
+    /// A volume is decoded into its array through a small buffer, whatever
+    /// the buffer's size against an element's, and gives what decoding the
+    /// bytes read whole gives; a stream that ends early is refused alike.
+    #[test]
+    fn s4_2_voxels_decode_into_their_array_a_buffer_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        // (datatype, bitpix): int16, float32, float64, uint8.
+        for (datatype, bitpix) in [(4, 16), (16, 32), (64, 64), (2, 8)] {
+            for big in [false, true] {
+                for compressed in [false, true] {
+                    let mut h = header(Version::One, &[5, 3, 7]);
+                    (h.datatype, h.bitpix, h.big_endian) = (datatype, bitpix, big);
+                    let n = 5 * 3 * 7 * (bitpix as usize / 8);
+                    let bytes: Vec<u8> = (0..n).map(|i| (i * 37 % 251) as u8).collect();
+                    let name = format!("v{datatype}{big}.nii{}", if compressed { ".gz" } else { "" });
+                    let path = dir.path().join(&name);
+                    let file = single(&h, &bytes);
+                    std::fs::write(&path, if compressed { gzip(&file) } else { file }).unwrap();
+                    let image = nifti(&path);
+                    let whole = image.read_voxels().unwrap().into_ndarray().unwrap();
+                    for buffer in [1, 3, 7, 64, DECODE_BYTES] {
+                        TEST_DECODE_BYTES.with(|b| b.set(buffer));
+                        let VoxelSource::Stream(stream) = image.voxel_source().unwrap() else { panic!("streamed") };
+                        let array = stream.into_array(&image.dims().unwrap()).unwrap().expect("a stored type");
+                        // Bit for bit: arbitrary bytes make NaNs of floats.
+                        assert_eq!(array.dtype(), whole.dtype(), "{name}, buffer {buffer}");
+                        assert_eq!(array.shape(), whole.shape(), "{name}, buffer {buffer}");
+                        assert_eq!(array.le_bytes(), whole.le_bytes(), "{name}, buffer {buffer}");
+                    }
+                    TEST_DECODE_BYTES.with(|b| b.set(DECODE_BYTES));
+                    // Short by a byte and a half element.
+                    let cut = &single(&h, &bytes)[..352 + n - 3];
+                    std::fs::write(&path, if compressed { gzip(cut) } else { cut.to_vec() }).unwrap();
+                    let image = nifti(&path);
+                    let read = image.read_voxels().unwrap_err().to_string();
+                    let VoxelSource::Stream(stream) = image.voxel_source().unwrap() else { panic!("streamed") };
+                    let decoded = stream.into_array(&image.dims().unwrap()).unwrap_err().to_string();
+                    assert_eq!(decoded, read, "{name}");
+                }
+            }
         }
     }
 
