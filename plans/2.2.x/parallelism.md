@@ -43,8 +43,10 @@ exception to what a patch may change ([D6](#decisions-the-maintainer)).
     already builds), failing under `patch` on an item not on the list.
   - **Everything else stays private.** The engine's new code (the chunk
     writer in `h5/`, the hashing in `integrity/`, the timings) is
-    `pub(crate)`, and `medh5-sys` gains no Rust name but the one
-    compression entry point P22-12 needs, which is on the list.
+    `pub(crate)`, and `medh5-sys` gains no Rust name: the C entry point
+    P22-12 adds is declared in a private `extern` block inside `medh5`
+    (the symbol links in with `medh5-sys`'s static library). The list holds
+    P22-11's names, P22-14's flags if D7 takes them, and nothing else.
   - The list stays through 2.2.4's release pull request, whose gate still
     compares against the published 2.2.3, and is emptied by the first pull
     request after v2.2.4 is published, when those names are the baseline.
@@ -168,11 +170,10 @@ exception allows ([D6](#decisions-the-maintainer)).
       (processes, across files).
     - Precedence: a command's flag, then `set_threads`, then the
       environment, then 1. `0` is refused: there is no "auto".
-  - **These names are the whole exception**, with P22-12's one `medh5-sys`
-    entry point. P22-11 lists them in `.github/api-exceptions.txt` with D6,
-    and makes both API jobs read that list (see
-    [The API gates](#medh5-223-and-224-parallelism)). A test holds the list
-    to these names.
+  - **These names are the whole exception.** P22-11 lists them in
+    `.github/api-exceptions.txt` with D6, and makes both API jobs read that
+    list (see [The API gates](#medh5-223-and-224-parallelism)). A test holds
+    the list to these names.
   - **Threads live inside one call.** Each call that uses threads starts them
     (`std::thread::scope`) and joins them before it returns, so no thread
     outlives a call and nothing is left running across a `fork`. There is no
@@ -221,9 +222,9 @@ exception allows ([D6](#decisions-the-maintainer)).
   - `blosc2_filter_function` reports a failure with `H5Epush`, an HDF5 call,
     so it cannot run outside the lock as it is. Its compression is split into
     an entry point that calls no HDF5 function and returns an error code,
-    which both the filter and the chunk writer call. Its Rust declaration
-    in `medh5-sys`, beside `medh5_b2nd_read_slice`, is the one public name
-    this item adds (on the list). The change is a patch to
+    which both the filter and the chunk writer call. `medh5` declares it in
+    a private `extern` block, so it is no public Rust name in either crate.
+    The change is a patch to
     the vendored filter, listed in its `PATCHES.md`
     (`crates/medh5-sys/vendor/hdf5-blosc2/`) as the others are.
   - **C-Blosc2's process state is touched only by the caller.**
@@ -234,11 +235,20 @@ exception allows ([D6](#decisions-the-maintainer)).
     run before any worker starts, so no new Rust name is needed for it, and
     the entry point calls no `blosc2_init`.
     Each call compresses with its own context (`blosc2_create_cctx`, as the
-    filter does), with Blosc2's own thread count at one, and never through
-    the global context or a `blosc1_*` setter. Workers that decompress for
-    P22-13 use the window reader's path, which follows the same rules. A
-    test compresses from four threads as the first Blosc2 use in a fresh
-    process.
+    filter does), and never through the global context or a `blosc1_*`
+    setter.
+  - **One Blosc2 thread per worker, whatever the environment says.**
+    `blosc2_create_cctx` and `blosc2_create_dctx` take `BLOSC_NTHREADS`
+    over the thread count they are given, so a user's setting would start
+    Blosc2's own threads inside every worker. The entry point, and the
+    decompression P22-13's workers do through the window reader's path,
+    set their context back to one thread after creating it. Other
+    `BLOSC_*` settings reach the entry point exactly as they reach the
+    filter, since it is the filter's code, so the stored bytes still match.
+  - **Tests.** Compressing from four threads as the first Blosc2 use in a
+    fresh process; with `BLOSC_NTHREADS=8`, a four-thread call starts no
+    more than four threads (a Rust test counts them), and stores the same
+    bytes as one thread.
   - Anything else goes through `H5Dwrite` as now: `portable`, a second
     filter, a type HDF5 would convert, a write that covers part of a chunk.
     "HDF5's bytes or HDF5's write", as the reader's invariant says.
