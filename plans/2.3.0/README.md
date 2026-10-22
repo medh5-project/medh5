@@ -325,21 +325,42 @@ Under [D2](#decisions-the-maintainer) as proposed.
   - Nothing exports. The 2.2.0 plan's Out of scope named the export as a
     candidate for 2.3, MEDS first, because it round-trips with the importer.
 - **Change.**
-  - `medh5.io.meds.write_meds(paths, out, …)` and
-    `medh5 clinical export-meds`, writing a MEDS 0.3 dataset (`data/` shards
-    and `metadata/dataset.json`) from the samples' clinical histories.
+  - `medh5.io.meds.write_meds(mapping, out, …)` and
+    `medh5 clinical export-meds --mapping`, writing a MEDS 0.3 dataset
+    (`data/` shards and `metadata/dataset.json`) from the samples' clinical
+    histories.
+  - **The caller names each sample's MEDS `subject_id`**, as a mapping from
+    MEDS `subject_id` to sample, the shape `augment_cohort_from_meds` takes
+    (and the same `subject,sample` CSV on the command line). Nothing is
+    minted: a medh5 subject id is any string and MEDS's is an integer, the
+    importer records that "MEDS's id is not written", and an imported event's
+    id hashes the MEDS `subject_id` with the row (`_row_id`), so only the
+    caller's id gives the same ids back.
   - The mapping is the importer's, inverted, and the pull request gives it as
     a table: a `static` event to a null `time`, a code system back to its
     declared prefix, `value_num` and `value_text`, the declared `unit` and
-    `available` columns.
-  - What MEDS cannot hold is never dropped silently. An interval's end, a
-    second time pair, a revision chain: each goes into a declared extension
-    column, or is listed in the report as not exported. Which is the lane's
-    call, recorded in the pull request.
+    `available` columns, and a day span to a time under a `day_precision`
+    prefix.
+  - **What the round trip promises, and what it does not.** Every event the
+    importer can produce, exported and imported again with the same options
+    (`day_precision`, `columns`, `code_systems`, the same subject ids), comes
+    back with the same id, code, value and both time pairs. An event the
+    importer cannot produce (an interval that is not a day span, an
+    availability that is a range rather than one time, a revision chain) is
+    not written at all, in any form the importer would read as something
+    else; the report lists each one, by event id, as not exported. Extension
+    columns that would carry them, with the importer reading them, are a
+    later minor's.
   - Documents' text is exported only when asked (`texts=True`), as on import.
-- **Tests.** Import, export and import again gives the same events (ids,
-  codes, values, both time pairs) for every MEDS fixture the importer's tests
-  use. A history MEDS cannot hold reports what it left out.
+- **Tests.**
+  - Import, export and import again gives the same events (ids, codes,
+    values, both time pairs) for every MEDS fixture the importer's tests use,
+    including the day-precision intervals and declared availability of
+    `tests/integrations/test_meds.py`.
+  - A history holding events the importer cannot produce exports the rest,
+    and its report names each one left out.
+  - A subject id that is not an integer, or one sample under two subject
+    ids, is refused before anything is written.
 - **Documentation.** The clinical guide gains "Export to MEDS".
 - **Changelog.** Added, area `clinical`.
 - **Done when.** The round trip passes, and the CLI reference lists the
