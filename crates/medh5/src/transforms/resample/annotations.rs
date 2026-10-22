@@ -21,7 +21,9 @@ use indexmap::IndexMap;
 use ndarray::{Array2, ArrayD, IxDyn};
 use serde_json::{json, Value};
 
-use super::{block_indices, blocks, linear_sample, step, unit_scale, Body, Mapping, ResamplePlan, Transform};
+use super::{
+    block_indices, blocks, c_strides, linear_sample, step, unit_scale, Body, Mapping, ResamplePlan, Transform,
+};
 use crate::annotations::encode::{encode_instances, encode_probmap, InstanceInput};
 use crate::annotations::header::AnnotationHeader;
 use crate::annotations::payload::{Payload, PayloadData};
@@ -770,6 +772,21 @@ impl<'a> Nearest<'a> {
         let dims: Vec<usize> = block.iter().map(|(a, b)| b - a).collect();
         for part in blocks(&dims, &block_shape(&dims)) {
             let within: Vec<(usize, usize)> = part.iter().zip(block).map(|((a, b), (o, _))| (a + o, b + o)).collect();
+            if let Some(voxels) = self.axis_voxels(&within)? {
+                // The part's voxels in C order, each the sum of its axes'.
+                let mut local: Vec<usize> = part.iter().map(|(a, _)| *a).collect();
+                let n: usize = part.iter().map(|(a, b)| b - a).product();
+                for _ in 0..n {
+                    let source = voxels
+                        .iter()
+                        .zip(&local)
+                        .zip(&part)
+                        .try_fold(0, |flat, ((axis, i), (a, _))| axis[i - a].map(|v| flat + v));
+                    visit(flat_index(local.iter().copied(), &dims), source);
+                    step(&mut local, &part);
+                }
+                continue;
+            }
             let points = self.mapping.map(&block_indices(&within))?;
             // The part's voxels in C order, as the points are: where each
             // lies in the block, counted up rather than read back from the
@@ -781,6 +798,30 @@ impl<'a> Nearest<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Where the mapping moves each axis alone ([`Mapping::axes`]), the
+    /// source voxel nearest each coordinate of `block`'s axes, times the
+    /// source's stride along the axis, and `None` where the coordinate is
+    /// outside its axis: a voxel's flat index is the sum of its axes', as
+    /// [`Nearest::source_voxel`] works it out from the voxel's row.
+    fn axis_voxels(&self, block: &[(usize, usize)]) -> Result<Option<Vec<Vec<Option<usize>>>>> {
+        let Some(axes) = self.mapping.axes(block)? else { return Ok(None) };
+        let strides = c_strides(&self.source);
+        Ok(Some(
+            axes.iter()
+                .enumerate()
+                .map(|(k, coords)| {
+                    let m = self.source[k];
+                    coords
+                        .iter()
+                        .map(|v| {
+                            (*v >= -0.5 && *v <= m as f64 - 0.5).then(|| ((v + 0.5) as usize).min(m - 1) * strides[k])
+                        })
+                        .collect()
+                })
+                .collect(),
+        ))
     }
 
     /// The flat index of the source voxel nearest `point`, when it is inside.
@@ -797,6 +838,20 @@ impl<'a> Nearest<'a> {
     /// indices, a block at a time; `source` is `None` outside the source.
     fn each(&self, mut visit: impl FnMut(usize, Option<usize>)) -> Result<()> {
         for block in blocks(&self.shape, &block_shape(&self.shape)) {
+            if let Some(voxels) = self.axis_voxels(&block)? {
+                let mut at: Vec<usize> = block.iter().map(|(a, _)| *a).collect();
+                let n: usize = block.iter().map(|(a, b)| b - a).product();
+                for _ in 0..n {
+                    let source = voxels
+                        .iter()
+                        .zip(&at)
+                        .zip(&block)
+                        .try_fold(0, |flat, ((axis, i), (a, _))| axis[i - a].map(|v| flat + v));
+                    visit(flat_index(at.iter().copied(), &self.shape), source);
+                    step(&mut at, &block);
+                }
+                continue;
+            }
             let points = self.mapping.map(&block_indices(&block))?;
             let mut at: Vec<usize> = block.iter().map(|(a, _)| *a).collect();
             for point in points.outer_iter() {
