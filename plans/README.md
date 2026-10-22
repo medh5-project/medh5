@@ -11,6 +11,7 @@ is to put there.
 | 2.1.0 | minor: features, errata, deprecations | [2.1.0/README.md](2.1.0/README.md) | released 2026-10-15 |
 | 2.2.0 | minor: format 1.2, native converters, platforms, resampling | [2.2.0/README.md](2.2.0/README.md) | released 2026-10-20 |
 | 2.2.x | patch releases on `main`: fixes, performance, hardening | [2.2.x/README.md](2.2.x/README.md) | planned |
+| 2.3.0 | minor: threads inside a file, workers across files, digest cost, MEDS export | [2.3.0/README.md](2.3.0/README.md) | proposed; starts after 2.2.2 |
 | 2.0.x | patch line, cut on demand | this file, [the 2.0.x line](#the-20x-line) | 2.0.3 released; closed 2026-10-21 |
 
 ## How to use a plan
@@ -40,9 +41,10 @@ is to put there.
   exists only once a patch is needed (see [the 2.0.x line](#the-20x-line)).
   While no minor is planned, `main` is the 2.2.x patch line instead (see
   [Patch releases](#patch-releases)).
-- A workstream works on `w21/<name>` (2.1.0), `w22/<name>` (2.2.0) or
-  `p22/<name>` (2.2.x), cut from the latest `main`; the pull request's title
-  starts with the workstream id (`W21-02: …`, `P22-01: …`). A workstream that
+- A workstream works on `w21/<name>` (2.1.0), `w22/<name>` (2.2.0),
+  `p22/<name>` (2.2.x) or `w23/<name>` (2.3.0), cut from the latest `main`;
+  the pull request's title starts with the workstream id (`W21-02: …`,
+  `P22-01: …`, `W23-01: …`). A workstream that
   lands as several pull requests pushes each from its own branch
   (`w22/<name>`, `w22/<name>-2`, …), so the next one can open while the last
   sits in the queue. A lane's brief names every branch its
