@@ -661,9 +661,10 @@ impl Mapping {
                 let s = m.nrows() - 1;
                 let linear = m.slice(ndarray::s![..s, ..s]);
                 let mut out = indices.dot(&linear.t());
+                let shift: Vec<f64> = (0..s).map(|r| m[[r, s]]).collect();
                 for mut row in out.outer_iter_mut() {
-                    for (r, v) in row.iter_mut().enumerate() {
-                        *v += m[[r, s]];
+                    for (v, t) in row.iter_mut().zip(&shift) {
+                        *v += t;
                     }
                 }
                 Ok(out)
@@ -1085,16 +1086,7 @@ fn resample_image(
         while let Some(block) = pending.pop() {
             let dims: Vec<usize> = block.iter().map(|(a, b)| b - a).collect();
             let n: usize = dims.iter().product();
-            let mut indices = Array2::<f64>::zeros((n, s));
-            for (row, mut point) in indices.outer_iter_mut().enumerate() {
-                let mut rest = row;
-                for k in (0..s).rev() {
-                    point[k] = (block[k].0 + rest % dims[k]) as f64;
-                    rest /= dims[k];
-                }
-            }
-            let mut clamped = mapping.map(&indices)?;
-            drop(indices);
+            let mut clamped = mapping.map(&block_indices(&block))?;
             let inside: Vec<bool> = clamped
                 .outer_iter()
                 .map(|p| p.iter().zip(&source_spatial).all(|(v, m)| *v >= -0.5 && *v <= *m as f64 - 0.5))
@@ -1155,7 +1147,10 @@ fn resample_image(
                             return 0;
                         }
                         (0..s).fold(0, |flat, k| {
-                            let i = ((clamped[[row, k]] + 0.5).floor() as usize).min(source_spatial[k] - 1);
+                            // A cast truncates, which is the floor at and above
+                            // zero and saturates to 0 below it, as the floor's
+                            // cast did; the floor is a call on baseline x86-64.
+                            let i = ((clamped[[row, k]] + 0.5) as usize).min(source_spatial[k] - 1);
                             flat * (crop[k].1 - crop[k].0) + i - crop[k].0
                         })
                     })
@@ -1316,6 +1311,31 @@ fn write_valid(dataset: &hdf5::Dataset, block: &[(usize, usize)], invalid: Optio
     let starts: Vec<usize> = block.iter().map(|(a, _)| *a).collect();
     wrote(n);
     data::write_region(dataset, &NdArray::Bool(ArrayD::from_shape_vec(IxDyn(&dims), values)?), &starts)
+}
+
+/// The `(n, S)` target indices of a block, in C order: counted up, one row
+/// after another, rather than divided out of the row number.
+fn block_indices(block: &[(usize, usize)]) -> Array2<f64> {
+    let s = block.len();
+    let n: usize = block.iter().map(|(a, b)| b - a).product();
+    let mut flat = Vec::with_capacity(n * s);
+    let mut at: Vec<usize> = block.iter().map(|(a, _)| *a).collect();
+    for _ in 0..n {
+        flat.extend(at.iter().map(|v| *v as f64));
+        step(&mut at, block);
+    }
+    Array2::from_shape_vec((n, s), flat).expect("a row of S indices per voxel")
+}
+
+/// The next index of `block` after `at`, in C order.
+fn step(at: &mut [usize], block: &[(usize, usize)]) {
+    for k in (0..at.len()).rev() {
+        at[k] += 1;
+        if at[k] < block[k].1 {
+            return;
+        }
+        at[k] = block[k].0;
+    }
 }
 
 /// The flat (C-order) lanes of the leading axes a block of them covers.

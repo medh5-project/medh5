@@ -1651,3 +1651,183 @@ class TestWrittenAChunkAtATime:
             assert report.images[0].valid_mask == f"img_{interpolation}_valid"
             assert report.annotations[0].ignore_mask == f"seg_{interpolation}_ignore"
         assert stored_digests(path) == STORED_BY_2_2_0
+
+
+# What 2.2.0 stored for the resamples below, onto a turned grid that leaves
+# the source, a turned grid inside it, and a grid in another frame through a
+# transform.  2.2.2 maps, gathers and interpolates with less work a voxel ---
+# an outside check from the target's corners, indices counted up, taps
+# found once an axis --- and stores the same content.
+STORED_BY_2_2_0_TURNED: dict[str, str] = {
+    "annotations/img_moved_cubic_valid/data": (
+        "sha256:1a58c89dd7dd711ffc1bc362fa87bd6a7ef17f793f5de4cadc6751fca948d843"
+    ),
+    "annotations/img_moved_linear_valid/data": (
+        "sha256:03fa803e5af260b8d32bced19d77c849f7f50eef36a938faf69a42fae2de4bf1"
+    ),
+    "annotations/img_moved_nearest_valid/data": (
+        "sha256:e3d85ac03bbdf1384d952b4612b86339620e4264b6a5f9fc6c9e4770dacd0cdf"
+    ),
+    "annotations/img_tilt_cubic_valid/data": (
+        "sha256:60d351636ce27d84341a136fa7def6c9c271f442e280646e7b480f54c77a2b60"
+    ),
+    "annotations/img_tilt_linear_valid/data": (
+        "sha256:59fd07fbb777ffe04befd7384892903ea256d533c96180da6b32f8b221cb5ea5"
+    ),
+    "annotations/img_tilt_nearest_valid/data": (
+        "sha256:45f76b06a59c1e46a55684bd9d1db6055943d15506daea9dffa3543e242ea38a"
+    ),
+    "annotations/seg/data": (
+        "sha256:514675bf18ab727bfe01cfd7babe176540b8afb98bdb47da0cb7e5a06cf022c0"
+    ),
+    "annotations/seg_inner_cubic/data": (
+        "sha256:6ad3a561079598d15a895aebf6a8dd64c33649b359e10d1bd950cf2ed3977d56"
+    ),
+    "annotations/seg_inner_linear/data": (
+        "sha256:5d750812b86b828ebe79dc1622d961aff6414fc3b6e4e6555d808b7a55893ab9"
+    ),
+    "annotations/seg_inner_nearest/data": (
+        "sha256:737c184c1a3e275d8252e62eb4ad2bb0acd7830414e311deb593bdbd00edf2a1"
+    ),
+    "annotations/seg_moved_cubic/data": (
+        "sha256:6ce8f817727aa362dea6cf875a16c2af8854564149d2a2506e58db63183fb145"
+    ),
+    "annotations/seg_moved_cubic_ignore/data": (
+        "sha256:70e9774712ad4278cee33d8fa5a96525a81cb6c24e1ee820186a915ee12ec85f"
+    ),
+    "annotations/seg_moved_linear/data": (
+        "sha256:b03a8639f73d482e1a35550a481da76308e3a3a8ce06e34491bbf445ed794493"
+    ),
+    "annotations/seg_moved_linear_ignore/data": (
+        "sha256:3ea785666b1d42b9582f9f04271fbe8f46fe29610d0a845a168e3ef712fe439d"
+    ),
+    "annotations/seg_moved_nearest/data": (
+        "sha256:602453640b5733f6a5f249210a0d1c886488918ae85894c09bf539131585690a"
+    ),
+    "annotations/seg_moved_nearest_ignore/data": (
+        "sha256:5fa5e9cbb0d7e6fa3e7da817a8236267ecb8462e303c5f4d688f4770cedac0ed"
+    ),
+    "annotations/seg_tilt_cubic/data": (
+        "sha256:2394434e647a0fb91718ef5e84e531ff8e66362df299392bacd456f6b4221265"
+    ),
+    "annotations/seg_tilt_cubic_ignore/data": (
+        "sha256:29145c69bb4f6033a887671d8e5232498e8333d1513677296478853db3b12c94"
+    ),
+    "annotations/seg_tilt_linear/data": (
+        "sha256:62d980a6bff678bafef3caf9348ea43707c5179709ec3a88859ab2fd2fbcaa86"
+    ),
+    "annotations/seg_tilt_linear_ignore/data": (
+        "sha256:31b9fd9167718b53c8afce686b510267416f1ae3778a426bbcb66fd94f7ea1ab"
+    ),
+    "annotations/seg_tilt_nearest/data": (
+        "sha256:9ea6adfaea8d4791c75398549e2acc886ed284f7282cbe098af37ec76d94a8fb"
+    ),
+    "annotations/seg_tilt_nearest_ignore/data": (
+        "sha256:23170d13722efea9fe3c3487d0da7d3eed3f94541e9af77ad6c88dbaff44c974"
+    ),
+    "images/img": (
+        "sha256:e24e85c1408682984723cc027b30c27d72351fa7f830eafc48011e97b5c79491"
+    ),
+    "images/img_inner_cubic": (
+        "sha256:865bc617ea251d7de7b17440f5ad4de39b13bae418b2a155bf7bcf366f67a6fc"
+    ),
+    "images/img_inner_linear": (
+        "sha256:b1f260084dbf689bb91349310e7c35e3265b77de840d456613ca706c4edca6f9"
+    ),
+    "images/img_inner_nearest": (
+        "sha256:ed513ab24de89b8c04664988c27e202866dfe3f42452102509cd17b2c5b48153"
+    ),
+    "images/img_moved_cubic": (
+        "sha256:084c3d6d3f01dd17051cec325b51df426879c826acb0811c64329386a49c3ef7"
+    ),
+    "images/img_moved_linear": (
+        "sha256:c85fc0cc8ebf64a02528c104f1b30eb25a609f1fdfc18de7d48be982c54b1413"
+    ),
+    "images/img_moved_nearest": (
+        "sha256:8a09cf1401ff41b231f41daecbea074979b18636b910d8c4fe097d6d50b767cf"
+    ),
+    "images/img_tilt_cubic": (
+        "sha256:19ac798d8e9fcd5af74654d7997eedd8bc0bb07d45f525910ed5ef3a321a3369"
+    ),
+    "images/img_tilt_linear": (
+        "sha256:5f44efd6e5226e5700097aa5f77fc22b036e8be2fbf6fa04bbacd17558dafc9d"
+    ),
+    "images/img_tilt_nearest": (
+        "sha256:db735cade73f4b74a1699ee7b191825062dbe195655cf84436e95d8bff55ad0b"
+    ),
+    "images/ref": (
+        "sha256:1aaa34243bf2d87672df15d5846249985e63dfa374adea52cc77680f6f511988"
+    ),
+    "transforms/f1_to_f0/matrix": (
+        "sha256:611acd3b7c8cc36ce340ceda143c7a2e2ae4fe8af73e8665d5ad378d80ac1d8d"
+    ),
+}
+
+
+def _turned(
+    angle: float, shift: tuple[float, float, float] = (0.0, 0.0, 0.0)
+) -> np.ndarray:
+    c, s = np.cos(angle), np.sin(angle)
+    return np.array(
+        [[1, 0, 0, shift[0]], [0, c, -s, shift[1]], [0, s, c, shift[2]], [0, 0, 0, 1.0]]
+    )
+
+
+class TestTheSameArithmetic:
+    def test_S13_1_a_resample_stores_what_2_2_0_stored_for_every_interpolation(
+        self, tmp_path
+    ):
+        index = np.arange(12 * 14 * 16).reshape(12, 14, 16)
+        image = (index * 7919 % 1000 / 7).astype(np.float32)
+        labels = index * 31 % 7 % 3
+        path = tmp_path / "s.medh5"
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid("g", shape=image.shape, spacing=(1.5, 1.0, 1.2), frame_uid="F0")
+            w.add_image("img", image, grid="g", modality="CT")
+            masks = {1: labels == 1, 2: labels == 2}
+            w.add_segmentation("seg", grid="g", masks=masks, encoding="labelmap")
+            w.add_grid(
+                "tilt",
+                shape=(10, 12, 14),
+                spacing=(1.2, 0.9, 1.1),
+                origin=(1.0, -2.0, 3.0),
+                direction=_turned(0.3)[:3, :3],
+                frame_uid="F0",
+            )
+            # Turned, and inside the source by a voxel or more: no voxel is
+            # filled, so no valid or ignore mask is written.
+            w.add_grid(
+                "inner",
+                shape=(6, 7, 8),
+                spacing=(1.0, 1.0, 1.0),
+                origin=(4.0, 5.0, 3.0),
+                direction=_turned(0.3)[:3, :3],
+                frame_uid="F0",
+            )
+            w.add_grid(
+                "moved",
+                shape=(9, 11, 13),
+                spacing=(1.7, 1.3, 1.1),
+                origin=(1.1, 0.8, 1.2),
+                frame_uid="F1",
+            )
+            w.add_image(
+                "ref", np.zeros((9, 11, 13), np.int16), grid="moved", modality="CT"
+            )
+            w.add_transform(
+                "f1_to_f0",
+                kind="affine",
+                from_frame="F1",
+                to_frame="F0",
+                matrix=_turned(0.2, (0.3, -0.2, 0.4)),
+            )
+        for onto in ("tilt", "inner", "moved"):
+            for interpolation in ("nearest", "linear", "cubic"):
+                resample(
+                    path,
+                    "img",
+                    onto=onto,
+                    interpolation=interpolation,
+                    suffix=f"_{onto}_{interpolation}",
+                )
+        assert stored_digests(path) == STORED_BY_2_2_0_TURNED
