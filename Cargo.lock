@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "medh5"
-version = "2.2.1"
+version = "2.2.2"
 dependencies = [
  "blake2",
  "digest",
@@ -677,7 +677,7 @@ dependencies = [
 
 [[package]]
 name = "medh5-cli"
-version = "2.2.1"
+version = "2.2.2"
 dependencies = [
  "clap",
  "indexmap",
@@ -688,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "medh5-python"
-version = "2.2.1"
+version = "2.2.2"
 dependencies = [
  "half",
  "indexmap",
@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "medh5-sys"
-version = "2.2.1"
+version = "2.2.2"
 dependencies = [
  "cc",
  "hdf5-metno-sys",
