@@ -14,7 +14,7 @@ import pytest
 import medh5
 from medh5.errors import MEDH5ValidationError
 from medh5.validate import validate_file
-from tests.helpers import ROOT, disk_full_while
+from tests.helpers import ROOT, disk_full_while, stored_digests
 from tests.kits import Organs
 
 nib = pytest.importorskip("nibabel")
@@ -1949,3 +1949,45 @@ def test_require_nibabel_says_medh5_no_longer_needs_it(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "nibabel", None)
     with pytest.raises(ImportError, match="pip install nibabel"):
         require_nibabel()
+
+
+# What 2.2.0 stored for the import below, object by object.  2.2.2 decodes a
+# volume into its array a buffer at a time and holds one volume at a time; the
+# content is the same.  The digests are of that content (§13.1).
+IMPORTED_BY_2_2_0: dict[str, str] = {
+    "annotations/seg/data": (
+        "sha256:b6e0b668afe85617742d83f1c7dbf36bb942d476651ac4ae7cff4a802b782758"
+    ),
+    "images/CT": (
+        "sha256:f4813845b4e98ec2fc679ca1c2758560049f5e6f7f169c5e5cb7668db49bf879"
+    ),
+    "images/PET": (
+        "sha256:56e6f2f3ac55dd55e26611b98cd58f5eda9ddc1ba8424bb3e8d5d9adbe0a2c30"
+    ),
+}
+
+
+class TestImportHoldsOneVolume:
+    def test_S13_1_an_import_stores_what_2_2_0_stored(self, tmp_path):
+        # Arithmetic, not a generator's stream, so the values never change.
+        index = np.arange(np.prod(SHAPE_XYZ)).reshape(SHAPE_XYZ)
+        volumes = {
+            "ct.nii.gz": ((index * 7919 % 2500 - 1000).astype(np.int16), AFFINE),
+            "pet.nii": ((index * 31 % 1000 / 7).astype(np.float32), AFFINE),
+            "mr.nii.gz": ((index * 13 % 4096).astype(np.uint16), AFFINE),
+            "organ.nii.gz": ((index * 17 % 5 == 0).astype(np.uint8), AFFINE),
+        }
+        for name, (array, affine) in volumes.items():
+            nib.save(nib.Nifti1Image(array, affine), str(tmp_path / name))
+        out = tmp_path / "s.medh5"
+        from_nifti(
+            {"CT": tmp_path / "ct.nii.gz", "PET": tmp_path / "pet.nii"},
+            out,
+            masks={"organ": tmp_path / "organ.nii.gz"},
+        )
+        assert stored_digests(out) == IMPORTED_BY_2_2_0
+        # Kept in NIfTI's axis order, the voxels' bytes move, and are read whole.
+        mr = tmp_path / "mr.medh5"
+        from_nifti({"MR": tmp_path / "mr.nii.gz"}, mr, transpose=False)
+        with medh5.open(mr) as sample:
+            assert np.array_equal(sample.images["MR"].read(), volumes["mr.nii.gz"][0])

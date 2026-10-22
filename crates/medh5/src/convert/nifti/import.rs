@@ -4,6 +4,7 @@
 //! Each step is 2.1.0's, in 2.1.0's order, because which of two problems a
 //! file is refused for is part of the contract (2.2.0 decision E3).
 
+use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
@@ -11,11 +12,12 @@ use ndarray::{Array2, ArrayD};
 use serde_json::{json, Map, Value};
 
 use super::header::Header;
-use super::read::{self, Image, LoadError, Loaded};
+use super::read::{self, Image, LoadError, Loaded, VoxelSource};
 use super::{
     convert_world, float_list, Geometry, GeometryNote, ImportOptions, NiftiRead, Plane, ReadOptions, SegOptions,
     Voxels, FOURTH_AXES,
 };
+use crate::array::NdArray;
 use crate::convert::grouping::{sanitize_key, sanitize_stem};
 use crate::convert::ConversionReport;
 use crate::geometry::affine::{decompose_affine, ORTHONORMAL_TOL};
@@ -444,17 +446,22 @@ fn reduce_plane(
     Ok((spacing[..2].to_vec(), origin[..2].to_vec(), reduced))
 }
 
+/// Whether Fortran-order voxels of `shape` move to be C order by `order`.
+/// An F-order array is its reversed-shape C-order array: a full reversal
+/// moves no byte, and nor does any order over one axis that is not 1.
+fn moves_bytes(shape: &[usize], order: &[usize]) -> bool {
+    let reversed = order.iter().copied().eq((0..shape.len()).rev());
+    let kept: Vec<usize> = order.iter().copied().filter(|k| shape[*k] != 1).collect();
+    !(shape.contains(&0) || reversed || kept.len() <= 1 || kept.windows(2).all(|w| w[0] > w[1]))
+}
+
 /// Fortran-order bytes of `shape`, reordered by `order` into C order.
 fn c_order(bytes: Vec<u8>, item: usize, shape: &[usize], order: &[usize]) -> Vec<u8> {
     let n = shape.len();
-    // An F-order array is its reversed-shape C-order array: a full reversal
-    // moves no byte, and nor does any order over one axis that is not 1.
     if shape.contains(&0) {
         return Vec::new();
     }
-    let reversed = order.iter().copied().eq((0..n).rev());
-    let kept: Vec<usize> = order.iter().copied().filter(|k| shape[*k] != 1).collect();
-    if reversed || kept.len() <= 1 || kept.windows(2).all(|w| w[0] > w[1]) {
+    if !moves_bytes(shape, order) {
         return bytes;
     }
     let mut stride = vec![0usize; n];
@@ -502,6 +509,83 @@ fn c_order(bytes: Vec<u8>, item: usize, shape: &[usize], order: &[usize]) -> Vec
 /// under `plane_as_volume`.  What was decided from an ambiguous header is
 /// in the geometry's `notes`.
 pub fn read_nifti(path: &Path, options: &ReadOptions) -> Result<NiftiRead> {
+    let opened = open_nifti(path, options)?;
+    let geometry = opened.geometry.clone();
+    Ok(NiftiRead { voxels: opened.voxels()?, geometry })
+}
+
+/// A NIfTI file whose geometry is read and whose voxels are not, yet: what
+/// [`from_nifti`] holds of every volume while it checks they share a grid,
+/// so that each is decoded only as it is written.
+struct Opened {
+    geometry: Geometry,
+    source: VoxelSource,
+    /// The voxels' shape, NIfTI's order, the dropped axes gone.
+    shape: Vec<usize>,
+    /// The axes of `shape` in the order the array takes them.
+    order: Vec<usize>,
+}
+
+impl Opened {
+    /// The voxels as [`read_nifti`] returns them: C order, the geometry's
+    /// shape.
+    fn voxels(self) -> Result<Voxels> {
+        let voxels = match self.source {
+            VoxelSource::Read(voxels) => voxels,
+            VoxelSource::Stream(stream) => stream.into_voxels(self.shape.clone())?,
+        };
+        let item = voxels.element.itemsize();
+        // The geometry keeps a scalar's shape, `()`; its array, as 2.1.0's
+        // `ascontiguousarray` returned it, is `(1,)`.
+        let held = if self.geometry.shape.is_empty() { vec![1] } else { self.geometry.shape.clone() };
+        let mut voxels = Voxels { shape: held, ..voxels };
+        voxels.bytes = c_order(std::mem::take(&mut voxels.bytes), item, &self.shape, &self.order);
+        Ok(voxels)
+    }
+
+    /// Refuse a type the writer cannot store, reading nothing, as
+    /// [`Voxels::into_ndarray`] names it.
+    fn writable(&self) -> Result<()> {
+        let (element, big_endian) = match &self.source {
+            VoxelSource::Read(voxels) => (voxels.element, voxels.big_endian),
+            VoxelSource::Stream(stream) => (stream.element, stream.big_endian),
+        };
+        Voxels { element, big_endian, shape: vec![0], bytes: Vec::new() }.into_ndarray().map(drop)
+    }
+
+    /// The voxels as the image the writer takes, decoded straight into it
+    /// where they need no reordering: held once, not twice.
+    fn into_ndarray(self) -> Result<NdArray> {
+        match self.source {
+            VoxelSource::Stream(stream) if !moves_bytes(&self.shape, &self.order) => {
+                let (element, big_endian) = (stream.element, stream.big_endian);
+                match stream.into_array(&self.geometry.shape)? {
+                    Some(array) => Ok(array),
+                    // A type the writer refuses, refused as it names it.
+                    None => Voxels { element, big_endian, shape: Vec::new(), bytes: Vec::new() }.into_ndarray(),
+                }
+            }
+            source => Opened { source, ..self }.voxels()?.into_ndarray(),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What an import did, in order, for the test that it reads every header
+    /// first and then holds one volume at a time.
+    static STEPS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Record one step of an import, under test.
+fn step(_what: &str, _name: &str) {
+    #[cfg(test)]
+    STEPS.with(|steps| steps.borrow_mut().push(format!("{_what} {_name}")));
+}
+
+/// [`read_nifti`] up to the voxels: the header read and checked, the
+/// geometry worked out, and the voxels' stream opened at their first byte.
+fn open_nifti(path: &Path, options: &ReadOptions) -> Result<Opened> {
     let name = shown(path);
     let image = load(path)?;
     let header = &image.header;
@@ -519,92 +603,98 @@ pub fn read_nifti(path: &Path, options: &ReadOptions) -> Result<NiftiRead> {
         });
     }
     let rescale = rescale(&image);
-    let voxels = image.read_voxels()?;
-    let mut shape = voxels.shape.clone();
-    // Axes of extent 1 past the spatial block carry nothing.
-    let squeezed: Vec<usize> = (3..shape.len()).rev().filter(|a| shape[*a] == 1).collect();
-    // NIfTI's time is dim[4]; an axis kept past it is dim[5].
-    let kept: Vec<usize> = (3..shape.len()).filter(|a| !squeezed.contains(a)).collect();
-    let on_dim4 = kept == [3];
-    for axis in &squeezed {
-        shape.remove(*axis);
-    }
-    let affine = best_affine(header, &name)?;
-    let affine = Array2::from_shape_fn((4, 4), |(r, c)| affine[r][c]);
-    let affine = convert_world(&affine, "RAS", &options.coord_system)?;
-    let mut plane = None;
-    if options.plane_as_volume && shape.len() == 2 {
-        plane = Some(plane_volume(&affine, &name, &units)?);
-        shape.push(1);
-    }
-    let ndim = shape.len();
-    let (mut spacing, mut origin, mut direction) = decompose_affine(&affine)?;
-    let mut order: Vec<usize> = (0..ndim).collect();
-    if options.transpose && ndim >= 3 {
-        order = (3..ndim).chain([2, 1, 0]).collect();
-        spacing = vec![spacing[2], spacing[1], spacing[0]];
-        direction = Array2::from_shape_fn((3, 3), |(r, c)| direction[[r, 2 - c]]);
-    }
-    if ndim == 2 {
-        (spacing, origin, direction) = reduce_plane(&spacing, &origin, &direction, &units, &name)?;
-    }
-    let mut geometry = Geometry {
-        notes,
-        spacing,
-        origin,
-        direction: direction.rows().into_iter().map(|r| r.to_vec()).collect(),
-        coord_system: options.coord_system.clone(),
-        shape: order.iter().map(|k| shape[*k]).collect(),
-        axis_order: order.clone(),
-        time_values: None,
-        time_units: None,
-        time_measured: false,
-        leading_kind: "spatial".into(),
-        leading_stated: false,
-        b_values: None,
-        channel_field: None,
-        channel_values: None,
-        stated_by: None,
-        squeezed,
-        units,
-        dtype: String::new(),
-        rescale,
-        plane_as_volume: plane,
-        descrip: Header::text(&header.descrip),
+    let source = image.voxel_source()?;
+    let (element, big_endian, shape) = match &source {
+        VoxelSource::Read(voxels) => (voxels.element, voxels.big_endian, voxels.shape.clone()),
+        VoxelSource::Stream(stream) => (stream.element, stream.big_endian, image.dims()?),
     };
-    if ndim == 4 {
-        // The fourth axis is the file's dim[4], whichever way it was ordered.
-        let frames = shape[3];
-        let bids = bids_axis(path, frames, &options.fourth_axis)?;
-        let (kind, stated) = fourth_axis_kind(header, path, &options.fourth_axis, bids.as_ref(), on_dim4)?;
-        geometry.stated_by = bids.as_ref().filter(|b| b.0 == kind).map(|b| b.1.clone());
-        if kind == "time" {
-            let stamps = bids.as_ref().filter(|b| b.0 == "time").map(|b| b.2.as_slice());
-            let (times, units, measured) = time_axis(header, frames, stamps, on_dim4);
-            geometry.time_values = Some(times);
-            geometry.time_units = Some(units);
-            geometry.time_measured = measured;
-        } else {
-            if let Some(bval) = sidecar(path, ".bval") {
-                geometry.b_values = Some(read_bvals(&bval)?);
-            }
-            if let Some((_, field, values)) = bids.filter(|b| b.0 == "channel") {
-                geometry.channel_field = Some(field);
-                geometry.channel_values = Some(values);
-            }
-            geometry.time_measured = stated;
+    // 2.1.0 read the voxels before it worked out their geometry, so a file
+    // the geometry refuses is refused for a damaged stream first.
+    let laid_out = (|| -> Result<(Geometry, Vec<usize>, Vec<usize>)> {
+        let mut shape = shape;
+        // Axes of extent 1 past the spatial block carry nothing.
+        let squeezed: Vec<usize> = (3..shape.len()).rev().filter(|a| shape[*a] == 1).collect();
+        // NIfTI's time is dim[4]; an axis kept past it is dim[5].
+        let kept: Vec<usize> = (3..shape.len()).filter(|a| !squeezed.contains(a)).collect();
+        let on_dim4 = kept == [3];
+        for axis in &squeezed {
+            shape.remove(*axis);
         }
-        geometry.leading_kind = kind;
-        geometry.leading_stated = geometry.time_measured;
+        let affine = best_affine(header, &name)?;
+        let affine = Array2::from_shape_fn((4, 4), |(r, c)| affine[r][c]);
+        let affine = convert_world(&affine, "RAS", &options.coord_system)?;
+        let mut plane = None;
+        if options.plane_as_volume && shape.len() == 2 {
+            plane = Some(plane_volume(&affine, &name, &units)?);
+            shape.push(1);
+        }
+        let ndim = shape.len();
+        let (mut spacing, mut origin, mut direction) = decompose_affine(&affine)?;
+        let mut order: Vec<usize> = (0..ndim).collect();
+        if options.transpose && ndim >= 3 {
+            order = (3..ndim).chain([2, 1, 0]).collect();
+            spacing = vec![spacing[2], spacing[1], spacing[0]];
+            direction = Array2::from_shape_fn((3, 3), |(r, c)| direction[[r, 2 - c]]);
+        }
+        if ndim == 2 {
+            (spacing, origin, direction) = reduce_plane(&spacing, &origin, &direction, &units, &name)?;
+        }
+        let mut geometry = Geometry {
+            notes,
+            spacing,
+            origin,
+            direction: direction.rows().into_iter().map(|r| r.to_vec()).collect(),
+            coord_system: options.coord_system.clone(),
+            shape: order.iter().map(|k| shape[*k]).collect(),
+            axis_order: order.clone(),
+            time_values: None,
+            time_units: None,
+            time_measured: false,
+            leading_kind: "spatial".into(),
+            leading_stated: false,
+            b_values: None,
+            channel_field: None,
+            channel_values: None,
+            stated_by: None,
+            squeezed,
+            units,
+            dtype: String::new(),
+            rescale,
+            plane_as_volume: plane,
+            descrip: Header::text(&header.descrip),
+        };
+        if ndim == 4 {
+            // The fourth axis is the file's dim[4], whichever way it was ordered.
+            let frames = shape[3];
+            let bids = bids_axis(path, frames, &options.fourth_axis)?;
+            let (kind, stated) = fourth_axis_kind(header, path, &options.fourth_axis, bids.as_ref(), on_dim4)?;
+            geometry.stated_by = bids.as_ref().filter(|b| b.0 == kind).map(|b| b.1.clone());
+            if kind == "time" {
+                let stamps = bids.as_ref().filter(|b| b.0 == "time").map(|b| b.2.as_slice());
+                let (times, units, measured) = time_axis(header, frames, stamps, on_dim4);
+                geometry.time_values = Some(times);
+                geometry.time_units = Some(units);
+                geometry.time_measured = measured;
+            } else {
+                if let Some(bval) = sidecar(path, ".bval") {
+                    geometry.b_values = Some(read_bvals(&bval)?);
+                }
+                if let Some((_, field, values)) = bids.filter(|b| b.0 == "channel") {
+                    geometry.channel_field = Some(field);
+                    geometry.channel_values = Some(values);
+                }
+                geometry.time_measured = stated;
+            }
+            geometry.leading_kind = kind;
+            geometry.leading_stated = geometry.time_measured;
+        }
+        geometry.dtype = Voxels { element, big_endian, shape: Vec::new(), bytes: Vec::new() }.numpy_str();
+        Ok((geometry, shape, order))
+    })();
+    match laid_out {
+        Ok((geometry, shape, order)) => Ok(Opened { geometry, source, shape, order }),
+        Err(err) => Err(source.check().err().unwrap_or(err)),
     }
-    let item = voxels.element.itemsize();
-    // The geometry keeps a scalar's shape, `()`; its array, as 2.1.0's
-    // `ascontiguousarray` returned it, is `(1,)`.
-    let held = if geometry.shape.is_empty() { vec![1] } else { geometry.shape.clone() };
-    let mut voxels = Voxels { shape: held, ..voxels };
-    voxels.bytes = c_order(std::mem::take(&mut voxels.bytes), item, &shape, &order);
-    geometry.dtype = voxels.numpy_str();
-    Ok(NiftiRead { voxels, geometry })
 }
 
 /// The geometry notes of a read, as guesses in the report.
@@ -975,18 +1065,47 @@ pub fn from_nifti(
     options: &ImportOptions,
     report: &mut ConversionReport,
 ) -> Result<()> {
+    let (mut arrays, mut masks) = (VecDeque::new(), VecDeque::new());
+    match import(images, out, options, report, &mut arrays, &mut masks) {
+        Ok(()) => Ok(()),
+        // 2.1.0 read every volume before anything else could refuse the set,
+        // so a set with a damaged stream is refused for that stream, the
+        // first in order, whatever else is wrong with it.  The volumes not
+        // decoded yet are read through to find it, keeping none.
+        Err(err) => {
+            let first = arrays.into_iter().chain(masks).find_map(|(_, opened)| opened.source.check().err());
+            Err(first.unwrap_or(err))
+        }
+    }
+}
+
+/// [`from_nifti`], holding each volume opened in `arrays` or `masks` until
+/// it is decoded.
+fn import(
+    images: &[(String, PathBuf)],
+    out: &Path,
+    options: &ImportOptions,
+    report: &mut ConversionReport,
+    arrays: &mut VecDeque<(String, Opened)>,
+    masks: &mut VecDeque<(String, Opened)>,
+) -> Result<()> {
     let given = options.label_set.clone();
     report.source = images.iter().map(|(_, p)| shown(p)).collect::<Vec<_>>().join(", ");
     if images.is_empty() {
         return Err(Error::invalid("from_nifti needs at least one image"));
     }
+    // Every header is read and checked before a voxel is: the volumes must
+    // share one grid, and each is then decoded only as it is written, so the
+    // import holds one volume at a time, not all of them.
     let read = options.read();
-    let mut arrays: Vec<(String, Voxels)> = Vec::new();
     let mut per_image: Vec<(String, Geometry)> = Vec::new();
     let mut geometry: Option<Geometry> = None;
     let mut reshaped = false;
     for (name, path) in images {
-        let NiftiRead { voxels, geometry: geo } = read_nifti(path, &read)?;
+        let opened = open_nifti(path, &read)?;
+        step("open", name);
+        let geo = opened.geometry.clone();
+        arrays.push_back((name.clone(), opened));
         replay_notes(report, name, &geo);
         reshaped = note_plane(report, name, &geo) || reshaped;
         match &mut geometry {
@@ -994,19 +1113,19 @@ pub fn from_nifti(
             Some(first) => join_grid(first, &geo, name, report)?,
         }
         per_image.push((name.clone(), geo));
-        arrays.push((name.clone(), voxels));
     }
     let geometry = geometry.expect("at least one image");
     same_axis_kind(&per_image)?;
 
     let mask_read = ReadOptions { fourth_axis: "auto".into(), ..read.clone() };
-    let mut masks: Vec<(String, ArrayD<bool>)> = Vec::new();
     for (name, path) in &options.masks {
-        let NiftiRead { voxels, geometry: geo } = read_nifti(path, &mask_read)?;
+        let opened = open_nifti(path, &mask_read)?;
+        step("open", name);
+        let geo = opened.geometry.clone();
+        masks.push_back((name.clone(), opened));
         replay_notes(report, name, &geo);
         reshaped = note_plane(report, name, &geo) || reshaped;
         same_grid(&geometry, &geo, name, report)?;
-        masks.push((name.clone(), voxels.nonzero(geo.rescale)?));
     }
 
     let coord_system = &options.coord_system;
@@ -1193,8 +1312,8 @@ fn write_sample(
     options: &ImportOptions,
     geometry: &Geometry,
     per_image: &[(String, Geometry)],
-    arrays: Vec<(String, Voxels)>,
-    masks: Vec<(String, ArrayD<bool>)>,
+    arrays: &mut VecDeque<(String, Opened)>,
+    masks: &mut VecDeque<(String, Opened)>,
     vocabulary: Option<LabelSet>,
     examined: Annotated,
     params: Map<String, Value>,
@@ -1242,7 +1361,11 @@ fn write_sample(
     )?;
     let lookup = |pairs: &[(String, String)], name: &str| pairs.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone());
     let frames = geometry.shape.first().copied().unwrap_or(0);
-    for ((name, voxels), (_, own)) in arrays.into_iter().zip(per_image) {
+    for (_, own) in per_image {
+        // A type the writer refuses is refused after every stream is read,
+        // this one's too, as it was when 2.1.0 held every volume.
+        arrays.front().expect("one opened volume per image").1.writable()?;
+        let (name, opened) = arrays.pop_front().expect("one opened volume per image");
         let b_values = own.b_values.as_deref().filter(|v| !v.is_empty());
         let channel = match (&own.channel_field, own.channel_values.as_deref()) {
             (Some(field), Some(values)) if !field.is_empty() && !values.is_empty() => {
@@ -1278,7 +1401,17 @@ fn write_sample(
         }
         let value_units = lookup(&options.value_units, &name).filter(|u| !u.is_empty());
         let modality = lookup(&options.modalities, &name).unwrap_or_else(|| "OT".into());
-        let array = voxels.into_ndarray()?;
+        let array = match opened.into_ndarray() {
+            Ok(array) => array,
+            // A damaged stream, refused before whatever the later volumes
+            // hold, as 2.1.0 read this one first.
+            Err(err) => {
+                arrays.clear();
+                masks.clear();
+                return Err(err);
+            }
+        };
+        step("decode", &name);
         writer.add_image(
             &name,
             &array,
@@ -1294,11 +1427,22 @@ fn write_sample(
                 ..ImageOptions::default()
             },
         )?;
+        step("write", &name);
     }
     if let (false, Some(set)) = (masks.is_empty(), &vocabulary) {
         let mut names: Vec<String> = masks.iter().map(|(n, _)| n.clone()).collect();
         let mut resolved: Vec<(i64, ArrayD<bool>)> = Vec::new();
-        for (name, mask) in masks {
+        while let Some((name, opened)) = masks.pop_front() {
+            let rescale = opened.geometry.rescale;
+            let voxels = match opened.voxels() {
+                Ok(voxels) => voxels,
+                Err(err) => {
+                    masks.clear();
+                    return Err(err);
+                }
+            };
+            let mask = voxels.nonzero(rescale)?;
+            step("decode", &name);
             let id = class_of(set, &name).expect("every mask has a class").id;
             match resolved.iter_mut().find(|(k, _)| *k == id) {
                 Some(slot) => slot.1 = mask,
@@ -1585,6 +1729,119 @@ mod tests {
         let read = read_nifti(&path, &ReadOptions::default().with_assume_geometry(true)).unwrap();
         assert_eq!((read.geometry.shape, read.geometry.axis_order), (Vec::new(), Vec::new()));
         assert_eq!((read.voxels.shape, read.voxels.bytes), (vec![1], vec![0, 7]));
+    }
+
+    /// Every header is read and checked before any voxel, and each volume
+    /// is decoded only once the one before it is written: an import holds one
+    /// volume at a time, not all of them.
+    #[test]
+    fn an_import_reads_every_header_then_holds_one_volume_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str, datatype: i64, bitpix: i64, offset: u8| {
+            let mut h = Header::new(Version::One);
+            (h.dim[0], h.dim[1], h.dim[2], h.dim[3]) = (3, 4, 3, 2);
+            (h.datatype, h.bitpix) = (datatype, bitpix);
+            h.vox_offset = VoxOffset::Float(352.0);
+            let n = 4 * 3 * 2 * (bitpix as usize / 8);
+            let mut bytes = h.encode();
+            bytes.extend_from_slice(&[0; 4]);
+            bytes.extend((0..n).map(|i| if bitpix == 8 { (i % 2) as u8 } else { (i as u8) % 7 + offset }));
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        let images = vec![("CT".to_string(), file("ct.nii", 4, 16, 0)), ("PET".to_string(), file("pet.nii", 4, 16, 1))];
+        let options = ImportOptions::default()
+            .with_assume_geometry(true)
+            .with_masks(vec![("organ".into(), file("organ.nii", 2, 8, 0))]);
+        STEPS.with(|steps| steps.borrow_mut().clear());
+        let mut report = ConversionReport::new("nifti", "");
+        from_nifti(&images, &dir.path().join("s.medh5"), &options, &mut report).unwrap();
+        let steps = STEPS.with(|steps| steps.borrow().clone());
+        let want =
+            ["open CT", "open PET", "open organ", "decode CT", "write CT", "decode PET", "write PET", "decode organ"];
+        assert_eq!(steps, want);
+        // And what was written is what the volumes hold.
+        let sample = crate::sample::reader::open_sample(&dir.path().join("s.medh5")).unwrap();
+        let pet = sample.image("PET").unwrap().read(None, false, None).unwrap();
+        let read = read_nifti(&images[1].1, &ReadOptions::default().with_assume_geometry(true)).unwrap();
+        assert_eq!(pet, read.voxels.into_ndarray().unwrap());
+    }
+
+    /// 2.1.0 read each file's voxels as it opened the file, so a set with a
+    /// damaged stream and another problem is refused for the first damaged
+    /// stream, whichever comes later in the set: decision E3 holds which
+    /// of two problems a set is refused for.
+    #[test]
+    fn a_damaged_stream_is_refused_before_what_2_1_0_checked_after_it() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        // `z` slices of (3, 4) int16, or complex64; `short` bytes cut off.
+        let file = |name: &str, z: i64, complex: bool, short: usize| {
+            let mut h = Header::new(Version::One);
+            (h.dim[0], h.dim[1], h.dim[2], h.dim[3]) = (3, 3, 4, z);
+            (h.datatype, h.bitpix) = if complex { (32, 64) } else { (4, 16) };
+            h.vox_offset = VoxOffset::Float(352.0);
+            let n = 3 * 4 * z as usize * (h.bitpix as usize / 8);
+            let mut bytes = h.encode();
+            bytes.extend_from_slice(&[0; 4]);
+            bytes.extend((0..n - short).map(|i| (i % 7) as u8));
+            let path = dir.path().join(name);
+            if name.ends_with(".gz") {
+                let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                gz.write_all(&bytes).unwrap();
+                bytes = gz.finish().unwrap();
+            }
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        // Each damaged file is known by how many of its 48 bytes it holds.
+        let short = |got: usize| format!("Expected 48 bytes, got {got} bytes");
+        let refusal = |images: &[(&str, &PathBuf)], masks: &[(&str, &PathBuf)]| {
+            let images: Vec<(String, PathBuf)> = images.iter().map(|(n, p)| (n.to_string(), (*p).clone())).collect();
+            let masks = masks.iter().map(|(n, p)| (n.to_string(), (*p).clone())).collect();
+            let options = ImportOptions::default().with_assume_geometry(true).with_masks(masks);
+            let mut report = ConversionReport::new("nifti", "");
+            let out = dir.path().join("s.medh5");
+            let err = from_nifti(&images, &out, &options, &mut report).unwrap_err();
+            assert!(!out.exists(), "a refused import writes nothing");
+            err.message().to_string()
+        };
+        let (ct, cut_ct, cut_gz) =
+            (file("ct.nii", 2, false, 0), file("cut.nii", 2, false, 5), file("cut.nii.gz", 2, false, 6));
+        let (other_grid, cut_pet) = (file("wide.nii", 3, false, 0), file("cut-pet.nii.gz", 2, false, 1));
+        let complex = file("complex.nii", 2, true, 0);
+
+        // One file: the geometry refused after the voxels were read.
+        for cut in [&cut_ct, &cut_gz] {
+            let read = ReadOptions::default().with_assume_geometry(true).with_coord_system("XYZ");
+            let err = read_nifti(cut, &read).unwrap_err().message().to_string();
+            assert!(err.contains("Expected 48 bytes, got 4"), "{err}");
+        }
+        let read = ReadOptions::default().with_assume_geometry(true).with_coord_system("XYZ");
+        assert!(read_nifti(&ct, &read).unwrap_err().message().contains("unknown coordinate system"));
+        // A damaged image, then one on another grid: the stream.
+        assert!(refusal(&[("CT", &cut_gz), ("PET", &other_grid)], &[]).contains(&short(42)));
+        // A damaged mask after a grid refusal is never read, as in 2.1.0.
+        let err = refusal(&[("CT", &ct), ("PET", &other_grid)], &[("organ", &cut_ct)]);
+        assert!(!err.contains(&short(43)), "{err}");
+        // A type the writer refuses, then a damaged image: the stream.
+        assert!(refusal(&[("CT", &complex), ("PET", &cut_pet)], &[]).contains(&short(47)));
+        // A damaged image after one written, and a damaged mask: the image.
+        assert!(refusal(&[("CT", &ct), ("PET", &cut_pet)], &[("organ", &cut_ct)]).contains(&short(47)));
+        // Two damaged images: the first.
+        assert!(refusal(&[("CT", &cut_gz), ("PET", &cut_pet)], &[]).contains(&short(42)));
+        // A damaged mask and a class missing from the label set: the mask.
+        let liver = vec![LabelClass::new(1, "liver", "Liver").unwrap()];
+        let set = LabelSet::new("given", liver, "1.0.0", vec![], vec![], "inline", None, None).unwrap();
+        let images = vec![("CT".to_string(), ct.clone())];
+        let options = ImportOptions::default()
+            .with_assume_geometry(true)
+            .with_label_set(set)
+            .with_masks(vec![("organ".into(), cut_ct.clone())]);
+        let err = from_nifti(&images, &dir.path().join("s.medh5"), &options, &mut ConversionReport::new("nifti", ""))
+            .unwrap_err();
+        assert!(err.message().contains(&short(43)), "{}", err.message());
     }
 
     #[test]

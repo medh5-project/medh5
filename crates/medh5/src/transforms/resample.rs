@@ -874,9 +874,7 @@ fn write(sample: &Sample, writer: &mut SampleWriter, plan: &ResamplePlan, prepar
     for job in &prepared.jobs {
         let mapping = &prepared.mappings[&job.source_grid.grid_id];
         let (filled, valid) = resample_image(sample, writer, job, target, mapping, plan, &activity.id)?;
-        let mask = if let Some(valid) = valid {
-            let name = job.mask.clone().expect("named in prepare");
-            writer.add_mask(&name, valid, &target.grid_id, "other", Some(&activity.id), None)?;
+        let mask = if let Some(name) = valid {
             let images_attr = writer.root()?.group("images")?.dataset(&job.output)?;
             crate::h5::attrs::write(&images_attr, "valid_mask", &crate::h5::attrs::AttrValue::Str(name.clone()))?;
             written.push(format!("annotations/{name}"));
@@ -1001,6 +999,15 @@ thread_local! {
     static LARGEST_CROP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// [`CROP_BUDGET`], lowered by a test.
     static TEST_CROP_BUDGET: std::cell::Cell<usize> = const { std::cell::Cell::new(CROP_BUDGET) };
+    /// The most target voxels one write of a mask or a carried annotation
+    /// held, for the tests that neither is held whole.
+    static LARGEST_WRITE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Note a write of `voxels` target voxels, under test.
+fn wrote(_voxels: usize) {
+    #[cfg(test)]
+    LARGEST_WRITE.with(|largest| largest.set(largest.get().max(_voxels)));
 }
 
 /// The most source voxels (times the lanes of a leading chunk) one block of
@@ -1014,9 +1021,9 @@ fn crop_budget() -> usize {
     CROP_BUDGET
 }
 
-/// Resample one image block by block; the voxels filled, and where the
-/// result holds data (§4.4) --- `None` when every voxel does, so a resample
-/// that fills nothing allocates no target-wide mask.
+/// Resample one image block by block; the voxels filled, and the
+/// `valid_mask` written beside it (§4.4), a block at a time --- `None` when
+/// every voxel holds data, so a resample that fills nothing writes none.
 fn resample_image(
     sample: &Sample,
     writer: &mut SampleWriter,
@@ -1025,7 +1032,7 @@ fn resample_image(
     mapping: &Mapping,
     plan: &ResamplePlan,
     activity: &str,
-) -> Result<(u64, Option<ArrayD<bool>>)> {
+) -> Result<(u64, Option<String>)> {
     let image = sample.image(&job.source)?.level(0)?;
     let source = &job.source_grid;
     let s = source.n_spatial();
@@ -1062,7 +1069,7 @@ fn resample_image(
         None
     };
     let group_max: usize = leading_shape.iter().zip(&leading_chunk).map(|(n, c)| (*c).clamp(1, (*n).max(1))).product();
-    let mut valid: Option<ArrayD<bool>> = None;
+    let mut valid = ValidMask::new(job.mask.as_deref().expect("named in prepare"), &target.grid_id, activity);
     let mut filled = 0u64;
     let mut pending: Vec<Vec<(usize, usize)>> = Vec::new();
     for chunk_block in blocks(&target_spatial, &chunk) {
@@ -1078,18 +1085,19 @@ fn resample_image(
                     rest /= dims[k];
                 }
             }
-            let points = mapping.map(&indices)?;
-            let inside: Vec<bool> = points
+            let mut clamped = mapping.map(&indices)?;
+            drop(indices);
+            let inside: Vec<bool> = clamped
                 .outer_iter()
                 .map(|p| p.iter().zip(&source_spatial).all(|(v, m)| *v >= -0.5 && *v <= *m as f64 - 0.5))
                 .collect();
-            let clamped = Array2::from_shape_fn((n, s), |(row, k)| {
-                if inside[row] {
-                    points[[row, k]].clamp(0.0, source_spatial[k] as f64 - 1.0)
-                } else {
-                    0.0
+            // The source points, clamped to the source, in place: a block holds
+            // one array of points, not one per step.
+            for (row, mut point) in clamped.outer_iter_mut().enumerate() {
+                for (k, v) in point.iter_mut().enumerate() {
+                    *v = if inside[row] { v.clamp(0.0, source_spatial[k] as f64 - 1.0) } else { 0.0 };
                 }
-            });
+            }
             // The part of the source the block's inside points fall in.
             let crop: Option<Vec<(usize, usize)>> = (0..s)
                 .map(|k| {
@@ -1130,41 +1138,52 @@ fn resample_image(
             }
             let roi: Option<Vec<Slice>> =
                 crop.as_ref().map(|c| c.iter().map(|(a, b)| Slice::new(*a as i64, *b as i64)).collect());
-            let nearest_rows = |crop: &[(usize, usize)]| -> Vec<Option<Vec<usize>>> {
+            // Each inside point's nearest source voxel, as a flat C-order
+            // offset into the crop (0 outside, where `inside` says so).
+            let nearest_offsets = |crop: &[(usize, usize)]| -> Vec<usize> {
                 (0..n)
                     .map(|row| {
-                        inside[row].then(|| {
-                            (0..s)
-                                .map(|k| {
-                                    let i = (clamped[[row, k]] + 0.5).floor() as usize;
-                                    i.min(source_spatial[k] - 1) - crop[k].0
-                                })
-                                .collect()
+                        if !inside[row] {
+                            return 0;
+                        }
+                        (0..s).fold(0, |flat, k| {
+                            let i = ((clamped[[row, k]] + 0.5).floor() as usize).min(source_spatial[k] - 1);
+                            flat * (crop[k].1 - crop[k].0) + i - crop[k].0
                         })
                     })
                     .collect()
             };
-            // Where the source holds data, for the points inside it.
+            // Where the result holds no data: outside the source, or where the
+            // source holds none.  `None` while every voxel of the block does.
+            let mut invalid: Option<Vec<bool>> = None;
             if let (Some(_), Some(crop), Some(roi)) = (&job.source_mask, &crop, &roi) {
                 let region = sample.valid_region(&job.source, Some(roi))?;
-                for (row, at) in nearest_rows(crop).into_iter().enumerate() {
-                    if let Some(at) = at {
-                        if !region[IxDyn(&at)] {
-                            invalidate(&mut valid, &target_spatial, &block, &dims, row);
-                        }
+                let region = region.as_standard_layout();
+                let region = region.as_slice().expect("standard layout");
+                for (row, at) in nearest_offsets(crop).into_iter().enumerate() {
+                    if inside[row] && !region[at] {
+                        invalid.get_or_insert_with(|| vec![false; n])[row] = true;
                     }
                 }
             }
             for (row, ok) in inside.iter().enumerate() {
                 if !ok {
                     filled += 1;
-                    invalidate(&mut valid, &target_spatial, &block, &dims, row);
+                    invalid.get_or_insert_with(|| vec![false; n])[row] = true;
                 }
             }
-            let rows = crop.as_ref().map(|crop| nearest_rows(crop));
-            let local = crop
-                .as_ref()
-                .map(|crop| Array2::from_shape_fn((n, s), |(row, k)| clamped[[row, k]] - crop[k].0 as f64));
+            let rows = match (plan.interpolation.as_str(), &crop) {
+                ("nearest", Some(crop)) => Some(nearest_offsets(crop)),
+                _ => None,
+            };
+            if let (true, Some(crop)) = (plan.interpolation == "linear", &crop) {
+                // Linear samples the crop, so its points are taken into it.
+                for mut point in clamped.outer_iter_mut() {
+                    for (k, v) in point.iter_mut().enumerate() {
+                        *v -= crop[k].0 as f64;
+                    }
+                }
+            }
             // Each chunk of the leading (time, channel) axes in turn, so a block
             // holds one chunk of the image and no more, however many frames.
             for lead in blocks(&leading_shape, &leading_chunk) {
@@ -1181,13 +1200,13 @@ fn resample_image(
                     "nearest" => match (&rows, &roi) {
                         (Some(rows), Some(roi)) => {
                             let stored = image.read(Some(roi), false, None)?;
-                            gather(&stored, group, rows, plan.fill, job.dtype)?
+                            gather(&stored, group, rows, &inside, plan.fill, job.dtype)?
                         }
                         _ => constant(job.dtype, group, n, plan.fill)?,
                     },
                     interpolation => {
                         let mut out = Array2::<f64>::from_elem((n, group), plan.fill);
-                        if let (Some(crop), Some(roi), Some(local)) = (&crop, &roi, &local) {
+                        if let (Some(crop), Some(roi)) = (&crop, &roi) {
                             let computed = if interpolation == "cubic" {
                                 let lanes = lane_indices(&leading_shape, &lead);
                                 cubic.as_ref().expect("prefiltered above").sample_components(&clamped, &lanes)?
@@ -1196,7 +1215,7 @@ fn resample_image(
                                 let mut field_shape = vec![group];
                                 field_shape.extend(crop.iter().map(|(a, b)| b - a));
                                 let field = stored.into_shape_with_order(IxDyn(&field_shape))?;
-                                linear_sample(&field, local, "nearest")?
+                                linear_sample(&field, &clamped, "nearest")?
                             };
                             for (row, ok) in inside.iter().enumerate() {
                                 if *ok {
@@ -1213,9 +1232,64 @@ fn resample_image(
                 starts.extend(block.iter().map(|(a, _)| *a));
                 data::write_region(&dataset, &values.reshape(&shape)?, &starts)?;
             }
+            valid.block(writer, &block, invalid)?;
         }
     }
-    Ok((filled, valid))
+    Ok((filled, valid.written()))
+}
+
+/// A resampled image's `valid_mask` (§4.4), written a block at a time as the
+/// image is, never held whole.  It is created at the first block holding a
+/// voxel with no data, and the blocks before that one are written then, all
+/// valid; a resample whose every voxel holds data writes none.
+struct ValidMask<'a> {
+    name: &'a str,
+    grid: &'a str,
+    activity: &'a str,
+    dataset: Option<hdf5::Dataset>,
+    /// The blocks done before the mask was created.
+    before: Vec<Vec<(usize, usize)>>,
+}
+
+impl<'a> ValidMask<'a> {
+    fn new(name: &'a str, grid: &'a str, activity: &'a str) -> ValidMask<'a> {
+        ValidMask { name, grid, activity, dataset: None, before: Vec::new() }
+    }
+
+    /// One block of the target; `invalid` marks its voxels with no data, in
+    /// C order, and is `None` when there are none.
+    fn block(&mut self, writer: &mut SampleWriter, block: &[(usize, usize)], invalid: Option<Vec<bool>>) -> Result<()> {
+        if self.dataset.is_none() {
+            if invalid.is_none() {
+                self.before.push(block.to_vec());
+                return Ok(());
+            }
+            let dataset = writer.create_mask(self.name, self.grid, "other", Some(self.activity), None)?;
+            for done in self.before.drain(..) {
+                write_valid(&dataset, &done, None)?;
+            }
+            self.dataset = Some(dataset);
+        }
+        write_valid(self.dataset.as_ref().expect("created above"), block, invalid)
+    }
+
+    /// The mask's name, when one was written.
+    fn written(&self) -> Option<String> {
+        self.dataset.as_ref().map(|_| self.name.to_string())
+    }
+}
+
+/// Write one block of a valid mask: `true` but where `invalid` says.
+fn write_valid(dataset: &hdf5::Dataset, block: &[(usize, usize)], invalid: Option<Vec<bool>>) -> Result<()> {
+    let dims: Vec<usize> = block.iter().map(|(a, b)| b - a).collect();
+    let n: usize = dims.iter().product();
+    let values: Vec<bool> = match invalid {
+        Some(invalid) => invalid.into_iter().map(|v| !v).collect(),
+        None => vec![true; n],
+    };
+    let starts: Vec<usize> = block.iter().map(|(a, _)| *a).collect();
+    wrote(n);
+    data::write_region(dataset, &NdArray::Bool(ArrayD::from_shape_vec(IxDyn(&dims), values)?), &starts)
 }
 
 /// The flat (C-order) lanes of the leading axes a block of them covers.
@@ -1227,54 +1301,40 @@ fn lane_indices(shape: &[usize], block: &[(usize, usize)]) -> Vec<usize> {
     lanes
 }
 
-/// Mark one voxel of a block as holding no data, making the target-wide mask
-/// the first time one does.
-fn invalidate(valid: &mut Option<ArrayD<bool>>, shape: &[usize], block: &[(usize, usize)], dims: &[usize], row: usize) {
-    let valid = valid.get_or_insert_with(|| ArrayD::from_elem(IxDyn(shape), true));
-    let s = dims.len();
-    let mut at = vec![0usize; s];
-    let mut rest = row;
-    for k in (0..s).rev() {
-        at[k] = block[k].0 + rest % dims[k];
-        rest /= dims[k];
-    }
-    valid[IxDyn(&at)] = false;
-}
-
 /// `(lanes, n)` values of `dtype`, all `fill`.
 fn constant(dtype: DType, lanes: usize, n: usize, fill: f64) -> Result<NdArray> {
     convert(&Array2::from_elem((n, lanes), fill), dtype, "")
 }
 
 /// Nearest-neighbour values from a stored `(lanes…, crop…)` block, in its own
-/// type, laid out `(lanes, n)`; `None` rows take `fill`.  Converted to `dtype`
-/// only when it is not the stored type, so a nearest resample keeps every
-/// stored value exactly, 64-bit integers included; and from one integer type
-/// to another through `i128`, clipped, never through `f64`.
-fn gather(stored: &NdArray, lanes: usize, rows: &[Option<Vec<usize>>], fill: f64, dtype: DType) -> Result<NdArray> {
-    let n = rows.len();
-    let crop: Vec<usize> = stored.shape()[stored.ndim() - rows.iter().flatten().next().map_or(0, Vec::len)..].to_vec();
-    let mut flat_shape = vec![lanes];
-    flat_shape.extend(&crop);
+/// type, laid out `(lanes, n)`: row `r` takes the crop's voxel at flat C-order
+/// offset `offsets[r]` where `inside[r]`, and `fill` elsewhere.  Converted to
+/// `dtype` only when it is not the stored type, so a nearest resample keeps
+/// every stored value exactly, 64-bit integers included; and from one integer
+/// type to another through `i128`, clipped, never through `f64`.
+fn gather(
+    stored: &NdArray,
+    lanes: usize,
+    offsets: &[usize],
+    inside: &[bool],
+    fill: f64,
+    dtype: DType,
+) -> Result<NdArray> {
+    let n = offsets.len();
+    let flat_shape = [lanes, stored.len() / lanes.max(1)];
+    let rows = || offsets.iter().zip(inside).map(|(at, ok)| ok.then_some(*at));
     let same = stored.dtype() == dtype;
     if let (false, Some(_), Some((lo, hi))) = (same, stored.dtype().int_range(), dtype.int_range()) {
         // `check_fill` has made the fill an integer the target holds.
         let fill = fill as i128;
         let exact: Vec<i128> = crate::with_array!(stored, a => {
-            let a = a.view().into_shape_with_order(IxDyn(&flat_shape))?;
+            let a = a.view().into_shape_with_order(flat_shape)?;
             let mut out = Vec::with_capacity(lanes * n);
-            let mut index = vec![0usize; crop.len() + 1];
             for lane in 0..lanes {
-                index[0] = lane;
-                for row in rows {
-                    out.push(match row {
-                        Some(at) => {
-                            index[1..].copy_from_slice(at);
-                            crate::array::Element::to_i128(a[IxDyn(&index)]).clamp(lo, hi)
-                        }
-                        None => fill,
-                    });
-                }
+                out.extend(rows().map(|row| match row {
+                    Some(at) => crate::array::Element::to_i128(a[[lane, at]]).clamp(lo, hi),
+                    None => fill,
+                }));
             }
             out
         });
@@ -1284,21 +1344,14 @@ fn gather(stored: &NdArray, lanes: usize, rows: &[Option<Vec<usize>>], fill: f64
         )?));
     }
     crate::with_array!(stored, a => {
-        let a = a.view().into_shape_with_order(IxDyn(&flat_shape))?;
+        let a = a.view().into_shape_with_order(flat_shape)?;
         let fill_value = crate::array::Element::from_f64(fill);
         let mut out = Vec::with_capacity(lanes * n);
-        let mut index = vec![0usize; crop.len() + 1];
         for lane in 0..lanes {
-            index[0] = lane;
-            for row in rows {
-                match row {
-                    Some(at) => {
-                        index[1..].copy_from_slice(at);
-                        out.push(a[IxDyn(&index)]);
-                    }
-                    None => out.push(fill_value),
-                }
-            }
+            out.extend(rows().map(|row| match row {
+                Some(at) => a[[lane, at]],
+                None => fill_value,
+            }));
         }
         let gathered = NdArray::from_vec(&[lanes, n], out)?;
         if same {
@@ -1306,8 +1359,8 @@ fn gather(stored: &NdArray, lanes: usize, rows: &[Option<Vec<usize>>], fill: f64
         } else {
             let as_rows = gathered.to_f64().reversed_axes().into_dimensionality::<ndarray::Ix2>()?;
             let mut values = as_rows.to_owned();
-            for (row, at) in rows.iter().enumerate() {
-                if at.is_none() {
+            for (row, ok) in inside.iter().enumerate() {
+                if !ok {
                     values.row_mut(row).fill(fill);
                 }
             }
@@ -1447,6 +1500,38 @@ mod tests {
         }
     }
 
+    /// A target reaching past the source has its `valid_mask` written a
+    /// block of the image at a time: made at the first block that leaves the
+    /// source, the blocks before it written valid then.  It is never held
+    /// whole, and it says what the extent says.
+    #[test]
+    fn s4_4_a_valid_mask_is_written_a_block_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.medh5");
+        sample(&path, [16, 64, 64], None);
+        let mut w = crate::sample::writer::amend(&path, None).unwrap();
+        let wide =
+            GridOptions { frame_uid: Some("F0".into()), chunk_hint: Some(vec![4, 32, 32]), ..Default::default() };
+        w.add_grid("wide", &[16, 64, 72], &[1.0, 1.0, 1.0], wide).unwrap();
+        w.commit(true).unwrap();
+        LARGEST_WRITE.with(|largest| largest.set(0));
+        let result = resample(&path, &ResamplePlan::onto(["img"], "wide").with_interpolation("nearest")).unwrap();
+        assert_eq!(LARGEST_WRITE.with(|largest| largest.get()), 4 * 32 * 32, "the target has 16 x 64 x 72 voxels");
+        assert_eq!(result.filled_voxels, 16 * 64 * 8);
+        assert_eq!(result.images[0].valid_mask.as_deref(), Some("img_on_wide_valid"));
+        let sample = open_sample(&path).unwrap();
+        let mask = data::read(&sample.annotation("img_on_wide_valid").unwrap().data().unwrap()).unwrap();
+        let NdArray::Bool(mask) = mask else { panic!("a boolean mask") };
+        // x 0..64 lies in the source; the first block to leave it is the
+        // third, x 64..72, so the two before it were written once it was made.
+        for ((_, _, x), valid) in mask.into_dimensionality::<ndarray::Ix3>().unwrap().indexed_iter() {
+            assert_eq!(*valid, x < 64, "x {x}");
+        }
+        // Onto a grid it fills nowhere, no mask is written.
+        let inside = resample(&path, &ResamplePlan::onto(["img"], "fine").with_interpolation("nearest")).unwrap();
+        assert_eq!((inside.filled_voxels, inside.images[0].valid_mask.clone()), (0, None));
+    }
+
     /// A strong downsampling spreads one target chunk over the whole
     /// source; the chunk is split until what it reads fits the budget, and
     /// the result is the same.
@@ -1578,10 +1663,10 @@ mod tests {
     fn integers_change_type_without_a_float_between() {
         let big = (1u64 << 53) + 1;
         let stored = NdArray::from_vec(&[3], vec![big, u64::MAX, 7]).unwrap();
-        let rows = vec![Some(vec![0]), Some(vec![1]), None, Some(vec![2])];
-        let out = gather(&stored, 1, &rows, -4.0, DType::I64).unwrap();
+        let (offsets, inside) = ([0, 1, 0, 2], [true, true, false, true]);
+        let out = gather(&stored, 1, &offsets, &inside, -4.0, DType::I64).unwrap();
         assert_eq!(out.cast::<i64>().iter().copied().collect::<Vec<_>>(), vec![big as i64, i64::MAX, -4, 7]);
-        let small = gather(&stored, 1, &rows, 0.0, DType::U8).unwrap();
+        let small = gather(&stored, 1, &offsets, &inside, 0.0, DType::U8).unwrap();
         assert_eq!(small.cast::<u8>().iter().copied().collect::<Vec<_>>(), vec![255, 255, 0, 7]);
     }
 

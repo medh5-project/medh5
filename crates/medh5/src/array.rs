@@ -491,6 +491,24 @@ impl NdArray {
         out
     }
 
+    /// [`le_bytes`](Self::le_bytes), handed to `each` about `piece` bytes at
+    /// a time: what a digest reads without a copy of the array beside it.
+    pub(crate) fn for_each_le_piece(&self, piece: usize, each: &mut dyn FnMut(&[u8])) {
+        let mut out = Vec::with_capacity(piece.min(self.nbytes()) + 16);
+        with_array!(self, a => {
+            for v in a.iter() {
+                v.write_le(&mut out);
+                if out.len() >= piece {
+                    each(&out);
+                    out.clear();
+                }
+            }
+        });
+        if !out.is_empty() {
+            each(&out);
+        }
+    }
+
     /// Minimum and maximum as `f64`, or `None` for an empty array.
     pub fn min_max(&self) -> Option<(f64, f64)> {
         if self.is_empty() {
@@ -592,6 +610,11 @@ mod tests {
         let a = NdArray::from_vec(&[2, 2], vec![1i16, -2, 3, 4]).unwrap();
         assert_eq!(a.dtype().numpy_str(), "<i2");
         assert_eq!(a.le_bytes(), vec![1, 0, 0xfe, 0xff, 3, 0, 4, 0]);
+        for piece in [1, 3, 4, 64] {
+            let mut pieces = Vec::new();
+            a.for_each_le_piece(piece, &mut |bytes| pieces.extend_from_slice(bytes));
+            assert_eq!(pieces, a.le_bytes(), "piece {piece}");
+        }
         assert_eq!(a.astype(DType::F32).to_f64().iter().copied().collect::<Vec<_>>(), vec![1.0, -2.0, 3.0, 4.0]);
         let big = NdArray::from_vec(&[1], vec![u64::MAX - 1]).unwrap();
         assert_eq!(big.cast::<u64>()[[0]], u64::MAX - 1);

@@ -753,24 +753,39 @@ struct Nearest<'a> {
     source: Vec<usize>,
     /// The target's spatial shape.
     shape: Vec<usize>,
-    /// The target voxels outside the source, when there are any.
-    outside: Option<ArrayD<bool>>,
+    /// Whether any target voxel lies outside the source.
+    outside: bool,
 }
 
 impl<'a> Nearest<'a> {
     fn new(mapping: &'a Mapping, source: &[usize], target: &[usize]) -> Result<Nearest<'a>> {
-        let mut near = Nearest { mapping, source: source.to_vec(), shape: target.to_vec(), outside: None };
-        let mut outside: Option<ArrayD<bool>> = None;
-        near.each(|t, at| {
-            if at.is_none() {
-                outside
-                    .get_or_insert_with(|| ArrayD::from_elem(IxDyn(target), false))
-                    .as_slice_mut()
-                    .expect("standard")[t] = true;
+        let outside = any_outside(mapping, source, target)?;
+        Ok(Nearest { mapping, source: source.to_vec(), shape: target.to_vec(), outside })
+    }
+
+    /// `visit(row, source)` for every voxel of one block of the target, `row`
+    /// counting the block's voxels in C order; mapped [`BLOCK_VOXELS`] at a
+    /// time, so a block may be a whole chunk of what is written.
+    fn block(&self, block: &[(usize, usize)], mut visit: impl FnMut(usize, Option<usize>)) -> Result<()> {
+        let dims: Vec<usize> = block.iter().map(|(a, b)| b - a).collect();
+        for part in blocks(&dims, &block_shape(&dims)) {
+            let within: Vec<(usize, usize)> = part.iter().zip(block).map(|((a, b), (o, _))| (a + o, b + o)).collect();
+            let (indices, _) = block_indices(&within);
+            let points = self.mapping.map(&indices)?;
+            for (row, point) in points.outer_iter().enumerate() {
+                let local = indices.row(row).into_iter().zip(block).map(|(v, (o, _))| *v as usize - o);
+                visit(flat_index(local, &dims), self.source_voxel(point));
             }
-        })?;
-        near.outside = outside;
-        Ok(near)
+        }
+        Ok(())
+    }
+
+    /// The flat index of the source voxel nearest `point`, when it is inside.
+    fn source_voxel(&self, point: ndarray::ArrayView1<f64>) -> Option<usize> {
+        inside(point, &self.source).then(|| {
+            let voxel = point.iter().zip(&self.source).map(|(v, m)| ((v + 0.5).floor().max(0.0) as usize).min(m - 1));
+            flat_index(voxel, &self.source)
+        })
     }
 
     /// `visit(target, source)` for every target voxel, as flat C-order
@@ -781,12 +796,7 @@ impl<'a> Nearest<'a> {
             let points = self.mapping.map(&indices)?;
             for (row, point) in points.outer_iter().enumerate() {
                 let t = flat_index(indices.row(row).iter().map(|v| *v as usize), &self.shape);
-                let at = inside(point, &self.source).then(|| {
-                    let voxel =
-                        point.iter().zip(&self.source).map(|(v, m)| ((v + 0.5).floor().max(0.0) as usize).min(m - 1));
-                    flat_index(voxel, &self.source)
-                });
-                visit(t, at);
+                visit(t, self.source_voxel(point));
             }
         }
         Ok(())
@@ -879,6 +889,9 @@ pub(super) fn write(
                 overrides.push(("correspondence".into(), AttrValue::Str(copy.output.clone())));
             }
         }
+        // A dense encoding is gathered into its dataset a chunk at a time,
+        // once the group is written; what else it stores is copied first.
+        let mut dense = None;
         let payload = if item.voxel {
             let near = &nearest_by_grid[&item.grid];
             match item.kind.as_str() {
@@ -894,24 +907,44 @@ pub(super) fn write(
                     payload
                 }
                 "instances" => instances_payload(annotation, near, &geometry.source.spatial_shape())?,
-                _ => dense_payload(annotation, near, item.widen)?,
+                _ => {
+                    let (payload, gather) = dense_payload(annotation, near, item.widen)?;
+                    dense = Some(gather);
+                    payload
+                }
             }
         } else {
             geometric_payload(annotation, &item.kind, geometry, item.on_grid)?
         };
         header.ignore_mask = match &item.ignore {
             Ignore::Carried(mask) => Some(mask.clone()),
-            Ignore::New(mask) => match &nearest_by_grid[&item.grid].outside {
-                Some(outside) => {
-                    writer.add_mask(mask, outside.clone(), &target.grid_id, "other", Some(activity), None)?;
+            Ignore::New(mask) => {
+                let near = &nearest_by_grid[&item.grid];
+                if near.outside {
+                    write_outside(writer, mask, near, &target.grid_id, activity)?;
                     written.push(format!("annotations/{mask}"));
                     Some(mask.clone())
+                } else {
+                    None
                 }
-                None => None,
-            },
+            }
             Ignore::None => None,
         };
-        write_carried(writer, annotation, &item.output, &header, &payload, target, item.on_grid, &overrides)?;
+        let empty = dense.as_ref().map(|gather| (gather.dtype, gather.shape.clone()));
+        let data = write_carried(
+            writer,
+            annotation,
+            &item.output,
+            &header,
+            &payload,
+            empty,
+            target,
+            item.on_grid,
+            &overrides,
+        )?;
+        if let (Some(gather), Some(data)) = (dense, data) {
+            gather.write(&data, &nearest_by_grid[&item.grid])?;
+        }
         written.push(format!("annotations/{}", item.output));
         results.push((
             position,
@@ -962,7 +995,9 @@ fn carried_header(
 }
 
 /// Write the carried annotation, then carry every attribute of the source
-/// the header does not write as stored, unless the payload sets it.
+/// the header does not write as stored, unless the payload sets it.  With
+/// `empty`, its `data` is created empty, of that dtype and shape, and
+/// returned for the caller to fill.
 #[allow(clippy::too_many_arguments)]
 fn write_carried(
     writer: &mut SampleWriter,
@@ -970,11 +1005,19 @@ fn write_carried(
     output: &str,
     header: &AnnotationHeader,
     payload: &Payload,
+    empty: Option<(DType, Vec<usize>)>,
     target: &Grid,
     on_grid: bool,
     overrides: &[(String, AttrValue)],
-) -> Result<()> {
-    let group = writer.write_annotation(output, header, payload, on_grid.then_some(target), None)?;
+) -> Result<Option<hdf5::Dataset>> {
+    let grid = on_grid.then_some(target);
+    let (group, data) = match empty {
+        Some(empty) => {
+            let (group, data) = writer.create_annotation(output, header, payload, empty, grid)?;
+            (group, Some(data))
+        }
+        None => (writer.write_annotation(output, header, payload, grid, None)?, None),
+    };
     for name in attrs::names(&annotation.group)? {
         if HEADER_ATTRS.contains(&name.as_str()) || overrides.iter().any(|(k, _)| *k == name) {
             continue;
@@ -984,7 +1027,7 @@ fn write_carried(
     for (name, value) in overrides {
         attrs::write(&group, name, value)?;
     }
-    Ok(())
+    Ok(data)
 }
 
 /// Every dataset of the source, as stored, for a payload to change.
@@ -1010,34 +1053,86 @@ fn copy_payload(annotation: &Annotation, skip: &[&str]) -> Result<Payload> {
 
 /// A dense voxel encoding gathered nearest, in its own encoding: every
 /// stored plane moves as it is.  Outside the source it holds 0, or for a
-/// widened ignore mask `true`.
-fn dense_payload(annotation: &Annotation, near: &Nearest, widen: bool) -> Result<Payload> {
+/// widened ignore mask `true`.  The payload holds what the encoding stores
+/// beside its `data`; the gather fills `data` once it is created.
+fn dense_payload(annotation: &Annotation, near: &Nearest, widen: bool) -> Result<(Payload, DenseGather)> {
     let stored = data::read(&annotation.data()?)?;
     let shape = stored.shape();
     let s = annotation.spatial_shape()?.len();
     let leading = shape[..shape.len() - s].to_vec();
-    let lanes: usize = leading.iter().product::<usize>().max(1);
-    let voxels: usize = near.shape.iter().product();
     let mut full = leading.clone();
     full.extend(&near.shape);
-    let gathered = crate::with_array!(&stored, a => {
-        let a = a.as_standard_layout();
-        let flat = a.as_slice().expect("standard layout");
-        let per_lane = flat.len() / lanes;
-        let mut out = vec![Element::from_f64(if widen { 1.0 } else { 0.0 }); lanes * voxels];
-        near.each(|t, at| {
-            if let Some(i) = at {
-                for lane in 0..lanes {
-                    out[lane * voxels + t] = flat[lane * per_lane + i];
-                }
-            }
-        })?;
-        NdArray::from_vec(&full, out)?
-    });
     let mut payload = copy_payload(annotation, &["data"])?;
-    payload.datasets.insert("data".into(), gathered.into());
     payload.stacked_axes = leading.len();
-    Ok(payload)
+    let gather = DenseGather { dtype: stored.dtype(), shape: full, leading, stored, widen };
+    Ok((payload, gather))
+}
+
+/// A dense encoding's `data` on the target, gathered from the source's a
+/// chunk of the target at a time: the source is held, the target never is.
+struct DenseGather {
+    dtype: DType,
+    /// The target's shape: the source's leading axes, then the target grid's.
+    shape: Vec<usize>,
+    leading: Vec<usize>,
+    stored: NdArray,
+    widen: bool,
+}
+
+impl DenseGather {
+    fn write(self, dataset: &hdf5::Dataset, near: &Nearest) -> Result<()> {
+        let lanes: usize = self.leading.iter().product::<usize>().max(1);
+        let chunk = spatial_chunk(dataset, &near.shape)?;
+        crate::with_array!(&self.stored, a => {
+            let a = a.as_standard_layout();
+            let flat = a.as_slice().expect("standard layout");
+            let per_lane = flat.len() / lanes;
+            let outside = Element::from_f64(if self.widen { 1.0 } else { 0.0 });
+            for block in blocks(&near.shape, &chunk) {
+                let dims: Vec<usize> = block.iter().map(|(a, b)| b - a).collect();
+                let voxels: usize = dims.iter().product();
+                let mut out = vec![outside; lanes * voxels];
+                near.block(&block, |row, at| {
+                    if let Some(i) = at {
+                        for lane in 0..lanes {
+                            out[lane * voxels + row] = flat[lane * per_lane + i];
+                        }
+                    }
+                })?;
+                let mut shape = self.leading.clone();
+                shape.extend(&dims);
+                let mut starts = vec![0; self.leading.len()];
+                starts.extend(block.iter().map(|(a, _)| *a));
+                super::wrote(voxels);
+                data::write_region(dataset, &NdArray::from_vec(&shape, out)?, &starts)?;
+            }
+        });
+        Ok(())
+    }
+}
+
+/// The spatial extents of a dataset's chunks, the last `spatial.len()`
+/// axes; the whole of them for a dataset not chunked.
+fn spatial_chunk(dataset: &hdf5::Dataset, spatial: &[usize]) -> Result<Vec<usize>> {
+    Ok(match data::chunks(dataset) {
+        Some(chunks) => chunks[chunks.len() - spatial.len()..].to_vec(),
+        None => spatial.to_vec(),
+    })
+}
+
+/// A new ignore mask: the target voxels outside the source, written a chunk
+/// at a time.
+fn write_outside(writer: &mut SampleWriter, mask: &str, near: &Nearest, grid: &str, activity: &str) -> Result<()> {
+    let dataset = writer.create_mask(mask, grid, "other", Some(activity), None)?;
+    for block in blocks(&near.shape, &spatial_chunk(&dataset, &near.shape)?) {
+        let dims: Vec<usize> = block.iter().map(|(a, b)| b - a).collect();
+        let mut out = vec![false; dims.iter().product()];
+        near.block(&block, |row, at| out[row] = at.is_none())?;
+        let starts: Vec<usize> = block.iter().map(|(a, _)| *a).collect();
+        super::wrote(dims.iter().product());
+        data::write_region(&dataset, &NdArray::Bool(ArrayD::from_shape_vec(IxDyn(&dims), out)?), &starts)?;
+    }
+    Ok(())
 }
 
 /// A probability map sampled linearly, renormalised where the source was
@@ -1434,6 +1529,48 @@ mod tests {
         let (c, s) = (0.3f64.cos(), 0.3f64.sin());
         let rotation_and_scale = ndarray::arr2(&[[2.0 * c, -3.0 * s], [2.0 * s, 3.0 * c]]);
         assert!(orthogonal(&rotation_and_scale));
+    }
+
+    /// A carried label map, and the ignore mask of the target past the
+    /// source, are written a chunk of the target at a time, never whole;
+    /// each voxel holds its nearest source voxel's label, and 0 outside.
+    #[test]
+    fn s7_7_a_carried_label_map_and_its_ignore_mask_are_written_a_chunk_at_a_time() {
+        use crate::labels::{ClassKey, LabelClass, LabelSet};
+        use crate::sample::{create, GridOptions, ImageOptions, SegmentationOptions, SegmentationSource};
+        use crate::transforms::resample::{resample, ResamplePlan, LARGEST_WRITE};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.medh5");
+        let mut w = create(&path, Some("s"), None, "portable", &[]).unwrap();
+        let classes = (1..=2).map(|c| LabelClass::new(c, format!("c{c}"), format!("C{c}")).unwrap()).collect();
+        w.label_set(LabelSet::new("v", classes, "1.0.0", vec![], vec![], "inline", None, None).unwrap());
+        let frame = |chunk_hint: Option<Vec<i64>>| GridOptions {
+            frame_uid: Some("F0".into()),
+            chunk_hint,
+            ..Default::default()
+        };
+        w.add_grid("g", &[16, 64, 64], &[1.0; 3], frame(None)).unwrap();
+        let ct = NdArray::from_vec(&[16, 64, 64], vec![0i16; 16 * 64 * 64]).unwrap();
+        w.add_image("CT", &ct, "g", "CT", ImageOptions::default()).unwrap();
+        let class = |c: usize| ArrayD::from_shape_fn(IxDyn(&[16, 64, 64]), move |i| (i[0] + i[1] + i[2]) % 3 == c);
+        let masks = vec![(ClassKey::Id(1), class(1)), (ClassKey::Id(2), class(2))];
+        let options = SegmentationOptions { encoding: Some("labelmap".into()), ..Default::default() };
+        w.add_segmentation("seg", "g", SegmentationSource::Masks(masks), options).unwrap();
+        w.add_grid("wide", &[16, 64, 72], &[1.0; 3], frame(Some(vec![4, 32, 32]))).unwrap();
+        w.commit(true).unwrap();
+        LARGEST_WRITE.with(|largest| largest.set(0));
+        let result = resample(&path, &ResamplePlan::onto(["CT"], "wide").with_interpolation("nearest")).unwrap();
+        assert_eq!(result.annotations[0].ignore_mask.as_deref(), Some("seg_on_wide_ignore"));
+        let largest = LARGEST_WRITE.with(|largest| largest.get());
+        assert_eq!(largest, 4 * 32 * 32, "a chunk at a time, of 16 x 64 x 72 voxels");
+        let sample = crate::sample::reader::open_sample(&path).unwrap();
+        let read = |id: &str| data::read(&sample.annotation(id).unwrap().data().unwrap()).unwrap().to_f64();
+        let (source, carried, ignore) = (read("seg"), read("seg_on_wide"), read("seg_on_wide_ignore"));
+        for (at, value) in carried.indexed_iter() {
+            let x = at[2];
+            let want = if x < 64 { source[[at[0], at[1], x]] } else { 0.0 };
+            assert_eq!((*value, ignore[&at]), (want, if x < 64 { 0.0 } else { 1.0 }), "{at:?}");
+        }
     }
 
     /// An object whose box is one point past the integers' start on its

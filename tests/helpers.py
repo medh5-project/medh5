@@ -510,6 +510,21 @@ def group_contents(path: Path, name: str) -> dict[str, Any]:
     return out
 
 
+def stored_digests(path: Path) -> dict[str, str]:
+    """Every digest the file at *path* stores, by the path of its object:
+    its content, decompressed (§13.1), apart from the document, which
+    records when the file was written."""
+    out: dict[str, str] = {}
+
+    def visit(key: str, obj: Any) -> None:
+        if "digest" in obj.attrs:
+            out[key] = as_str(obj.attrs["digest"])
+
+    with h5py.File(path, "r") as handle:
+        handle.visititems(visit)
+    return out
+
+
 def attested_as_written(path: Path) -> None:
     """Write the `content_id` that *path* now recomputes to.
 
