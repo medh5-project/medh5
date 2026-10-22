@@ -341,22 +341,35 @@ Under [D2](#decisions-the-maintainer) as proposed.
     declared prefix, `value_num` and `value_text`, the declared `unit` and
     `available` columns, and a day span to a time under a `day_precision`
     prefix.
-  - **What the round trip promises, and what it does not.** Every event the
-    importer can produce, exported and imported again with the same options
-    (`day_precision`, `columns`, `code_systems`, the same subject ids), comes
-    back with the same id, code, value and both time pairs. An event the
-    importer cannot produce (an interval that is not a day span, an
-    availability that is a range rather than one time, a revision chain) is
-    not written at all, in any form the importer would read as something
-    else; the report lists each one, by event id, as not exported. Extension
-    columns that would carry them, with the importer reading them, are a
-    later minor's.
+  - **What the round trip promises, and what it does not.** An export
+    writes the row each event says, and nothing it does not hold. Two
+    promises follow, stated by rule rather than by a list of cases:
+    - **Export is a fixed point.** Export, import with the same options
+      (`day_precision`, `columns`, `code_systems`, the same subject ids) and
+      export again gives the same rows.
+    - **An import that kept everything comes back whole.** An event whose
+      import kept every field its id hashed (`_row_id` over subject, time,
+      code, both values, and the declared `unit` and `available`) comes back
+      from export and import with the same id, code, value and both time
+      pairs. An import that dropped a field keeps its content but not its id
+      (both values with `both_values` choosing one; a unit on a row with no
+      numeric value), because no export can restore what the event no longer
+      holds. The importer reports both cases already, so the test tells them
+      apart from its report, not from a list kept beside it.
+    - An event the importer cannot produce (an interval that is not a day
+      span, an availability that is a range rather than one time, a revision
+      chain) is not written at all, in any form the importer would read as
+      something else; the report lists each one, by event id, as not
+      exported. Extension columns that would carry them, with the importer
+      reading them, are a later minor's.
   - Documents' text is exported only when asked (`texts=True`), as on import.
 - **Tests.**
-  - Import, export and import again gives the same events (ids, codes,
-    values, both time pairs) for every MEDS fixture the importer's tests use,
-    including the day-precision intervals and declared availability of
-    `tests/integrations/test_meds.py`.
+  - For every MEDS fixture the importer's tests use, including the
+    day-precision intervals, declared availability, rows holding both values
+    and units on non-numeric rows (`tests/integrations/test_meds.py`):
+    export is a fixed point, every event comes back with the same code,
+    value and both time pairs, and every event whose import dropped nothing
+    keeps its id.
   - A history holding events the importer cannot produce exports the rest,
     and its report names each one left out.
   - A subject id that is not an integer, or one sample under two subject
