@@ -1002,6 +1002,8 @@ thread_local! {
     /// The most target voxels one write of a mask or a carried annotation
     /// held, for the tests that neither is held whole.
     static LARGEST_WRITE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The most blocks a valid mask kept, done before it was created.
+    static LARGEST_KEPT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Note a write of `voxels` target voxels, under test.
@@ -1069,7 +1071,13 @@ fn resample_image(
         None
     };
     let group_max: usize = leading_shape.iter().zip(&leading_chunk).map(|(n, c)| (*c).clamp(1, (*n).max(1))).product();
-    let mut valid = ValidMask::new(job.mask.as_deref().expect("named in prepare"), &target.grid_id, activity);
+    let mut valid = ValidMask::new(
+        job.mask.as_deref().expect("named in prepare"),
+        &target.grid_id,
+        activity,
+        &target_spatial,
+        &chunk,
+    );
     let mut filled = 0u64;
     let mut pending: Vec<Vec<(usize, usize)>> = Vec::new();
     for chunk_block in blocks(&target_spatial, &chunk) {
@@ -1234,6 +1242,7 @@ fn resample_image(
             }
             valid.block(writer, &block, invalid)?;
         }
+        valid.chunk_done();
     }
     Ok((filled, valid.written()))
 }
@@ -1241,19 +1250,34 @@ fn resample_image(
 /// A resampled image's `valid_mask` (§4.4), written a block at a time as the
 /// image is, never held whole.  It is created at the first block holding a
 /// voxel with no data, and the blocks before that one are written then, all
-/// valid; a resample whose every voxel holds data writes none.
+/// valid; a resample whose every voxel holds data writes none.  What was
+/// done before is kept as a count of chunks, not a list of blocks, so a fine
+/// chunking costs nothing while no mask is needed.
 struct ValidMask<'a> {
     name: &'a str,
     grid: &'a str,
     activity: &'a str,
+    shape: &'a [usize],
+    chunk: &'a [usize],
     dataset: Option<hdf5::Dataset>,
-    /// The blocks done before the mask was created.
-    before: Vec<Vec<(usize, usize)>>,
+    /// The chunks of `blocks(shape, chunk)` done before the mask was created.
+    chunks_before: usize,
+    /// The parts of the current chunk done before then (a chunk is split
+    /// when its source does not fit the crop budget).
+    parts_before: Vec<Vec<(usize, usize)>>,
 }
 
 impl<'a> ValidMask<'a> {
-    fn new(name: &'a str, grid: &'a str, activity: &'a str) -> ValidMask<'a> {
-        ValidMask { name, grid, activity, dataset: None, before: Vec::new() }
+    fn new(name: &'a str, grid: &'a str, activity: &'a str, shape: &'a [usize], chunk: &'a [usize]) -> ValidMask<'a> {
+        ValidMask { name, grid, activity, shape, chunk, dataset: None, chunks_before: 0, parts_before: Vec::new() }
+    }
+
+    /// The current chunk is done, every part of it.
+    fn chunk_done(&mut self) {
+        if self.dataset.is_none() {
+            self.chunks_before += 1;
+            self.parts_before.clear();
+        }
     }
 
     /// One block of the target; `invalid` marks its voxels with no data, in
@@ -1261,11 +1285,13 @@ impl<'a> ValidMask<'a> {
     fn block(&mut self, writer: &mut SampleWriter, block: &[(usize, usize)], invalid: Option<Vec<bool>>) -> Result<()> {
         if self.dataset.is_none() {
             if invalid.is_none() {
-                self.before.push(block.to_vec());
+                self.parts_before.push(block.to_vec());
+                #[cfg(test)]
+                LARGEST_KEPT.with(|largest| largest.set(largest.get().max(self.parts_before.len())));
                 return Ok(());
             }
             let dataset = writer.create_mask(self.name, self.grid, "other", Some(self.activity), None)?;
-            for done in self.before.drain(..) {
+            for done in blocks(self.shape, self.chunk).take(self.chunks_before).chain(self.parts_before.drain(..)) {
                 write_valid(&dataset, &done, None)?;
             }
             self.dataset = Some(dataset);
@@ -1533,6 +1559,49 @@ mod tests {
         drop(sample);
         let inside = resample(&path, &ResamplePlan::onto(["img"], "fine").with_interpolation("nearest")).unwrap();
         assert_eq!((inside.filled_voxels, inside.images[0].valid_mask.clone()), (0, None));
+    }
+
+    /// What a valid mask keeps of the blocks done before it is made is a
+    /// count of chunks, not a list of them: a fine chunking whose every
+    /// voxel holds data costs nothing.  A chunk split to the crop budget
+    /// keeps its parts, and only its own, until it is done.
+    #[test]
+    fn s4_4_a_valid_mask_keeps_a_count_of_the_chunks_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.medh5");
+        sample(&path, [16, 32, 32], None);
+        let mut w = crate::sample::writer::amend(&path, None).unwrap();
+        // z 16 lies outside the source, so only the last plane has no data:
+        // in rows of 32 voxels, 512 blocks in.  (The target is large enough
+        // to be chunked at all.)
+        for (name, chunk) in [("rows", [1, 1, 32]), ("whole", [17, 32, 32])] {
+            let options =
+                GridOptions { frame_uid: Some("F0".into()), chunk_hint: Some(chunk.to_vec()), ..Default::default() };
+            w.add_grid(name, &[17, 32, 32], &[1.0, 1.0, 1.0], options).unwrap();
+        }
+        w.commit(true).unwrap();
+        // The rows are counted, one kept at a time; the whole chunk, split to
+        // a budget of 512 source voxels, keeps its parts done before z 16.
+        for (grid, budget) in [("rows", CROP_BUDGET), ("whole", 512)] {
+            TEST_CROP_BUDGET.with(|b| b.set(budget));
+            LARGEST_KEPT.with(|largest| largest.set(0));
+            let result = resample(&path, &ResamplePlan::onto(["img"], grid).with_interpolation("nearest")).unwrap();
+            TEST_CROP_BUDGET.with(|b| b.set(CROP_BUDGET));
+            assert_eq!(result.filled_voxels, 32 * 32, "{grid}");
+            let kept = LARGEST_KEPT.with(|largest| largest.get());
+            if grid == "rows" {
+                assert_eq!(kept, 1, "{grid}");
+            } else {
+                assert!(kept > 1, "{grid}: the split chunk kept {kept} parts");
+            }
+            let sample = open_sample(&path).unwrap();
+            let name = format!("img_on_{grid}_valid");
+            let mask = data::read(&sample.annotation(&name).unwrap().data().unwrap()).unwrap();
+            let NdArray::Bool(mask) = mask else { panic!("a boolean mask") };
+            for ((z, _, _), valid) in mask.into_dimensionality::<ndarray::Ix3>().unwrap().indexed_iter() {
+                assert_eq!(*valid, z < 16, "{grid}: z {z}");
+            }
+        }
     }
 
     /// A strong downsampling spreads one target chunk over the whole
