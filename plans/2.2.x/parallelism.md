@@ -355,6 +355,16 @@ exception allows ([D6](#decisions-the-maintainer)).
     `fill` and `place` assemble a window), and the slab is hashed whole,
     slab after slab. A test hashes a dataset whose chunks split every axis,
     and one whose slabs end inside a chunk, against the sequential digest.
+  - **What reads the stream besides the hash reads it as today.**
+    `validate --level integrity` passes an inspector through
+    `verify_root_reporting` (`validate/rules/integrity.rs`
+    `check_integrity`), which feeds each probability map's blocks to its
+    E404/E411 check, and reads undigested maps through
+    `dataset_digest_inspected`. That state is per dataset (keyed by path),
+    so it moves into the dataset's worker with it, is fed the same C-order
+    slabs, and comes back at the join; findings are emitted after every
+    worker has joined, in today's order. An inspector whose state spans
+    datasets runs on the caller, in dataset order.
   - One large dataset is pipelined: the next slab's chunks are read and
     decompressed while this slab is hashed, so the hash never waits on the
     lock.
@@ -373,6 +383,9 @@ exception allows ([D6](#decisions-the-maintainer)).
     types, and datasets whose slabs fall on and across chunk edges.
   - The E701 refusal at any thread count.
   - `verify`'s report the same, line for line, at 1 and 4 threads.
+  - `validate --level integrity`'s findings the same, in the same order, at
+    1 and 4 threads, on samples with probability maps that fail E404 and
+    E411, digested and undigested.
 - **Documentation.** The performance guide's digest row per platform, with
   the `sha2` backend each gets.
 - **Changelog.** Performance, area `files`.
