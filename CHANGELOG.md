@@ -8,16 +8,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [2.2.2] — 2026-10-22
 
-**A patch release, with no format change.** Memory and time, and one fix for
-hostile input: the documented API is unchanged, the format stays 1.2 and the
-diagnostic code table keeps its codes, and every object 2.2.1 wrote, 2.2.2
+**A patch release, with no format change.** Memory and time, and two fixes
+for hostile input: the documented API is unchanged, the format stays 1.2 and
+the diagnostic code table keeps its codes, and every object 2.2.1 wrote, 2.2.2
 writes with the same digest. `resample` holds one target chunk where it held
 whole target volumes, and takes a third to a seventh of 2.2.1's time; a NIfTI
 import holds one volume at a time where it held every input, and an export
-writes its voxels a megabyte at a time. A crafted ITK transform file can no
-longer make reading it take gigabytes.
+writes its voxels a megabyte at a time. A crafted file of 1 KiB can no longer
+make opening it take 4 GiB, nor a crafted ITK transform file make reading it
+take gigabytes.
 
 ### Security
+
+- **A crafted file of 1 KiB no longer takes 4 GiB and half a minute to open.**
+  One structure inside HDF5 states its own size, and the library allocated
+  and read that much, past the end of the file, before it refused the file.
+  HDF5 is now built with a second fix (`vendor/hdf5-metno-src/PATCHES.md`),
+  and the file is reported as unreadable (`E001`) at once. The wheels and the
+  release binaries carry it; a build from crates.io does not until HDF5
+  releases the fix (`SECURITY.md`).
 
 - **A crafted ITK transform file no longer takes gigabytes to read.** HDF5
   reads a chunk that was never written as its fill value, so

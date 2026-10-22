@@ -274,6 +274,18 @@ H5F__drvrinfo_prefix_decode(H5O_drvinfo_t *drvrinfo, char *drv_name, const uint8
         if (!H5_addr_defined(eoa))
             HGOTO_ERROR(H5E_FILE, H5E_CANTGET, FAIL, "driver get_eoa request failed");
 
+        /* medh5: the block lies within the file, so its stated size is
+         * checked against the file's end before the cache reads that much
+         * (vendor/hdf5-metno-src/PATCHES.md)
+         */
+        {
+            haddr_t eof = H5FD_get_eof(udata->f->shared->lf, H5FD_MEM_SUPER);
+
+            if (!H5_addr_defined(eof) || udata->driver_addr > eof ||
+                (haddr_t)H5F_DRVINFOBLOCK_HDR_SIZE + drvrinfo->len > eof - udata->driver_addr)
+                HGOTO_ERROR(H5E_FILE, H5E_TRUNCATED, FAIL, "driver info block runs past the end of the file");
+        }
+
         /* ... if it is too small, extend it. */
         min_eoa = udata->driver_addr + H5F_DRVINFOBLOCK_HDR_SIZE + drvrinfo->len;
 

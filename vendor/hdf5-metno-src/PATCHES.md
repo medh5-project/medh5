@@ -18,7 +18,13 @@ updated.
 2. **The build script** (`build.rs`) reruns when anything under `ext/hdf5`
    changes, not only when the script does, so a build cache never links an
    HDF5 compiled before a change here.
+3. **Driver info blocks** (`ext/hdf5/src/H5Fsuper_cache.c`,
+   `H5F__drvrinfo_prefix_decode`). A driver info block lies within the file.
+   One whose stated size runs past the file's end is refused before the
+   metadata cache reads it, rather than read to that size and refused after.
 
-The first change is held by the `global-heap-object-smaller-than-its-header` fixture
-of the robustness corpus (`crates/medh5/src/conformance/robustness.rs`), which
-CI reports through every wheel and every binary it builds.
+The first and third changes are held by the
+`global-heap-object-smaller-than-its-header` and
+`driver-info-block-past-the-end` fixtures of the robustness corpus
+(`crates/medh5/src/conformance/robustness.rs`), which CI reports through every
+wheel and every binary it builds.

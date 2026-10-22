@@ -142,8 +142,8 @@ HDF5 is the source `hdf5-metno-src` 0.10.4 packages, with the local changes
 of the published crate. Every wheel, the sdist, every standalone binary and
 the Homebrew formula carry them. A build from crates.io does not
 (`cargo install medh5-cli`, or a crate that depends on `medh5`): it compiles
-the published `hdf5-metno-src`, and opening a crafted file can hang it until
-the change is released upstream. Install the wheel or a release binary to
+the published `hdf5-metno-src`, and opening a crafted file can hang it, or
+make it allocate gigabytes, until the changes are released upstream. Install the wheel or a release binary to
 read files you did not write.
 
 When a library changes (a `-sys` crate is bumped, or a vendored source
