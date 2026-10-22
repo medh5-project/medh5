@@ -1764,10 +1764,18 @@ STORED_BY_2_2_0_TURNED: dict[str, str] = {
 }
 
 
+# The cosine and sine written out: numpy's differ in the last place between
+# versions and machines, and the digests are of these exact values.
+_COS_SIN = {
+    0.2: (0.9800665778412416, 0.19866933079506122),
+    0.3: (0.955336489125606, 0.29552020666133955),
+}
+
+
 def _turned(
     angle: float, shift: tuple[float, float, float] = (0.0, 0.0, 0.0)
 ) -> np.ndarray:
-    c, s = np.cos(angle), np.sin(angle)
+    c, s = _COS_SIN[angle]
     return np.array(
         [[1, 0, 0, shift[0]], [0, c, -s, shift[1]], [0, s, c, shift[2]], [0, 0, 0, 1.0]]
     )
