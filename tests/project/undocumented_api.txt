@@ -125,7 +125,6 @@ medh5.bench.benchmark_file
 medh5.bench.many_class_measurement
 medh5.bench.synthetic_many_class_sample
 medh5.bench.synthetic_pair
-medh5.bench.throughput
 medh5.bench.timed
 medh5.cache.CacheEntry
 medh5.cache.LEVELS

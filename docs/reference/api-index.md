@@ -237,7 +237,7 @@ compiled extension the modules re-export from, not an API of its own.
 | `synthetic_pair` | function | A two-timepoint sample with a registration, for the paired metrics. |  |
 | `synthetic_sample` | function | Write a sample shaped like the one the published numbers were measured on: a CT, `classes` overlapping organs, a sampling index. | [Profiles and validation levels › Levels — how much to check](profiles-and-levels.md#levels--how-much-to-check) |
 | `TARGETS` | constant (`dict`) | Metric -&gt; (upper bound in ms, description): the performance guide's targets. |  |
-| `throughput` | function | Sustained patches/s through the real dataloader. |  |
+| `throughput` | function | Sustained patches/s through the real dataloader. | [Tune performance › The numbers](../guides/performance.md#the-numbers) |
 | `timed` | function | Median milliseconds per call. |  |
 
 ## `medh5.cache` { #medh5-cache }

@@ -1,16 +1,17 @@
 # Runnable examples
 
-Nine scripts. Four are standalone: the benchmarks behind the measured claims
+Ten scripts. Four are standalone: the benchmarks behind the measured claims
 in the [specification](../spec/medh5-1.0.md) (§7.0, §14.2, §14.3, §14.5) and the
 [design rationale](../explanation/design-rationale.md), and a reference writer
 that builds a complete file from the specification alone. None of those imports
 `medh5` — they measure and exercise the *format*, with h5py and nothing between
 the reader and the bytes.
 
-The other five exercise [format 1.1](../spec/medh5-1.1.md) and the
-[task and cache contract](../spec/task-cache-1.md) through the package's public
-API, end to end, and the test suite runs each of them
-(`tests/integrations/test_clinical_training.py`):
+The other six run through the package's public API, end to end, and the test
+suite runs each of them. Five exercise [format 1.1](../spec/medh5-1.1.md) and
+the [task and cache contract](../spec/task-cache-1.md)
+(`tests/integrations/test_clinical_training.py`); the sixth times reading from
+threads (`tests/tools/test_bench.py`):
 
 | Script | Does |
 |---|---|
@@ -19,6 +20,7 @@ API, end to end, and the test suite runs each of them
 | [`clinical_cache.py`](clinical_cache.py) | Event- and patient-level feature caches, then every way one stops being usable — a source amended (stale), bytes rotted (corrupt), a whole-history embedding (inadmissible), statistics fitted on the wrong split — and the explicit re-pin |
 | [`bench_clinical.py`](bench_clinical.py) | Write, select, read, batch, cache and amend costs on a synthetic cohort ([results below](#clinical-paths-format-11)) |
 | [`bench_preflight.py`](bench_preflight.py) | A task's preflight, dataset and items on a large multi-site cohort — many events, documents, fragments and cutoffs — each measured in its own interpreter: time, peak memory, bytes read ([results below](#preflight-at-cohort-scale)) |
+| [`bench_threads.py`](bench_threads.py) | Image windows (Blosc2 and gzip), annotation windows and opens, the same work from one, two and four threads with a handle each, and the cost of the smallest engine call ([results](../guides/performance.md#the-numbers)) |
 
 ```bash
 pip install "medh5[torch,h5py]"   # h5py: clinical_cache.py rots a cache's bytes with it
@@ -27,6 +29,7 @@ python docs/examples/clinical_collection.py out2/    # ~5 s
 python docs/examples/clinical_cache.py out3/         # ~5 s
 python docs/examples/bench_clinical.py --json bench.json   # ~1 min at the defaults
 python docs/examples/bench_preflight.py --json pre.json    # ~1 min at the defaults
+python docs/examples/bench_threads.py --json threads.json  # ~3 min at the defaults
 ```
 
 | Script | Produces |

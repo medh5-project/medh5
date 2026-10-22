@@ -235,23 +235,26 @@ using them (§14.4).
 
 ## The numbers
 
-Measured with 2.0.0 on one four-core machine, on a 192×256×256 synthetic CT
-with eight classes, reading a new window for every patch. 1.4.4, measured
-beside an earlier build of 2.0, was as fast or slower on every row. That
-comparison is the [changelog](../changelog.md)'s, under 2.0.0, and its 2.0
-figures are the earlier build's, not this table's: 3.5 ms for the eight-class
-labels, 3–3.5 ms to the first patch, 0.19 ms for a metadata read and 600
-patches/s with four workers. The 0.x column is the layout 1.0 replaced, as
-measured then.
+Measured with 2.2.0 and 2.1.0, the released wheels, on one machine: a Linux
+x86_64 container with four vCPUs, Python 3.14, on a 192×256×256 synthetic CT
+with eight classes, reading a new window for every patch. Each figure is the
+median of ten `medh5 bench` runs (throughput: six runs of 512 batches), and
+2.2.0 is within the run-to-run spread of 2.1.0 on every row. The 2.0.0 column
+is the table this page published before, measured on another four-core
+machine; it is the one the other pages quote. 1.4.4, measured beside an earlier
+build of 2.0, was as fast or slower on every row. That comparison is the
+[changelog](../changelog.md)'s, under 2.0.0. The 0.x column is the layout 1.0
+replaced, as measured then.
 
-| Metric | Target | 0.x | Measured |
-|---|---|---|---|
-| 64³ patch, multi-class labels only | ≤ 10 ms | 117 ms | **2.3 ms** |
-| Foreground centre sampling *(indexed)* | ≤ 1 ms, O(1) memory | 9.2 ms, O(volume) | **0.03 ms** |
-| … at 63 classes | ≤ 1 ms | — | **0.04 ms** |
-| Metadata-only read | ≤ 2 ms | ~1.5 ms | **0.13 ms** |
-| Full `open()` → first patch | ≤ 15 ms | ~120 ms | **1.6 ms** |
-| Sustained 64³ throughput | ≥ 400 patches/s | ~60 | **880–980** (4 workers, 4 cores) |
+| Metric | Target | 0.x | 2.0.0 | 2.1.0 | 2.2.0 |
+|---|---|---|---|---|---|
+| 64³ patch, multi-class labels only | ≤ 10 ms | 117 ms | 2.3 ms | 3.6 ms | **3.5 ms** |
+| Foreground centre sampling *(indexed)* | ≤ 1 ms, O(1) memory | 9.2 ms, O(volume) | 0.03 ms | 0.05 ms | **0.05 ms** |
+| … at 63 classes | ≤ 1 ms | — | 0.04 ms | 0.06 ms | **0.06 ms** |
+| Metadata-only read | ≤ 2 ms | ~1.5 ms | 0.13 ms | 0.20 ms | **0.22 ms** |
+| Full `open()` → first patch | ≤ 15 ms | ~120 ms | 1.6 ms | 2.1 ms | **2.2 ms** |
+| Sustained 64³ throughput, one process | ≥ 400 patches/s | ~60 | ~590 | 430 | **440** |
+| … with four workers | — | — | 880–980 | 450 | **510** |
 
 ```
 $ medh5 bench                       # builds a synthetic sample and measures
@@ -261,10 +264,11 @@ $ medh5 bench case.medh5 --patch 64 --repeats 20 --workers 4 --json
 Two things to know before quoting these.
 
 **The sampling rows need an index.** `bench` calls `build_index()` on the
-samples it builds, so 0.03 ms is the indexed path — the one you get after
+samples it builds, so 0.05 ms is the indexed path — the one you get after
 `medh5 index build`, not the one you get by default. Unindexed, the same draw
-scans the labels: 210 ms on this volume, 2.4 s at 512³, growing with the volume
-while the indexed draw stays flat. `used_index` in the batch metadata, and in
+scans the labels: 285 ms on this volume here (210 ms on the 2.0.0 machine, and
+2.4 s at 512³ there), growing with the volume while the indexed draw stays
+flat. `used_index` in the batch metadata, and in
 the row's `detail` under `bench --json`, says which you measured. The 63-class
 row exists because the class count is the other axis: before 1.4.2 each draw
 re-read the index's class table once per class, 0.9 ms at eight classes and
@@ -273,11 +277,41 @@ re-read the index's class table once per class, 0.9 ms at eight classes and
 **`bench` does not check the throughput target.** The rows with a target are
 verified and reported against; throughput depends on worker count, so it is
 measured and printed without one, and *all targets met* is a statement about
-the checked rows. `medh5 bench` with no `--workers` runs single-process, around
-590 patches/s here; pass `--workers 4` to reproduce the number above. It is the
-row that depends most on the machine and the patch: here the four workers share
-four cores with the main process, and at 96³ the same loader moves about 490
-patches/s.
+the checked rows. `medh5 bench` with no `--workers` runs single-process; pass
+`--workers 4` for the four-worker row. It is the row that depends most on the
+machine and the patch: the four workers share the four cores with the main
+process, which gained 1.5–1.7× from them on the 2.0.0 machine and 1.2× on this
+one,
+and at 96³ the 2.0.0 machine's loader moved about 490 patches/s. `bench` times
+63 patches after the first batch, and on this machine its four-worker figure
+ran from 120 to 670 patches/s between runs: for a number to compare, time more
+batches (`medh5.bench.throughput(paths, batches=512, workers=4)`).
+
+**Threads.** [`bench_threads.py`](../examples/bench_threads.py) deals one
+fixed list of work over one, two and four threads, each with its own handles,
+on four 2.2.0 samples like the one above. Seconds for the whole of it, median
+of four processes, on the same machine:
+
+| Work | GIL build: 1 thread | 4 threads | Free-threaded: 1 thread | 4 threads |
+|---|---|---|---|---|
+| 512 windows of a `training` (Blosc2) CT | 0.79 s | 0.74 s | 1.26 s | 0.76 s |
+| 512 windows of a `portable` (gzip) CT | 6.16 s | 6.86 s | 6.20 s | 6.64 s |
+| 512 windows of the annotation, `dense()` | 2.40 s | 0.71 s | 2.34 s | 0.73 s |
+| 256 opens, each reading the grid and image metadata | 0.13 s | 0.25 s | 0.14 s | 0.52 s |
+
+Windows that decompress outside HDF5's lock (Blosc2, and the label planes'
+decoding) gain from threads; gzip, which HDF5 decompresses under its lock,
+loses about a tenth to the hand-offs, and opening loses most, because an open
+is many small HDF5 calls and each one changes hands. The free-threaded build
+(Python 3.14t) loses the most there: 2.1.0's free-threaded wheel ran with the
+GIL, and took 0.24 s at four threads. One thread is no slower than 2.1.0 on
+either build. The one-thread Blosc2 row moves between about 0.8 and 1.3 s
+with the process rather than the build: timed side by side in one process,
+the two builds read those windows in the same time.
+[Threads or processes](../explanation/concurrency.md#threads-or-processes)
+says which to choose.
+
+
 
 Three decisions are behind the label-read number: each stacked plane is
 chunked separately, so one layer reads without the others; a multi-class

@@ -191,3 +191,54 @@ class TestSyntheticBench:
         with medh5.open(path) as sample:
             assert "training" in sample.profiles
             assert len(sample.annotations["organs"].class_ids) == 2
+
+
+class TestThreadBench:
+    """``docs/examples/bench_threads.py``, run small: every workload at every
+    thread count, and the per-call row."""
+
+    def test_the_thread_bench_runs_every_workload(self, tmp_path):
+        import importlib.util
+        import sys
+
+        script = Path(__file__).parents[2] / "docs" / "examples" / "bench_threads.py"
+        spec = importlib.util.spec_from_file_location("bench_threads", script)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["bench_threads"] = module
+        spec.loader.exec_module(module)
+        out = tmp_path / "out.json"
+        small = "--files 2 --shape 8 16 16 --patch 4 --reads 6 --opens 3 --calls 2"
+        results = module.main(
+            [*small.split(), "--repeats", "1", "--threads", "1", "2"]
+            + ["--out", str(tmp_path / "samples"), "--json", str(out)]
+        )
+        assert json.loads(out.read_text())["conditions"]["files"] == 2
+        for workload in ("image", "portable", "labels", "open"):
+            rows = results[workload]["threads"]
+            assert set(rows) == {"1", "2"}
+            assert rows["1"]["vs_first"] == 1.0
+            assert all(row["seconds"] > 0 for row in rows.values())
+        assert set(results["calls_us"]) == {"read_one_voxel", "contains"}
+
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            "--shape 8 16 16 --patch 9",
+            "--patch 0",
+            "--threads 1 0",
+            "--reads 0",
+            "--files 4 --threads 1 3",
+        ],
+    )
+    def test_a_run_that_would_time_something_else_is_refused(self, flags, capsys):
+        import importlib.util
+
+        script = Path(__file__).parents[2] / "docs" / "examples" / "bench_threads.py"
+        spec = importlib.util.spec_from_file_location("bench_threads_flags", script)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with pytest.raises(SystemExit):
+            module.main(flags.split())
+        assert "--" in capsys.readouterr().err
