@@ -28,7 +28,7 @@ use indexmap::IndexMap;
 use ndarray::{Array2, ArrayD, IxDyn};
 use serde_json::{json, Map, Value};
 
-use super::apply::{linear_sample, CubicCoefficients};
+use super::apply::{c_strides, count_up, linear_sample, linear_sample_axes, CubicCoefficients};
 use super::model::{Body, Transform};
 use crate::array::{DType, NdArray, Slice};
 use crate::geometry::grid::{mm_per_unit, Grid};
@@ -354,6 +354,148 @@ pub fn resample(source: &Path, plan: &ResamplePlan) -> Result<Resampled> {
     Ok(result)
 }
 
+/// A block's source points, each clamped into the source where it falls
+/// inside: a row a voxel (`Rows`), or, where the mapping moves each axis
+/// alone ([`Mapping::axes`]), each axis's coordinates once (`Axes`).  The
+/// block's points are then the C-order product of the axes', and every value
+/// worked out from them is the one its row would give.
+enum Points {
+    Rows(Array2<f64>),
+    Axes {
+        coords: Vec<Vec<f64>>,
+        /// Whether each coordinate lies within its axis of the source.
+        within: Vec<Vec<bool>>,
+    },
+}
+
+impl Points {
+    /// The points of `block` in a source of `spatial` extent, and whether
+    /// each lies inside the source, in C order.
+    fn new(mapping: &Mapping, block: &[(usize, usize)], spatial: &[usize]) -> Result<(Points, Vec<bool>)> {
+        let within_axis = |v: f64, m: usize| v >= -0.5 && v <= m as f64 - 0.5;
+        if let Some(mut coords) = mapping.axes(block)? {
+            let within: Vec<Vec<bool>> =
+                coords.iter().zip(spatial).map(|(c, m)| c.iter().map(|v| within_axis(*v, *m)).collect()).collect();
+            let lengths: Vec<usize> = coords.iter().map(Vec::len).collect();
+            let n: usize = lengths.iter().product();
+            let mut inside = Vec::with_capacity(n);
+            let mut at = vec![0usize; lengths.len()];
+            for _ in 0..n {
+                inside.push(within.iter().zip(&at).all(|(w, i)| w[*i]));
+                count_up(&mut at, &lengths);
+            }
+            for (coords, m) in coords.iter_mut().zip(spatial) {
+                for v in coords {
+                    *v = v.clamp(0.0, *m as f64 - 1.0);
+                }
+            }
+            return Ok((Points::Axes { coords, within }, inside));
+        }
+        let mut clamped = mapping.map(&block_indices(block))?;
+        let inside: Vec<bool> =
+            clamped.outer_iter().map(|p| p.iter().zip(spatial).all(|(v, m)| within_axis(*v, *m))).collect();
+        // The source points, clamped to the source, in place: a block holds
+        // one array of points, not one per step.
+        for (row, mut point) in clamped.outer_iter_mut().enumerate() {
+            for (k, v) in point.iter_mut().enumerate() {
+                *v = if inside[row] { v.clamp(0.0, spatial[k] as f64 - 1.0) } else { 0.0 };
+            }
+        }
+        Ok((Points::Rows(clamped), inside))
+    }
+
+    /// The part of the source the inside points fall in, an axis at a time;
+    /// `None` when no point is inside.
+    fn crop(&self, inside: &[bool], spatial: &[usize]) -> Option<Vec<(usize, usize)>> {
+        let span = |k: usize, values: &mut dyn Iterator<Item = f64>| {
+            let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+            for v in values {
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+            if lo > hi {
+                return None;
+            }
+            Some((lo.floor() as usize, (hi.ceil() as usize).min(spatial[k] - 1) + 1))
+        };
+        match self {
+            Points::Rows(clamped) => (0..spatial.len())
+                .map(|k| span(k, &mut clamped.column(k).iter().zip(inside).filter(|(_, ok)| **ok).map(|(v, _)| *v)))
+                .collect(),
+            // A point is inside where each of its coordinates is within its
+            // axis, so the inside points' coordinates on an axis are that
+            // axis's within --- while every axis has one.
+            Points::Axes { coords, within } => {
+                if !within.iter().all(|w| w.contains(&true)) {
+                    return None;
+                }
+                (0..spatial.len())
+                    .map(|k| span(k, &mut coords[k].iter().zip(&within[k]).filter(|(_, ok)| **ok).map(|(v, _)| *v)))
+                    .collect()
+            }
+        }
+    }
+
+    /// Each inside point's nearest source voxel, as a flat C-order offset
+    /// into `crop` (0 outside, where `inside` says so).
+    fn nearest_offsets(&self, inside: &[bool], crop: &[(usize, usize)], spatial: &[usize]) -> Vec<usize> {
+        // A cast truncates, which is the floor at and above zero and
+        // saturates to 0 below it, as the floor's cast did; the floor is a
+        // call on baseline x86-64.
+        let voxel = |v: f64, k: usize| ((v + 0.5) as usize).min(spatial[k] - 1) - crop[k].0;
+        match self {
+            Points::Rows(clamped) => (0..inside.len())
+                .map(|row| {
+                    if !inside[row] {
+                        return 0;
+                    }
+                    (0..spatial.len()).fold(0, |flat, k| flat * (crop[k].1 - crop[k].0) + voxel(clamped[[row, k]], k))
+                })
+                .collect(),
+            // The flat offset is the sum of each axis's voxel times the
+            // crop's stride along it.
+            Points::Axes { coords, within } => {
+                let extents: Vec<usize> = crop.iter().map(|(a, b)| b - a).collect();
+                let strides = c_strides(&extents);
+                let offsets: Vec<Vec<usize>> = (0..spatial.len())
+                    .map(|k| {
+                        let along = coords[k].iter().zip(&within[k]);
+                        along.map(|(v, ok)| if *ok { voxel(*v, k) * strides[k] } else { 0 }).collect()
+                    })
+                    .collect();
+                let lengths: Vec<usize> = coords.iter().map(Vec::len).collect();
+                let mut at = vec![0usize; lengths.len()];
+                let mut out = Vec::with_capacity(inside.len());
+                for ok in inside {
+                    out.push(if *ok { offsets.iter().zip(&at).map(|(o, i)| o[*i]).sum() } else { 0 });
+                    count_up(&mut at, &lengths);
+                }
+                out
+            }
+        }
+    }
+
+    /// The points taken into `crop`: each coordinate less the crop's start.
+    fn shift(&mut self, crop: &[(usize, usize)]) {
+        match self {
+            Points::Rows(clamped) => {
+                for mut point in clamped.outer_iter_mut() {
+                    for (k, v) in point.iter_mut().enumerate() {
+                        *v -= crop[k].0 as f64;
+                    }
+                }
+            }
+            Points::Axes { coords, .. } => {
+                for (k, coords) in coords.iter_mut().enumerate() {
+                    for v in coords {
+                        *v -= crop[k].0 as f64;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// One image to resample, checked.
 struct Job {
     source: String,
@@ -652,6 +794,32 @@ impl Mapping {
             units[[k, k]] = scale;
         }
         Ok(Mapping::Affine(inv(&source.affine())?.dot(&units).dot(&target.affine())))
+    }
+
+    /// Each target axis's source coordinates over `block`, when the mapping
+    /// moves every axis along itself alone --- an affine whose linear part is
+    /// diagonal, as respacing a grid gives --- and `None` otherwise.  Each is
+    /// mapped by [`Mapping::map`] from a row of the block, and is the value
+    /// every voxel's row takes on that axis: the other axes' terms are
+    /// products with a zero, the same zero, of the same sign, whatever their
+    /// index.
+    fn axes(&self, block: &[(usize, usize)]) -> Result<Option<Vec<Vec<f64>>>> {
+        let Mapping::Affine(m) = self else { return Ok(None) };
+        let s = m.nrows() - 1;
+        #[cfg(test)]
+        if ROWS_ONLY.with(|only| only.get()) {
+            return Ok(None);
+        }
+        if (0..s).any(|r| (0..s).any(|c| r != c && m[[r, c]] != 0.0)) {
+            return Ok(None);
+        }
+        let mut axes = Vec::with_capacity(s);
+        for (k, (a, b)) in block.iter().enumerate() {
+            let rows =
+                Array2::from_shape_fn((b - a, s), |(i, c)| if c == k { (a + i) as f64 } else { block[c].0 as f64 });
+            axes.push(self.map(&rows)?.column(k).to_vec());
+        }
+        Ok(Some(axes))
     }
 
     /// `(N, S)` target indices to `(N, S)` source indices.
@@ -1005,6 +1173,9 @@ thread_local! {
     static LARGEST_WRITE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// The most blocks a valid mask kept, done before it was created.
     static LARGEST_KEPT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Every mapping maps a row a voxel, as one that moves its axes together
+    /// does: the tests that the axes give what the rows give.
+    static ROWS_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Note a write of `voxels` target voxels, under test.
@@ -1086,38 +1257,9 @@ fn resample_image(
         while let Some(block) = pending.pop() {
             let dims: Vec<usize> = block.iter().map(|(a, b)| b - a).collect();
             let n: usize = dims.iter().product();
-            let mut clamped = mapping.map(&block_indices(&block))?;
-            let inside: Vec<bool> = clamped
-                .outer_iter()
-                .map(|p| p.iter().zip(&source_spatial).all(|(v, m)| *v >= -0.5 && *v <= *m as f64 - 0.5))
-                .collect();
-            // The source points, clamped to the source, in place: a block holds
-            // one array of points, not one per step.
-            for (row, mut point) in clamped.outer_iter_mut().enumerate() {
-                for (k, v) in point.iter_mut().enumerate() {
-                    *v = if inside[row] { v.clamp(0.0, source_spatial[k] as f64 - 1.0) } else { 0.0 };
-                }
-            }
+            let (mut points, inside) = Points::new(mapping, &block, &source_spatial)?;
             // The part of the source the block's inside points fall in.
-            let crop: Option<Vec<(usize, usize)>> = (0..s)
-                .map(|k| {
-                    let values = clamped.column(k);
-                    let mut lo = f64::INFINITY;
-                    let mut hi = f64::NEG_INFINITY;
-                    for (row, v) in values.iter().enumerate() {
-                        if inside[row] {
-                            lo = lo.min(*v);
-                            hi = hi.max(*v);
-                        }
-                    }
-                    if lo > hi {
-                        return None;
-                    }
-                    let lo = lo.floor() as usize;
-                    let hi = (hi.ceil() as usize).min(source_spatial[k] - 1);
-                    Some((lo, hi + 1))
-                })
-                .collect();
+            let crop = points.crop(&inside, &source_spatial);
             // A chunk whose points spread over much of the source (a strong
             // downsampling, a large warp) is halved until the source it reads fits
             // the budget: one target voxel reads at most two source voxels an axis.
@@ -1138,24 +1280,7 @@ fn resample_image(
             }
             let roi: Option<Vec<Slice>> =
                 crop.as_ref().map(|c| c.iter().map(|(a, b)| Slice::new(*a as i64, *b as i64)).collect());
-            // Each inside point's nearest source voxel, as a flat C-order
-            // offset into the crop (0 outside, where `inside` says so).
-            let nearest_offsets = |crop: &[(usize, usize)]| -> Vec<usize> {
-                (0..n)
-                    .map(|row| {
-                        if !inside[row] {
-                            return 0;
-                        }
-                        (0..s).fold(0, |flat, k| {
-                            // A cast truncates, which is the floor at and above
-                            // zero and saturates to 0 below it, as the floor's
-                            // cast did; the floor is a call on baseline x86-64.
-                            let i = ((clamped[[row, k]] + 0.5) as usize).min(source_spatial[k] - 1);
-                            flat * (crop[k].1 - crop[k].0) + i - crop[k].0
-                        })
-                    })
-                    .collect()
-            };
+            let nearest_offsets = |crop: &[(usize, usize)]| points.nearest_offsets(&inside, crop, &source_spatial);
             // Where the result holds no data: outside the source, or where the
             // source holds none.  `None` while every voxel of the block does.
             let mut invalid: Option<Vec<bool>> = None;
@@ -1181,11 +1306,7 @@ fn resample_image(
             };
             if let (true, Some(crop)) = (plan.interpolation == "linear", &crop) {
                 // Linear samples the crop, so its points are taken into it.
-                for mut point in clamped.outer_iter_mut() {
-                    for (k, v) in point.iter_mut().enumerate() {
-                        *v -= crop[k].0 as f64;
-                    }
-                }
+                points.shift(crop);
             }
             // Each chunk of the leading (time, channel) axes in turn, so a block
             // holds one chunk of the image and no more, however many frames.
@@ -1212,13 +1333,20 @@ fn resample_image(
                         if let (Some(crop), Some(roi)) = (&crop, &roi) {
                             let computed = if interpolation == "cubic" {
                                 let lanes = lane_indices(&leading_shape, &lead);
-                                cubic.as_ref().expect("prefiltered above").sample_components(&clamped, &lanes)?
+                                let cubic = cubic.as_ref().expect("prefiltered above");
+                                match &points {
+                                    Points::Rows(rows) => cubic.sample_components(rows, &lanes)?,
+                                    Points::Axes { coords, .. } => cubic.sample_components_axes(coords, &lanes)?,
+                                }
                             } else {
                                 let stored = image.read(Some(roi), false, Some(DType::F64))?.to_f64();
                                 let mut field_shape = vec![group];
                                 field_shape.extend(crop.iter().map(|(a, b)| b - a));
                                 let field = stored.into_shape_with_order(IxDyn(&field_shape))?;
-                                linear_sample(&field, &clamped, "nearest")?
+                                match &points {
+                                    Points::Rows(rows) => linear_sample(&field, rows, "nearest")?,
+                                    Points::Axes { coords, .. } => linear_sample_axes(&field, coords)?,
+                                }
                             };
                             for (row, ok) in inside.iter().enumerate() {
                                 if *ok {
@@ -1472,6 +1600,84 @@ mod tests {
         let options = GridOptions { origin: Some(vec![-0.25; 3]), chunk_hint, ..frame() };
         w.add_grid("fine", &fine, &[0.5, 0.5, 0.5], options).unwrap();
         w.commit(true).unwrap();
+    }
+
+    /// A mapping that moves each axis alone gives each axis's coordinates
+    /// once, and they are, bit for bit, every row's: a zero off the
+    /// diagonal, of either sign, adds the same zero whatever the other
+    /// index.  Anything off the diagonal maps a row a voxel.
+    #[test]
+    fn s10_2_an_axis_aligned_mapping_maps_each_axis_as_its_rows_do() {
+        let mut m = Array2::<f64>::eye(4);
+        (m[[0, 0]], m[[1, 1]], m[[2, 2]]) = (1.0 / 3.0, 0.7, -1.1);
+        (m[[0, 3]], m[[1, 3]], m[[2, 3]]) = (0.1, -2.35, 40.3);
+        (m[[0, 1]], m[[2, 0]], m[[1, 2]]) = (-0.0, -0.0, 0.0);
+        let mapping = Mapping::Affine(m);
+        let block = [(3usize, 9usize), (0, 5), (7, 12)];
+        let axes = mapping.axes(&block).unwrap().expect("a diagonal mapping");
+        let rows = mapping.map(&block_indices(&block)).unwrap();
+        let mut at = vec![0usize; 3];
+        for row in rows.outer_iter() {
+            for k in 0..3 {
+                assert_eq!(row[k].to_bits(), axes[k][at[k]].to_bits(), "{at:?} {k}");
+            }
+            count_up(&mut at, &[6, 5, 5]);
+        }
+        let mut turned = Array2::<f64>::eye(4);
+        turned[[0, 1]] = 1e-17;
+        assert!(Mapping::Affine(turned).axes(&block).unwrap().is_none());
+    }
+
+    /// Respacing takes each axis's coordinates once and writes, byte for
+    /// byte, what mapping a row a voxel writes: each interpolation, the
+    /// valid mask past the source's edge, a carried label map and its ignore
+    /// mask, and one carried in planes; with every chunk split to a small
+    /// crop budget, so blocks start inside the target.
+    #[test]
+    fn s10_2_a_respacing_writes_what_a_row_a_voxel_writes() {
+        use crate::labels::{ClassKey, LabelClass, LabelSet};
+        use crate::sample::{SegmentationOptions, SegmentationSource};
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("s.medh5");
+        let mut w = create(&source, Some("s"), None, "portable", &[]).unwrap();
+        let classes = (1..=2).map(|c| LabelClass::new(c, format!("c{c}"), format!("C{c}")).unwrap()).collect();
+        w.label_set(LabelSet::new("v", classes, "1.0.0", vec![], vec![], "inline", None, None).unwrap());
+        let shape = [6usize, 10, 12];
+        let frame = GridOptions { frame_uid: Some("F0".into()), ..Default::default() };
+        w.add_grid("g", &[6, 10, 12], &[1.5, 1.0, 1.2], frame).unwrap();
+        let values: Vec<f32> = (0..720).map(|i| (i * 7919 % 1000) as f32 / 7.0).collect();
+        w.add_image("img", &NdArray::from_vec(&shape, values).unwrap(), "g", "CT", ImageOptions::default()).unwrap();
+        let class = |c: usize| ArrayD::from_shape_fn(IxDyn(&shape), move |i| (i[0] * 31 + i[1] * 7 + i[2]) % 3 == c);
+        let masks = vec![(ClassKey::Id(1), class(1)), (ClassKey::Id(2), class(2))];
+        let options = SegmentationOptions { encoding: Some("labelmap".into()), ..Default::default() };
+        w.add_segmentation("seg", "g", SegmentationSource::Masks(masks), options).unwrap();
+        let half = |axis: usize| ArrayD::from_shape_fn(IxDyn(&shape), move |i| i[axis] % 2 == 0);
+        let masks = vec![(ClassKey::Id(1), half(1)), (ClassKey::Id(2), half(2))];
+        let options = SegmentationOptions { encoding: Some("layers".into()), ..Default::default() };
+        w.add_segmentation("over", "g", SegmentationSource::Masks(masks), options).unwrap();
+        w.commit(true).unwrap();
+        TEST_CROP_BUDGET.with(|budget| budget.set(40));
+        for interpolation in ["nearest", "linear", "cubic"] {
+            let mut written = Vec::new();
+            for rows_only in [false, true] {
+                ROWS_ONLY.with(|only| only.set(rows_only));
+                let target = ResampleTarget::Spacing { grid_id: "fine".into(), spacing: vec![0.8, 1.3, 0.45] };
+                let mut plan = ResamplePlan::new(vec!["img".into()], target);
+                plan.interpolation = interpolation.into();
+                plan.out = Some(dir.path().join(format!("{interpolation}-{rows_only}.medh5")));
+                let result = resample(&source, &plan).unwrap();
+                assert!(result.images[0].filled_voxels > 0, "the target leaves the source");
+                let sample = open_sample(&result.path).unwrap();
+                written.push(crate::integrity::collect_digests(&sample.root, &["index"]).unwrap());
+            }
+            ROWS_ONLY.with(|only| only.set(false));
+            let names: Vec<&String> = written[0].keys().collect();
+            for name in ["images/img_on_fine", "annotations/img_on_fine_valid/data", "annotations/seg_on_fine/data"] {
+                assert!(written[0].contains_key(name), "{name} in {names:?}");
+            }
+            assert_eq!(written[0], written[1], "{interpolation}");
+        }
+        TEST_CROP_BUDGET.with(|budget| budget.set(CROP_BUDGET));
     }
 
     /// The work of a resample is a block of the target at a time, one chunk

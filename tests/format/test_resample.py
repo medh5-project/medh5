@@ -1764,6 +1764,135 @@ STORED_BY_2_2_0_TURNED: dict[str, str] = {
 }
 
 
+# What 2.2.0 stored for the resamples below, onto grids on the source's own
+# axes: respaced to leave the source (so valid and ignore masks are written),
+# a grid shifted and finer, and a scanner's grid turned a quarter and flipped.
+# 2.2.2 maps such a grid an axis at a time rather than a voxel at a time, and
+# stores the same content.
+STORED_BY_2_2_0_AXES: dict[str, str] = {
+    "annotations/ct_on_half_cubic_valid/data": (
+        "sha256:064c3d63d54b75551934ec3683fbaed47d70fc0c34ec64bfc4fe2274ee251669"
+    ),
+    "annotations/ct_on_half_linear_valid/data": (
+        "sha256:fbf4f8bcfec399f09c894c4b145227b53a020f8b1467e97dc411ca4c6e480790"
+    ),
+    "annotations/ct_on_half_nearest_valid/data": (
+        "sha256:3b69b3488dbfa5e0af7539fd5f78460f1bd75d945cf02336ad0d923478217113"
+    ),
+    "annotations/img_on_fine_cubic_valid/data": (
+        "sha256:d62bf38c52fa75fcf108702ead7b4cd5d859000a43601f5ddf9a137be07d20ac"
+    ),
+    "annotations/img_on_fine_linear_valid/data": (
+        "sha256:1e9df37cf9cf7670fb6dee50ca9c31daca712a858b8e706bee5e03842209415c"
+    ),
+    "annotations/img_on_fine_nearest_valid/data": (
+        "sha256:9ab30887e3de11a9a6621687de1e0cb051055f91d3085c2bd7d30dc0a7140065"
+    ),
+    "annotations/img_shifted_cubic_valid/data": (
+        "sha256:98c5960e234dbec2c4431c8b017752aa0e1ee4bf6a20abbd17fbf208fef4204b"
+    ),
+    "annotations/img_shifted_linear_valid/data": (
+        "sha256:8b1cd454f135e28cd08363e6977407b4ffd8ea7d843f0a32865b3e1b10a27ca4"
+    ),
+    "annotations/img_shifted_nearest_valid/data": (
+        "sha256:331413c045fca63cfe6ccb36474f542ee922dfe013d3b58512f68c6730de2ed9"
+    ),
+    "annotations/mask/data": (
+        "sha256:57f0009d810137993e880a5820eea4faba98cbe58326d2beacc56d86f6ef017b"
+    ),
+    "annotations/mask_on_half_cubic/data": (
+        "sha256:6a7355bbf4893c2d71461662588e3f5b4488b11c77845f5d4a935ccd09338278"
+    ),
+    "annotations/mask_on_half_cubic_ignore/data": (
+        "sha256:6d460da9e7a6fd341fc921ff69f4f7f0944b895a57b4c33e5d8a8e8b08800e31"
+    ),
+    "annotations/mask_on_half_linear/data": (
+        "sha256:b62e8db8e3bd14da847253324bdcb0a3f8aa53345b33709b9938705e0912072e"
+    ),
+    "annotations/mask_on_half_linear_ignore/data": (
+        "sha256:0607a368550ca1e59ededeab2b98068f3faea508a5ff0a6146a0b9b7118c915e"
+    ),
+    "annotations/mask_on_half_nearest/data": (
+        "sha256:3c097e7868b9a81d37d97095a066fdd89b76591535b675ade6adc371a6ed127a"
+    ),
+    "annotations/mask_on_half_nearest_ignore/data": (
+        "sha256:9e27cbeaa7c171d4b22a9158ab3c8707d4e543f73eaf31ac5b6ea99618f04361"
+    ),
+    "annotations/seg/data": (
+        "sha256:514675bf18ab727bfe01cfd7babe176540b8afb98bdb47da0cb7e5a06cf022c0"
+    ),
+    "annotations/seg_on_fine_cubic/data": (
+        "sha256:531f1f272f08396ab7363deaec4e4863a997224ce934015be5174c0b1bc356a1"
+    ),
+    "annotations/seg_on_fine_cubic_ignore/data": (
+        "sha256:1c84d428a40be98e1c5b6f1a0d2316f7aa09c31fc10f43c8006761955055da10"
+    ),
+    "annotations/seg_on_fine_linear/data": (
+        "sha256:c207da20815f0d730c21f70097241eb8e3f32f78bea4e3f130e1192701939142"
+    ),
+    "annotations/seg_on_fine_linear_ignore/data": (
+        "sha256:e009de9bb734505a6bab26dc3921731ed908da5dd60afdd2b75755e11b2de2ec"
+    ),
+    "annotations/seg_on_fine_nearest/data": (
+        "sha256:ae88daaefca0f34ed427e56dc9656c69a4a0744babda93e9d041af0a5cb5f568"
+    ),
+    "annotations/seg_on_fine_nearest_ignore/data": (
+        "sha256:026ccfba3ec79ce9c33f7438352844c681443110cda125218565418a0e7e0da8"
+    ),
+    "annotations/seg_shifted_cubic/data": (
+        "sha256:265c4064280ea9a00caaaae2cf9e8589b1c7e7b2bc02d294269fdecb06750101"
+    ),
+    "annotations/seg_shifted_cubic_ignore/data": (
+        "sha256:b58bc1c083b572ef255a6543dd2d314d54c875fb425fa135ebc0c5f5256004da"
+    ),
+    "annotations/seg_shifted_linear/data": (
+        "sha256:e2621ce42f8896e78ae0414761ab99c08dc5007f4b2cac054a5fc6f7bc51958d"
+    ),
+    "annotations/seg_shifted_linear_ignore/data": (
+        "sha256:c3f96eb355b38e28f29dad91faa26c26a227b6abb7260339efbc8973cf9ae0e0"
+    ),
+    "annotations/seg_shifted_nearest/data": (
+        "sha256:7f8c30b39782dc65a6dbaa304eafb55fe853d6fcb6d0107af878aeea0244e0bf"
+    ),
+    "annotations/seg_shifted_nearest_ignore/data": (
+        "sha256:e2744027bf82a75d4bc6ec85103b3a4f4e699aba8d97ae5bd99e96fb66bf2f1e"
+    ),
+    "images/ct": (
+        "sha256:fcd9b16de3ba2922c4991203b7b0e7d93b5d0bab3fd0d294cf97d88dec2876ee"
+    ),
+    "images/ct_on_half_cubic": (
+        "sha256:70f5d635dc969aa32ac02fb26458f47e97ba70e25082f588899b080ba4d6a150"
+    ),
+    "images/ct_on_half_linear": (
+        "sha256:dc1a6b51cea82a24f591a5c08e64f74b333599a85363a23fb71d169a1598a6da"
+    ),
+    "images/ct_on_half_nearest": (
+        "sha256:8d54dac97636ce878af58ec50bc142cd1e18d5ddc0107c5e616597514a603068"
+    ),
+    "images/img": (
+        "sha256:e24e85c1408682984723cc027b30c27d72351fa7f830eafc48011e97b5c79491"
+    ),
+    "images/img_on_fine_cubic": (
+        "sha256:4b2f738698e4583e2f307a3fcb423eb8c10dfabc98cd1477659b8b7e754f60a5"
+    ),
+    "images/img_on_fine_linear": (
+        "sha256:629da7755253fdcd96959e7a1d653b0ea4210130f15d5aacb83fbccfe41a1eb0"
+    ),
+    "images/img_on_fine_nearest": (
+        "sha256:0291c54ef83fbe07cc5103fd9ced39c5e8a246828d89fe44805c4041958a8138"
+    ),
+    "images/img_shifted_cubic": (
+        "sha256:41bb1dd3b185dc8396a2fbc79aaab71ecc49e1fc3e6219e7248a15987936269c"
+    ),
+    "images/img_shifted_linear": (
+        "sha256:6c8e76ca6f014a226d0b60b36d4567c55fff479cd8419b12237295299f2bfb97"
+    ),
+    "images/img_shifted_nearest": (
+        "sha256:63a7f5af0f5b73d83f7505ea40dd59cf4b77f8b6823fa074187bcacecfa36c91"
+    ),
+}
+
+
 # The cosine and sine written out: numpy's differ in the last place between
 # versions and machines, and the digests are of these exact values.
 _COS_SIN = {
@@ -1839,3 +1968,58 @@ class TestTheSameArithmetic:
                     suffix=f"_{onto}_{interpolation}",
                 )
         assert stored_digests(path) == STORED_BY_2_2_0_TURNED
+
+    def test_S13_1_an_axis_aligned_resample_stores_what_2_2_0_stored(self, tmp_path):
+        index = np.arange(12 * 14 * 16).reshape(12, 14, 16)
+        image = (index * 7919 % 1000 / 7).astype(np.float32)
+        labels = index * 31 % 7 % 3
+        path = tmp_path / "s.medh5"
+        flipped = ((0.0, 0.0, -1.0), (0.0, -1.0, 0.0), (1.0, 0.0, 0.0))
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid("g", shape=image.shape, spacing=(1.5, 1.0, 1.2), frame_uid="F0")
+            w.add_image("img", image, grid="g", modality="CT")
+            masks = {1: labels == 1, 2: labels == 2}
+            w.add_segmentation("seg", grid="g", masks=masks, encoding="labelmap")
+            w.add_grid(
+                "p",
+                shape=image.shape,
+                spacing=(1.5, 0.8, 0.8),
+                origin=(200.0, 200.0, -190.0),
+                direction=flipped,
+                frame_uid="F1",
+            )
+            ct = (index * 7919 % 4000 - 1000).astype(np.int16)
+            w.add_image("ct", ct, grid="p", modality="CT")
+            w.add_segmentation(
+                "mask", grid="p", masks={1: labels == 2}, encoding="labelmap"
+            )
+            w.add_grid(
+                "shifted",
+                shape=(20, 25, 18),
+                spacing=(0.9, 0.55, 1.1),
+                origin=(-0.3, 0.4, 0.7),
+                frame_uid="F0",
+            )
+        for interpolation in ("nearest", "linear", "cubic"):
+            resample(
+                path,
+                "img",
+                spacing=(0.8, 1.3, 0.7),
+                grid_id=f"fine_{interpolation}",
+                interpolation=interpolation,
+            )
+            resample(
+                path,
+                "ct",
+                spacing=(0.75, 0.65, 0.8),
+                grid_id=f"half_{interpolation}",
+                interpolation=interpolation,
+            )
+            resample(
+                path,
+                "img",
+                onto="shifted",
+                interpolation=interpolation,
+                suffix=f"_shifted_{interpolation}",
+            )
+        assert stored_digests(path) == STORED_BY_2_2_0_AXES
