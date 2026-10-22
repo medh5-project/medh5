@@ -187,9 +187,10 @@ Lands alone and first: W23-03 and W23-04 build on it.
     compares them.
   - **Who uses it**, in the order W23-01 ranks them:
     - `recompress`: read each stored chunk raw, decompress, recompress and
-      write it directly, all but the HDF5 calls on workers. A chunk the raw
-      read cannot answer (unwritten, or stored with Blosc2 skipped) is
-      handled as `recompress` handles it today, through HDF5;
+      write it directly, all but the HDF5 calls on workers. The raw read
+      takes what `read_window` takes (W23-04 gives the rule); a converted
+      type, an unwritten chunk or one stored with Blosc2 skipped is handled
+      as `recompress` handles it today, through HDF5;
     - `resample`: workers map, interpolate and compress whole target chunks
       (after 2.2.2's axis-aligned path);
     - `convert from-nifti`: decode a slab of whole chunks, compress on
@@ -203,9 +204,11 @@ Lands alone and first: W23-03 and W23-04 build on it.
     change.
   - A chunk written directly reads back through HDF5 and through
     `read_window` alike (Rust).
-  - `portable` and a two-filter dataset fall back, at any thread count.
-  - `recompress` of a sparse dataset (unwritten chunks) and of one with a
-    filter-skipped chunk gives what it gives today.
+  - `portable`, a two-filter dataset and a big-endian dataset fall back to
+    `H5Dwrite`, at any thread count.
+  - `recompress` of a big-endian dataset, of a sparse dataset (unwritten
+    chunks) and of one with a filter-skipped chunk gives what it gives
+    today.
   - A `fork` from another thread during a threaded write leaves a child that
     opens and reads files.
 - **Changelog.** Added (`--threads`), area `cli`; Performance, area `writer`.
@@ -237,16 +240,17 @@ Lands alone and first: W23-03 and W23-04 build on it.
   guarantee stays and its cost falls.
   - Hash datasets on workers, one dataset per worker (a hash is sequential
     within one stream). The caller reads stored chunks raw under the lock,
-    and workers decompress them (the Blosc2 path of `window.rs`). A dataset
-    that is not Blosc2 alone is read through HDF5, as now.
-  - **A raw read that cannot answer falls back, per slab.** Even in a
-    dataset of Blosc2 alone, `window.rs` `stored_chunk` answers `None` for
-    a chunk never written (it reads as the fill value) and for one whose
-    filter mask says Blosc2 was skipped, and `read_window` then reads
-    through HDF5. The hash does the same: a slab with any such chunk is read
-    through HDF5 whole, so the bytes hashed are always HDF5's. The tests
-    cover a sparse dataset with unwritten chunks and one with a
-    filter-skipped chunk, against the sequential digest.
+    and workers decompress them (the Blosc2 path of `window.rs`).
+  - **The raw path takes exactly what `read_window` takes, through the same
+    checks, and everything else reads through HDF5.** One rule, not a list
+    kept by hand: a dataset that is not Blosc2 alone, a stored type HDF5
+    would convert on the way out (a big-endian dataset, whose raw bytes are
+    not §13.1's little-endian values), strings, and, per slab, a chunk never
+    written (it reads as the fill value) or stored with Blosc2 skipped. A
+    slab with any such chunk is read through HDF5 whole, so the bytes hashed
+    are always HDF5's. The tests hash, against the sequential digest, a
+    big-endian dataset, a sparse dataset with unwritten chunks and one with
+    a filter-skipped chunk.
   - **The hash sees §13.1's C-order stream, never chunk order.** Where a row
     spans chunks, chunk order is not C order: a 4×4 array in 2×2 chunks
     holds the left halves of two rows before their right halves. So the
