@@ -220,14 +220,24 @@ exception allows ([D6](#decisions-the-maintainer)).
   - Anything else goes through `H5Dwrite` as now: `portable`, a second
     filter, a type HDF5 would convert, a write that covers part of a chunk.
     "HDF5's bytes or HDF5's write", as the reader's invariant says.
+  - **The unit is always one whole chunk of the dataset being written**, in
+    its own layout. A worker is handed that chunk's values, never a source's
+    chunk. A source's stored chunk stands in for it only where the source is
+    chunked with exactly the target's chunk shape; anything else is read in
+    slabs, as today, cut on the target's chunk boundaries, and each target
+    chunk is cut from them.
   - Edge chunks store what `H5Dwrite` stores past the extent; the test
     compares them.
   - **Who uses it**, in the order P22-10 ranks them:
-    - `recompress`: read each stored chunk raw, decompress, recompress and
-      write it directly, all but the HDF5 calls on workers. The raw read
-      takes what `read_window` takes (P22-13 gives the rule); a converted
-      type, an unwritten chunk or one stored with Blosc2 skipped is handled
-      as `recompress` handles it today, through HDF5;
+    - `recompress`: where the source's chunk shape is the new layout's,
+      read each stored chunk raw, decompress, recompress and write it
+      directly, all but the HDF5 calls on workers. The raw read takes what
+      `read_window` takes (P22-13 gives the rule); a converted type, an
+      unwritten chunk or one stored with Blosc2 skipped is handled as
+      `recompress` handles it today, through HDF5. Where the shapes differ
+      (`--rechunk`, or a contiguous source given chunks), the slabs of
+      `storage/recompress.rs:387` stay, cut on the new chunks' boundaries,
+      and only the compression moves to workers;
     - `resample`: workers map, interpolate and compress whole target chunks,
       on 2.2.2's axis-aligned path;
     - `convert from-nifti`: decode a slab of whole chunks, compress on
@@ -245,6 +255,9 @@ exception allows ([D6](#decisions-the-maintainer)).
   - `recompress` of a big-endian dataset, of a sparse dataset (unwritten
     chunks) and of one with a filter-skipped chunk gives what it gives
     today.
+  - `recompress --rechunk` of a source whose chunks are not the canonical
+    ones (smaller, larger, and crossing the new boundaries), and of a
+    contiguous source, gives what it gives today, at 1 and 4 threads.
   - A `fork` from another thread during a threaded write leaves a child that
     opens and reads files.
 - **Changelog.** Added (`--threads`), area `cli`; Performance, area `writer`.
