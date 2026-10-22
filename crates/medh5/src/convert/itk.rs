@@ -220,7 +220,7 @@ mod tests {
         let entries = vec![composite, affine(), ItkEntry::new("TranslationTransform_double_3_3", vec![1.0; 3], vec![])];
         write_itk_h5(&path, &entries).unwrap();
         assert_eq!(read_itk_h5(&path).unwrap(), entries);
-        let file = hdf5::File::open(&path).unwrap();
+        let file = crate::h5::file::marked(|| hdf5::File::open(&path)).unwrap();
         let bare = file.group("TransformGroup/0").unwrap();
         assert_eq!(bare.member_names().unwrap(), ["TransformType"]);
         let kind = bare.dataset("TransformType").unwrap();
@@ -230,7 +230,7 @@ mod tests {
 
     /// A file whose parameter dataset is chunked, its chunks written or not.
     fn chunked(path: &Path, values: usize, written: Option<&[f64]>, deflate: bool) {
-        let file = hdf5::File::create(path).unwrap();
+        let file = crate::h5::file::marked(|| hdf5::File::create(path)).unwrap();
         let zero = file.create_group(GROUP).unwrap().create_group("0").unwrap();
         data::create_strings(&zero, TYPE, &["AffineTransform_double_3_3".into()]).unwrap();
         let mut builder = zero.new_dataset::<f64>().shape([values]).chunk([4]);
@@ -270,7 +270,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.h5");
         {
-            let file = hdf5::File::create(&path).unwrap();
+            let file = crate::h5::file::marked(|| hdf5::File::create(&path)).unwrap();
             let zero = file.create_group("TransformGroup").unwrap().create_group("0").unwrap();
             data::create_strings(&zero, "TransformType", &["AffineTransform_double_3_3".into()]).unwrap();
             let entry = affine();
@@ -302,14 +302,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.h5");
         {
-            let file = hdf5::File::create(&path).unwrap();
+            let file = crate::h5::file::marked(|| hdf5::File::create(&path)).unwrap();
             let one = file.create_group("TransformGroup").unwrap().create_group("1").unwrap();
             data::create_strings(&one, "TransformType", &["IdentityTransform_double_3_3".into()]).unwrap();
         }
         let err = read_itk_h5(&path).unwrap_err().to_string();
         assert!(err.contains("numbered [1]"), "{err}");
         let other = dir.path().join("o.h5");
-        hdf5::File::create(&other).unwrap().create_group("images").unwrap();
+        crate::h5::file::marked(|| hdf5::File::create(&other)).unwrap().create_group("images").unwrap();
         let err = read_itk_h5(&other).unwrap_err().to_string();
         assert!(err.contains("has no /TransformGroup"), "{err}");
     }
