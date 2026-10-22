@@ -549,6 +549,11 @@ impl Image {
             (Box::new(BufReader::new(file)), Some(length.saturating_sub(self.offset)))
         };
         let mut stream = VoxelStream { reader, wanted, available, compressed, source, element, big_endian };
+        #[cfg(test)]
+        STREAMS.with(|streams| {
+            let (live, most) = streams.get();
+            streams.set((live + 1, most.max(live + 1)));
+        });
         if self.shape.iter().any(|v| *v < 0) {
             // Negative extents in pairs count positive bytes: nibabel read
             // them, and numpy refused the shape.  Counted here, never held.
@@ -723,6 +728,23 @@ const DECODE_BYTES: usize = 1 << 20;
 thread_local! {
     /// [`DECODE_BYTES`], lowered by a test.
     static TEST_DECODE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(DECODE_BYTES) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The voxel streams open now, and the most open at once, for the test
+    /// that an import holds one file open at a time.
+    pub(crate) static STREAMS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+impl Drop for VoxelStream {
+    fn drop(&mut self) {
+        STREAMS.with(|streams| {
+            let (live, most) = streams.get();
+            streams.set((live - 1, most));
+        });
+    }
 }
 
 fn decode_bytes() -> usize {

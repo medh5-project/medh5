@@ -519,7 +519,10 @@ pub fn read_nifti(path: &Path, options: &ReadOptions) -> Result<NiftiRead> {
 /// so that each is decoded only as it is written.
 struct Opened {
     geometry: Geometry,
-    source: VoxelSource,
+    /// The file's header, from which a released stream is opened again.
+    image: Image,
+    /// The voxels, or `None` once their stream is released.
+    source: Option<VoxelSource>,
     /// The voxels' shape, NIfTI's order, the dropped axes gone.
     shape: Vec<usize>,
     /// The axes of `shape` in the order the array takes them.
@@ -527,10 +530,32 @@ struct Opened {
 }
 
 impl Opened {
+    /// Close the voxels' stream until they are read: an import holds every
+    /// header, and one open file at a time.
+    fn release(&mut self) {
+        if matches!(self.source, Some(VoxelSource::Stream(_))) {
+            self.source = None;
+        }
+    }
+
+    /// The voxels' source, opened again at their first byte if released.
+    fn source(&mut self) -> Result<VoxelSource> {
+        match self.source.take() {
+            Some(source) => Ok(source),
+            None => self.image.voxel_source(),
+        }
+    }
+
+    /// The refusal reading the voxels would meet, if any, holding none of
+    /// them ([`VoxelSource::check`]).
+    fn check(mut self) -> Option<Error> {
+        self.source().and_then(VoxelSource::check).err()
+    }
+
     /// The voxels as [`read_nifti`] returns them: C order, the geometry's
     /// shape.
-    fn voxels(self) -> Result<Voxels> {
-        let voxels = match self.source {
+    fn voxels(mut self) -> Result<Voxels> {
+        let voxels = match self.source()? {
             VoxelSource::Read(voxels) => voxels,
             VoxelSource::Stream(stream) => stream.into_voxels(self.shape.clone())?,
         };
@@ -546,17 +571,14 @@ impl Opened {
     /// Refuse a type the writer cannot store, reading nothing, as
     /// [`Voxels::into_ndarray`] names it.
     fn writable(&self) -> Result<()> {
-        let (element, big_endian) = match &self.source {
-            VoxelSource::Read(voxels) => (voxels.element, voxels.big_endian),
-            VoxelSource::Stream(stream) => (stream.element, stream.big_endian),
-        };
+        let (element, big_endian) = (self.image.element(), self.image.header.big_endian);
         Voxels { element, big_endian, shape: vec![0], bytes: Vec::new() }.into_ndarray().map(drop)
     }
 
     /// The voxels as the image the writer takes, decoded straight into it
     /// where they need no reordering: held once, not twice.
-    fn into_ndarray(self) -> Result<NdArray> {
-        match self.source {
+    fn into_ndarray(mut self) -> Result<NdArray> {
+        match self.source()? {
             VoxelSource::Stream(stream) if !moves_bytes(&self.shape, &self.order) => {
                 let (element, big_endian) = (stream.element, stream.big_endian);
                 match stream.into_array(&self.geometry.shape)? {
@@ -565,7 +587,7 @@ impl Opened {
                     None => Voxels { element, big_endian, shape: Vec::new(), bytes: Vec::new() }.into_ndarray(),
                 }
             }
-            source => Opened { source, ..self }.voxels()?.into_ndarray(),
+            source => Opened { source: Some(source), ..self }.voxels()?.into_ndarray(),
         }
     }
 }
@@ -692,7 +714,7 @@ fn open_nifti(path: &Path, options: &ReadOptions) -> Result<Opened> {
         Ok((geometry, shape, order))
     })();
     match laid_out {
-        Ok((geometry, shape, order)) => Ok(Opened { geometry, source, shape, order }),
+        Ok((geometry, shape, order)) => Ok(Opened { geometry, image, source: Some(source), shape, order }),
         Err(err) => Err(source.check().err().unwrap_or(err)),
     }
 }
@@ -1073,7 +1095,7 @@ pub fn from_nifti(
         // first in order, whatever else is wrong with it.  The volumes not
         // decoded yet are read through to find it, keeping none.
         Err(err) => {
-            let first = arrays.into_iter().chain(masks).find_map(|(_, opened)| opened.source.check().err());
+            let first = arrays.into_iter().chain(masks).find_map(|(_, opened)| opened.check());
             Err(first.unwrap_or(err))
         }
     }
@@ -1102,7 +1124,8 @@ fn import(
     let mut geometry: Option<Geometry> = None;
     let mut reshaped = false;
     for (name, path) in images {
-        let opened = open_nifti(path, &read)?;
+        let mut opened = open_nifti(path, &read)?;
+        opened.release();
         step("open", name);
         let geo = opened.geometry.clone();
         arrays.push_back((name.clone(), opened));
@@ -1119,7 +1142,8 @@ fn import(
 
     let mask_read = ReadOptions { fourth_axis: "auto".into(), ..read.clone() };
     for (name, path) in &options.masks {
-        let opened = open_nifti(path, &mask_read)?;
+        let mut opened = open_nifti(path, &mask_read)?;
+        opened.release();
         step("open", name);
         let geo = opened.geometry.clone();
         masks.push_back((name.clone(), opened));
@@ -1755,12 +1779,15 @@ mod tests {
             .with_assume_geometry(true)
             .with_masks(vec![("organ".into(), file("organ.nii", 2, 8, 0))]);
         STEPS.with(|steps| steps.borrow_mut().clear());
+        read::STREAMS.with(|streams| streams.set((0, 0)));
         let mut report = ConversionReport::new("nifti", "");
         from_nifti(&images, &dir.path().join("s.medh5"), &options, &mut report).unwrap();
         let steps = STEPS.with(|steps| steps.borrow().clone());
         let want =
             ["open CT", "open PET", "open organ", "decode CT", "write CT", "decode PET", "write PET", "decode organ"];
         assert_eq!(steps, want);
+        // Each header is held, but one file is open at a time.
+        assert_eq!(read::STREAMS.with(|streams| streams.get()), (0, 1));
         // And what was written is what the volumes hold.
         let sample = crate::sample::reader::open_sample(&dir.path().join("s.medh5")).unwrap();
         let pet = sample.image("PET").unwrap().read(None, false, None).unwrap();

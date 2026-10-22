@@ -1527,7 +1527,10 @@ mod tests {
         for ((_, _, x), valid) in mask.into_dimensionality::<ndarray::Ix3>().unwrap().indexed_iter() {
             assert_eq!(*valid, x < 64, "x {x}");
         }
-        // Onto a grid it fills nowhere, no mask is written.
+        // Onto a grid it fills nowhere, no mask is written.  The sample is
+        // closed first: the resample replaces the file, which Windows cannot
+        // do under an open handle.
+        drop(sample);
         let inside = resample(&path, &ResamplePlan::onto(["img"], "fine").with_interpolation("nearest")).unwrap();
         assert_eq!((inside.filled_voxels, inside.images[0].valid_mask.clone()), (0, None));
     }
