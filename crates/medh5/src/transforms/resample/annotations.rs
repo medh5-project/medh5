@@ -1080,9 +1080,17 @@ struct DenseGather {
 }
 
 impl DenseGather {
+    /// Write the gathered annotation a chunk of the dataset at a time: a
+    /// spatial block's mapping is worked out once, then its leading planes
+    /// (a `layers` or multi-plane `bitmask` annotation's) are written as many
+    /// at a time as one chunk holds.
     fn write(self, dataset: &hdf5::Dataset, near: &Nearest) -> Result<()> {
         let lanes: usize = self.leading.iter().product::<usize>().max(1);
-        let chunk = spatial_chunk(dataset, &near.shape)?;
+        let s = near.shape.len();
+        let (leading_chunk, chunk) = match data::chunks(dataset) {
+            Some(c) => (c[..c.len() - s].to_vec(), c[c.len() - s..].to_vec()),
+            None => (self.leading.clone(), near.shape.clone()),
+        };
         crate::with_array!(&self.stored, a => {
             let a = a.as_standard_layout();
             let flat = a.as_slice().expect("standard layout");
@@ -1091,20 +1099,26 @@ impl DenseGather {
             for block in blocks(&near.shape, &chunk) {
                 let dims: Vec<usize> = block.iter().map(|(a, b)| b - a).collect();
                 let voxels: usize = dims.iter().product();
-                let mut out = vec![outside; lanes * voxels];
-                near.block(&block, |row, at| {
-                    if let Some(i) = at {
-                        for lane in 0..lanes {
-                            out[lane * voxels + row] = flat[lane * per_lane + i];
+                let mut source = vec![None; voxels];
+                near.block(&block, |row, at| source[row] = at)?;
+                for group in blocks(&self.leading, &leading_chunk) {
+                    let group_lanes = super::lane_indices(&self.leading, &group);
+                    let mut out = vec![outside; group_lanes.len() * voxels];
+                    for (k, lane) in group_lanes.iter().enumerate() {
+                        let plane = &flat[lane * per_lane..(lane + 1) * per_lane];
+                        for (to, from) in out[k * voxels..(k + 1) * voxels].iter_mut().zip(&source) {
+                            if let Some(i) = from {
+                                *to = plane[*i];
+                            }
                         }
                     }
-                })?;
-                let mut shape = self.leading.clone();
-                shape.extend(&dims);
-                let mut starts = vec![0; self.leading.len()];
-                starts.extend(block.iter().map(|(a, _)| *a));
-                super::wrote(voxels);
-                data::write_region(dataset, &NdArray::from_vec(&shape, out)?, &starts)?;
+                    let mut shape: Vec<usize> = group.iter().map(|(a, b)| b - a).collect();
+                    shape.extend(&dims);
+                    let mut starts: Vec<usize> = group.iter().map(|(a, _)| *a).collect();
+                    starts.extend(block.iter().map(|(a, _)| *a));
+                    super::wrote(group_lanes.len() * voxels);
+                    data::write_region(dataset, &NdArray::from_vec(&shape, out)?, &starts)?;
+                }
             }
         });
         Ok(())
@@ -1556,13 +1570,21 @@ mod tests {
         let masks = vec![(ClassKey::Id(1), class(1)), (ClassKey::Id(2), class(2))];
         let options = SegmentationOptions { encoding: Some("labelmap".into()), ..Default::default() };
         w.add_segmentation("seg", "g", SegmentationSource::Masks(masks), options).unwrap();
+        // Two classes that overlap: `layers`, stacked in planes the dataset
+        // chunks one deep.
+        let half = |axis: usize| ArrayD::from_shape_fn(IxDyn(&[16, 64, 64]), move |i| i[axis] % 2 == 0);
+        let masks = vec![(ClassKey::Id(1), half(1)), (ClassKey::Id(2), half(2))];
+        let options = SegmentationOptions { encoding: Some("layers".into()), ..Default::default() };
+        w.add_segmentation("over", "g", SegmentationSource::Masks(masks), options).unwrap();
         w.add_grid("wide", &[16, 64, 72], &[1.0; 3], frame(Some(vec![4, 32, 32]))).unwrap();
         w.commit(true).unwrap();
         LARGEST_WRITE.with(|largest| largest.set(0));
         let result = resample(&path, &ResamplePlan::onto(["CT"], "wide").with_interpolation("nearest")).unwrap();
-        assert_eq!(result.annotations[0].ignore_mask.as_deref(), Some("seg_on_wide_ignore"));
+        let ignores: Vec<_> =
+            result.annotations.iter().map(|a| (a.source.as_str(), a.ignore_mask.as_deref())).collect();
+        assert_eq!(ignores, [("over", Some("over_on_wide_ignore")), ("seg", Some("seg_on_wide_ignore"))]);
         let largest = LARGEST_WRITE.with(|largest| largest.get());
-        assert_eq!(largest, 4 * 32 * 32, "a chunk at a time, of 16 x 64 x 72 voxels");
+        assert_eq!(largest, 4 * 32 * 32, "a chunk at a time, of 16 x 64 x 72 voxels, a plane at a time");
         let sample = crate::sample::reader::open_sample(&path).unwrap();
         let read = |id: &str| data::read(&sample.annotation(id).unwrap().data().unwrap()).unwrap().to_f64();
         let (source, carried, ignore) = (read("seg"), read("seg_on_wide"), read("seg_on_wide_ignore"));
@@ -1570,6 +1592,12 @@ mod tests {
             let x = at[2];
             let want = if x < 64 { source[[at[0], at[1], x]] } else { 0.0 };
             assert_eq!((*value, ignore[&at]), (want, if x < 64 { 0.0 } else { 1.0 }), "{at:?}");
+        }
+        let (source, carried) = (read("over"), read("over_on_wide"));
+        assert!(source.shape()[0] > 1, "stacked in planes");
+        for (at, value) in carried.indexed_iter() {
+            let want = if at[3] < 64 { source[[at[0], at[1], at[2], at[3]]] } else { 0.0 };
+            assert_eq!(*value, want, "{at:?}");
         }
     }
 
