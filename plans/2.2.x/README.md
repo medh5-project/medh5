@@ -27,6 +27,10 @@ The reasons are in [What 2.2.0 taught](what-2.2.0-taught.md), cited below as
     The repository variable `API_RELEASE_TYPE=patch` makes it a patch
     ([Before the lanes start](#before-the-lanes-start-the-maintainer)).
     Review holds the rest: a new flag fails review.
+  - **One exception.** 2.2.4 adds one thread setting (`set_threads`,
+    `MEDH5_THREADS`, `--threads`), which the maintainer allowed on
+    2026-10-22 as a small API change. It is listed name by name in
+    [parallelism.md](parallelism.md), and nothing else is excepted.
   - The format stays 1.2, and the diagnostic code table keeps its 100 codes.
     A new bound reports through an existing code.
   - A performance change writes the same `content_id` as 2.2.0 for the same
@@ -56,6 +60,8 @@ The reasons are in [What 2.2.0 taught](what-2.2.0-taught.md), cited below as
 |---|---|---|
 | 2.2.1 | P22-01 to P22-05: hostile input, declined findings, fuzz as a gate, docs held to code; P22-06, the measurement; and P22-07, the free-threaded regression it found | its seven pull requests have merged and the release checklist passes |
 | 2.2.2 | P22-08 and P22-09: memory and resampling time | their two pull requests have merged |
+| 2.2.3 | P22-10: what can run outside HDF5's lock, measured ([parallelism.md](parallelism.md)) | its pull request has merged |
+| 2.2.4 | P22-11 to P22-14: one thread setting, chunk writes and digests outside the lock, processes across files ([parallelism.md](parallelism.md)) | their pull requests have merged |
 
 2.2.1 does not wait for the rest of the performance work. If P22-06's
 measurement finds a regression against 2.1.0 that is a bug (a slower answer,
@@ -426,7 +432,7 @@ As 2.2.0's, plus:
 3. The documentation tests of P22-05 pass. Every changelog sentence they flag
    is confirmed by the maintainer.
 4. `cargo semver-checks` and the Python API job show no addition, not only no
-   break.
+   break. In 2.2.4, none but the names in `.github/api-exceptions.txt`.
 5. For 2.2.1 and 2.2.2: `docs/guides/performance.md` names the version it
    measured.
 
@@ -443,3 +449,9 @@ Settled on 2026-10-21:
   (P22-05 says so in the repository).
 - **P22-06's list.** P22-07, the threading fix, goes into 2.2.1. Resampling's
   speed becomes P22-09, in 2.2.2.
+
+Settled on 2026-10-22:
+
+- **Parallelism as patches.** The work first planned as 2.3.0 ships as 2.2.3
+  and 2.2.4 ([parallelism.md](parallelism.md)), with one exception to what a
+  patch may change: the thread setting.

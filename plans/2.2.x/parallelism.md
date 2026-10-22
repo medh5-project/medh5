@@ -1,29 +1,45 @@
-# medh5 2.3.0
+# medh5 2.2.3 and 2.2.4: parallelism
 
-A minor release about parallelism: threads for the work inside one file that
-runs outside HDF5's lock, processes for the work across files, and the cost of
-digests at commit, and nothing else ([D2](#decisions-the-maintainer)). Read
-[plans/README.md](../README.md) first. Its rules hold here, with `w23/`
-branches and `W23-` titles.
+Two patch releases about parallelism: threads for the work inside one file
+that runs outside HDF5's lock, processes for the work across files, and the
+cost of digests at commit, and nothing else ([D2](#decisions-the-maintainer)).
+2.2.3 measures; 2.2.4 adds one thread setting and the paths that use it. Read
+[plans/README.md](../README.md) and the [2.2.x plan](README.md) first. Their
+rules hold here, with `p22/` branches and `P22-` titles, and with one
+exception to what a patch may change ([D6](#decisions-the-maintainer)).
 
-- **Baseline.** v2.2.1 plus #96 and #98. Every "State at 2.2.x" claim below
-  was checked against `main` at 5a8a2b4, with that commit's line numbers.
-  2.2.2 is still in progress (P22-09, #99, and lane B's axis-aligned resample
-  path), so a workstream checks each claim against `main` when it starts.
+- **Baseline.** v2.2.2, released from `main` at 0e5e61c. The "State at 2.2.x"
+  claims below were first checked against `main` at 5a8a2b4, and the line
+  numbers again at 0e5e61c, after 2.2.2's resample changes (#99, #101). A
+  workstream checks each claim against `main` when it starts.
 - **Where the reasons come from.**
-  - [What 2.2.0 taught](../2.2.x/what-2.2.0-taught.md), cited as "lessons §n".
+  - [What 2.2.0 taught](what-2.2.0-taught.md), cited as "lessons §n".
   - The 2.2.x measurements: #92's tables (P22-06), and lane B's phase timings
     of the 512³ resample, summarised in
     [The numbers](#the-numbers-this-plan-starts-from).
-- **What the release may change.**
-  - New API, additive, under plans/README.md's Rust and Python rules. Every
-    new knob defaults to what 2.2.x does.
+- **What these patches may change.** The [2.2.x rules](README.md), with one
+  exception:
+  - **The exception (2.2.4 only).** The thread setting of P22-11 is public
+    API and a command-line flag, which a patch otherwise never adds. The
+    maintainer allowed it once, because it is a small change
+    ([D6](#decisions-the-maintainer)). It covers exactly the names P22-11
+    lists, and `--threads` on the commands P22-12 and P22-13 make use it.
+    Nothing else in 2.2.3 or 2.2.4 adds API or a flag.
   - The format stays 1.2, and the diagnostic code table keeps its codes.
-    Nothing here needs a format change.
   - **No thread count changes an output.** Every path this plan parallelises
     writes the same `content_id`, the same stored chunk bytes and the same
-    command output at any thread or worker count. Tests hold that for each
-    path (see each item's Tests).
+    command output at any thread or worker count, and the same as 2.2.2 at
+    one thread. Tests hold that for each path (see each item's Tests).
+- **The API gates.** `API_RELEASE_TYPE` stays `patch`, so the `python-api`
+  job keeps failing any addition but the exception's. P22-11 gives
+  `public_api.py compare` a list of allowed additions,
+  `.github/api-exceptions.txt`, which names each excepted name and the
+  decision that allowed it; under `patch`, an addition not on the list still
+  fails. 2.2.4's release pull request empties the list, because from v2.2.4
+  on those names are the baseline. `cargo semver-checks` has no lint for an
+  added item, so the Rust names pass as a patch; P22-11's pull request
+  confirms that on its run, and if the job does fail them, the maintainer
+  sets `API_RELEASE_TYPE` to `minor` from P22-11's merge to the v2.2.4 tag.
 
 ## The numbers this plan starts from
 
@@ -41,32 +57,43 @@ branches and `W23-` titles.
   time on four (#92).
 - **Processes scale across files.** `medh5 verify` over 32 files took 10.1 s
   in one process and 2.7 s in four (`docs/guides/performance.md`).
-- **The 512³ resample, one thread** (lane B, a timing build, before the
-  axis-aligned path; 2.2.2 changes the mapping row):
+- **The 512³ resample, one thread** (lane B, a timing build, before 2.2.2's
+  axis-aligned path, which changes the mapping row):
   - nearest, no annotation, 26.5 s: mapping 14.2 s, **digests at commit
     8.2 s**, writing and compressing 2.1 s, reading 0.4 s, sampling 0.3 s;
   - linear with the annotation, 50.6 s: mapping 12.6 s, interpolating
     12.2 s, **digests 11.7 s**, carrying the label map 7.7 s, writing 4.9 s.
   - Of the digest time, 576 MiB is the source's untouched images, which the
     commit hashes again
-    ([W23-04](#w23-04-digests-in-parallel-outside-the-lock)).
+    ([P22-13](#p22-13-digests-in-parallel-outside-the-lock-224)).
   - The machine (a 4-vCPU Linux VM) has no SHA instructions. Apple Silicon
     and recent x86_64 have them, so digests cost much less there.
 
 ## How this plan answers what came before
 
-| Before | So in 2.3.0 |
+| Before | So in 2.2.3 and 2.2.4 |
 |---|---|
-| 2.2.x left threads out: a thread pool is a new behaviour and needs a setting (P22-09). | 2.3.0 is the minor that can add the setting. It defaults to one thread, today's code path. |
-| 2.1.0 added a preflight thread pool and it ran slower. Nothing was measured before it was built. | W23-01 measures how much of each command runs outside HDF5's lock before any thread code is written, and drops an item that cannot pay. |
+| 2.2.x left threads out: a thread pool is a new behaviour and needs a setting (P22-09). | The maintainer allowed the setting in a patch, once (D6). It defaults to one thread, today's code path. |
+| 2.1.0 added a preflight thread pool and it ran slower. Nothing was measured before it was built. | P22-10 measures how much of each command runs outside HDF5's lock before any thread code is written, ships alone in 2.2.3, and drops an item that cannot pay. |
 | P22-06's table set the work of P22-07 to P22-09, and each of those recorded its numbers (lessons §9). | Every item records 1, 2 and 4 threads before and after, on one machine, in its pull request. |
 | P22-08 and P22-09 changed hot paths with every digest pinned to 2.2.0's. | Every parallel path is tested for the same `content_id` and the same stored chunks at 1 and 4 threads. |
 | Arming auto-merge on #96 was stopped by the session's own permission check, and waited for a card. | Each lane's brief says whether the maintainer allows it to arm auto-merge on its own pull requests ([Before the lanes start](#before-the-lanes-start-the-maintainer)). |
-| The weekly limit set 2.2.0's release date (lessons §1). | Two lanes, with the enabler first. |
+| The weekly limit set 2.2.0's release date (lessons §1). | Two lanes, with the measurement and the enabler first. |
+
+## Releases
+
+| Release | Holds | Tagged when |
+|---|---|---|
+| 2.2.3 | P22-10, the measurement | its pull request has merged and the release checklist passes |
+| 2.2.4 | P22-11 to P22-14: the thread setting, chunk writes, digests, and processes across files | their pull requests have merged and the release checklist passes |
+
+2.2.3 changes no behaviour, so it ships alone and does not wait on 2.2.4.
+Patches are tagged from `main` in order, so P22-11 does not merge before
+v2.2.3 is tagged.
 
 ## Work items
 
-### W23-01 Measure what can run outside the lock (start at once)
+### P22-10 Measure what can run outside the lock (2.2.3, start at once)
 
 - **State at 2.2.x.**
   - `docs/examples/bench_threads.py` (#92) times reads from one, two and
@@ -92,16 +119,18 @@ branches and `W23-` titles.
 - **Output.**
   - A table in the pull request: each command's phases, in and outside the
     lock, and its ceiling at four threads.
-  - A ranked list that sets the scope of W23-03 and W23-04. A path whose
+  - A ranked list that sets the scope of P22-12 and P22-13. A path whose
     ceiling at four threads is below 1.3 times is dropped, and the plan says
     so.
   - If the maintainer runs the script on Apple Silicon, a second column.
-- **Done when.** The table covers every row above, after 2.2.2's resample
-  changes have merged.
+- **Changelog.** `<!-- no entry: ... -->` unless the timings build is
+  documented for users.
+- **Done when.** The table covers every row above, on 2.2.2's code.
 
-### W23-02 One thread setting (the enabler)
+### P22-11 One thread setting (2.2.4, the enabler)
 
-Lands alone and first: W23-03 and W23-04 build on it.
+Lands alone and first: P22-12 and P22-13 build on it. It is the API the
+exception allows ([D6](#decisions-the-maintainer)).
 
 - **State at 2.2.x.**
   - `--workers N` runs a batch command's files in up to *N* processes:
@@ -120,8 +149,7 @@ Lands alone and first: W23-03 and W23-04 build on it.
   - **The setting.** How many threads one call may use for its work outside
     HDF5. The default is 1, which runs today's code and starts no thread.
     - Rust: `medh5::parallel::set_threads(n)` and `medh5::parallel::threads()`.
-      A new options type that takes a count is `#[non_exhaustive]` with a
-      `with_threads` method.
+      No options type gains a field: a call reads the setting.
     - Python: `medh5.set_threads(n)` and `medh5.get_threads()`.
     - The environment: `MEDH5_THREADS`, read once, at the first call that
       asks. A value that is not a positive integer is refused with an error
@@ -130,7 +158,11 @@ Lands alone and first: W23-03 and W23-04 build on it.
       the item that makes the command use it. `--workers` keeps its meaning
       (processes, across files).
     - Precedence: a command's flag, then `set_threads`, then the
-      environment, then 1. `0` is refused: there is no "auto" in 2.3.0.
+      environment, then 1. `0` is refused: there is no "auto".
+  - **These names are the whole exception.** P22-11 lists them in
+    `.github/api-exceptions.txt` with D6, and teaches `public_api.py compare`
+    to read that list (see [The API gates](#medh5-223-and-224-parallelism)).
+    A test holds the list to this item's names.
   - **Threads live inside one call.** Each call that uses threads starts them
     (`std::thread::scope`) and joins them before it returns, so no thread
     outlives a call and nothing is left running across a `fork`. There is no
@@ -143,26 +175,29 @@ Lands alone and first: W23-03 and W23-04 build on it.
     thread in each `DataLoader` worker, so a parent's setting is not
     multiplied by the worker count.
 - **Tests.** Precedence; the refusals; the environment read once; one thread
-  starts no thread (a Rust test counts them); `worker_init_fn` resets it.
+  starts no thread (a Rust test counts them); `worker_init_fn` resets it;
+  `public_api.py compare` under `patch` passes a listed addition and fails an
+  unlisted one.
 - **Documentation.** `docs/explanation/concurrency.md` gains "Threads inside
   one call": what the setting covers, why loaders keep one, and `--threads`
   beside `--workers`.
 - **Changelog.** Added, area `python-api` (and `cli` for the flags, in the
-  items that add them).
+  items that add them). The entry says the setting is new in a patch by the
+  maintainer's decision.
 - **Done when.** The setting exists, is documented, and no path uses it yet.
 
-### W23-03 Compress outside the lock, with direct chunk writes
+### P22-12 Compress outside the lock, with direct chunk writes (2.2.4)
 
 - **State at 2.2.x.**
   - Chunks are written through `data::write_region` (`h5/data.rs:908`), so
     HDF5 runs the Blosc2 filter inside the write, under its lock.
   - `H5Dwrite_chunk` appears only in tests (`h5/mod.rs:512`,
-    `storage/recompress.rs:498`, `conformance/robustness.rs:100`).
+    `storage/recompress.rs:498`, `conformance/robustness.rs:140`).
   - The read side already bypasses the filter: `h5/window.rs` `read_window`
     reads a stored Blosc2 chunk with `H5Dread_chunk` and decompresses it
     outside the lock, or answers `None` and the caller reads through HDF5.
   - `resample` already works one target chunk at a time, in C order
-    (`transforms/resample.rs` `blocks`, line 977).
+    (`transforms/resample.rs` `blocks`, line 1146).
   - Three of the four codec profiles (`training`, `balanced`, `archive`)
     store each chunk through Blosc2 alone; `portable` is shuffle and deflate
     (`storage/codecs.rs` `profiles`).
@@ -184,23 +219,22 @@ Lands alone and first: W23-03 and W23-04 build on it.
     "HDF5's bytes or HDF5's write", as the reader's invariant says.
   - Edge chunks store what `H5Dwrite` stores past the extent; the test
     compares them.
-  - **Who uses it**, in the order W23-01 ranks them:
+  - **Who uses it**, in the order P22-10 ranks them:
     - `recompress`: read each stored chunk raw, decompress, recompress and
       write it directly, all but the HDF5 calls on workers. The raw read
-      takes what `read_window` takes (W23-04 gives the rule); a converted
+      takes what `read_window` takes (P22-13 gives the rule); a converted
       type, an unwritten chunk or one stored with Blosc2 skipped is handled
       as `recompress` handles it today, through HDF5;
-    - `resample`: workers map, interpolate and compress whole target chunks
-      (after 2.2.2's axis-aligned path);
+    - `resample`: workers map, interpolate and compress whole target chunks,
+      on 2.2.2's axis-aligned path;
     - `convert from-nifti`: decode a slab of whole chunks, compress on
       workers;
     - an amendment's rewritten datasets (a scrub's, a re-encoded annotation).
-  - Each command that uses it gains `--threads N`.
+  - Each command that uses it gains `--threads N` (D6).
 - **Tests.**
   - For each profile and each user, at 1 and 4 threads: the same
     `content_id`, every chunk's stored bytes and filter mask the same
-    (`H5Dread_chunk` over every chunk), and the same as `main` before the
-    change.
+    (`H5Dread_chunk` over every chunk), and the same as 2.2.2's.
   - A chunk written directly reads back through HDF5 and through
     `read_window` alike (Rust).
   - `portable`, a two-filter dataset and a big-endian dataset fall back to
@@ -212,11 +246,11 @@ Lands alone and first: W23-03 and W23-04 build on it.
     opens and reads files.
 - **Changelog.** Added (`--threads`), area `cli`; Performance, area `writer`.
 - **Done when.**
-  - W23-01's rows for these commands are measured again at 1, 2 and 4
+  - P22-10's rows for these commands are measured again at 1, 2 and 4
     threads, before and after, on one machine.
   - One thread is no slower than 2.2.2 by more than noise.
 
-### W23-04 Digests in parallel, outside the lock
+### P22-13 Digests in parallel, outside the lock (2.2.4)
 
 - **State at 2.2.x.**
   - `SampleWriter::commit(true)` recomputes every dataset's digest
@@ -269,7 +303,8 @@ Lands alone and first: W23-03 and W23-04 build on it.
     then `commit()`) hashes what it inherited inside `commit`, in parallel,
     and nothing runs between the calls.
   - Users: `commit`, `verify`, `validate --level integrity`,
-    `refuse_failed_digests` and `recompress`'s output check.
+    `refuse_failed_digests` and `recompress`'s output check. `verify` and
+    `validate` gain `--threads N` (D6).
 - **Tests.**
   - The same digests at 1 and 4 threads, for every dtype, strings, compound
     types, and datasets whose slabs fall on and across chunk edges.
@@ -278,10 +313,13 @@ Lands alone and first: W23-03 and W23-04 build on it.
 - **Documentation.** The performance guide's digest row per platform, with
   the `sha2` backend each gets.
 - **Changelog.** Performance, area `files`.
-- **Done when.** Commit and `verify` on W23-01's sample are measured again at
+- **Done when.** Commit and `verify` on P22-10's sample are measured again at
   1, 2 and 4 threads.
 
-### W23-05 `--workers` on every batch command that gains from it
+### P22-14 Processes across files (2.2.4)
+
+Its flags wait on [D7](#decisions-the-maintainer). As proposed, 2.2.4 measures
+and documents, and adds no flag.
 
 - **State at 2.2.x.**
   - `validate`, `verify`, `fix`, `index build` and `recompress` take
@@ -294,95 +332,103 @@ Lands alone and first: W23-03 and W23-04 build on it.
     `conformance run`.
   - The Python API has no worker count outside `medh5.dataset` statistics.
 - **Change.**
-  - Time each command above over 32 files, in one process and in four,
-    first. Add `--workers` to each one that is at least 1.3 times faster on
-    four, and list the rest with their numbers in the pull request.
-  - Keep `workers.rs`'s rules: output in input order, byte for byte the
-    one-process run's; a writing command's paths that name one file go to
-    one worker; a worker that dies fails only its file.
-  - `task preflight` splits by subject and keeps task-cache-1's output order.
-    It never uses threads (lessons above).
+  - Time each command above over 32 files, in one process and in four, and
+    record the numbers in the pull request and the performance guide: which
+    commands would be at least 1.3 times faster on four.
   - Python keeps no worker count. `docs/explanation/concurrency.md` gains a
     `ProcessPoolExecutor` recipe, one file per task.
-- **Tests.** For each command that gains the flag, the text, `--json` and the
-  exit code the same at 1 and 4 workers, as the existing commands' tests do.
-- **Changelog.** Added, area `cli`.
+  - **If D7 takes the flags:** add `--workers` to each command that measured
+    at least 1.3 times faster, and list them in `.github/api-exceptions.txt`
+    beside P22-11's names. Keep `workers.rs`'s rules: output in input order,
+    byte for byte the one-process run's; a writing command's paths that name
+    one file go to one worker; a worker that dies fails only its file.
+    `task preflight` splits by subject and keeps task-cache-1's output order,
+    and never uses threads.
+- **Tests.** The recipe runs (`test_docs_python.py`). If D7 takes the flags:
+  for each command that gains one, the text, `--json` and the exit code the
+  same at 1 and 4 workers, as the existing commands' tests do.
+- **Changelog.** Documentation, or Added, area `cli`, if D7 takes the flags.
 - **Done when.** Every command listed has a number and a decision.
 
 ## Lanes
 
-Two sessions (lessons §1; at most three, as in 2.2.x).
+Two sessions (lessons §1; at most three, as in 2.2.x). Branch names differ
+from 2.2.1's `p22/measure` and `p22/threads`, which are taken.
 
 | Lane | Sequence | Branches |
 |---|---|---|
-| A, threads in a file | W23-01 → W23-02 → W23-03 | `w23/measure`, `w23/threads`, `w23/chunk-writes` |
-| B, across files and digests | W23-05 → W23-04 | `w23/workers`, `w23/digests` |
+| A, threads in a file | P22-10 → P22-11 → P22-12 | `p22/phase-timings`, `p22/thread-setting`, `p22/chunk-writes` |
+| B, across files and digests | P22-14 → P22-13 | `p22/workers`, `p22/digests` |
 
 - **Edges.**
-  - W23-01 waits on 2.2.2's resample pull requests, which change what it
-    measures. It is the only item that may open before 2.2.2 is tagged,
-    because it changes no behaviour.
-  - W23-02 lands alone, before W23-03 and W23-04.
-  - W23-04 waits on W23-02. Lane B does W23-05 first, which needs neither.
-  - W23-03 and W23-04 both read W23-01's ranked list.
+  - P22-10 starts at once, and v2.2.3 is tagged when it merges.
+  - P22-11 lands alone, after v2.2.3 is tagged and before P22-12 and P22-13.
+  - P22-13 waits on P22-11. Lane B does P22-14 first, which needs neither.
+  - P22-12 and P22-13 both read P22-10's ranked list.
 - **Critical path.** Lane A: the measurement, the enabler, then the chunk
   writer.
-- **Two sessions.** The release needs no third; a third would only wait on
-  W23-02.
+- **Two sessions.** The releases need no third; a third would only wait on
+  P22-11.
 
-### Shared files (2.3.0)
+### Shared files (2.2.3 and 2.2.4)
 
 | File | Owner | Others touch it for |
 |---|---|---|
-| `crates/medh5/src/parallel.rs` (new), `medh5/__init__.py`'s thread setting | W23-02 | — |
-| `crates/medh5/src/h5/**` (a chunk writer beside `window.rs`) | W23-03 | W23-04 (raw chunk reads for hashing) |
-| `crates/medh5/src/transforms/resample*`, `storage/recompress.rs`, `convert/nifti/**` | W23-03 | — |
-| `crates/medh5/src/sample/writer.rs` | W23-03 (rewritten datasets) | W23-04 (`commit`, `stamp_in`) |
-| `crates/medh5/src/integrity/**` | W23-04 | — |
-| `crates/medh5-cli/src/workers.rs` | W23-05 | — |
-| `docs/explanation/concurrency.md`, `docs/guides/performance.md` | W23-02, W23-01 | every item (its rows) |
+| `crates/medh5/src/parallel.rs` (new), `medh5/__init__.py`'s thread setting, `.github/api-exceptions.txt` (new), `.github/scripts/public_api.py` | P22-11 | P22-14 (its flags, if D7 takes them) |
+| `crates/medh5/src/h5/**` (a chunk writer beside `window.rs`) | P22-12 | P22-13 (raw chunk reads for hashing) |
+| `crates/medh5/src/transforms/resample*`, `storage/recompress.rs`, `convert/nifti/**` | P22-12 | — |
+| `crates/medh5/src/sample/writer.rs` | P22-12 (rewritten datasets) | P22-13 (`commit`, `stamp_in`) |
+| `crates/medh5/src/integrity/**` | P22-13 | — |
+| `crates/medh5-cli/src/workers.rs` | P22-14 | — |
+| `docs/explanation/concurrency.md`, `docs/guides/performance.md` | P22-11, P22-10 | every item (its rows) |
 | `tests/project/python_api.txt`, `medh5/_core.pyi`, `docs/reference/cli.md`, `crates/medh5-cli/src/app.rs` | no owner | plans/README.md, "Shared files" |
 
 ## Out of scope
 
 | Item | Why |
 |---|---|
-| A default above one thread, or "auto" | 2.3.0 measures first. A later minor may change the default with 2.3.0's numbers, announced a minor ahead. |
+| A default above one thread, or "auto" | These patches measure first. A later minor may change the default with their numbers, announced a minor ahead. |
 | A persistent thread pool, or a thread-pool dependency | Threads that outlive a call cross a `fork` (D3). |
 | Threads in preflight or opening | Measured slower: the work is HDF5's (2.1.0; #92). |
-| MEDS export, then FHIR and OMOP | A later minor (D2). The review of this plan settled two points for whoever plans it: the caller names each sample's MEDS `subject_id` (the importer hashes it into every event id, so none can be minted), and the round trip is promised by rule: export is a fixed point, and an event's id comes back only where its import dropped nothing. OMOP needs a vocabulary mapping the user supplies. |
+| Any other new API or flag | The exception covers P22-11's names and `--threads` only (D6), and P22-14's flags if D7 takes them. |
+| MEDS export, then FHIR and OMOP | A later minor (D2). The review of this plan settled two points for whoever plans it: the caller names each sample's MEDS `subject_id` (the importer hashes it into every event id, so none can be minted), and the round trip is promised by rule: export is a fixed point, and an event's id comes back only where its import dropped nothing. A time the importer read inside a daylight-saving fold holds both instants, and its export must keep both. OMOP needs a vocabulary mapping the user supplies. |
 | Clinical extension columns in a format minor | Needs the projection study first; candidate for 1.3. |
 | `rle` | Only for a measured case `instances` serves badly. |
 | `open(swmr=True)` | Small, when someone needs it. SWMR writes are out by design. |
 | `medh5.cache/2` | A recorded limit with no demand. |
-| Costs out of proportion left by #92: DICOM import holds the volume about 2.3 times, a carried probability map is built whole | Patch material for 2.2.x, not features. |
+| Costs out of proportion left by #92: DICOM import holds the volume about 2.3 times, a carried probability map is built whole | Patch material for 2.2.x, planned on their own. |
 | HDF5's global-heap fix in crates.io builds | Waits on an upstream HDF5 and `hdf5-metno-src` release (P22-02). |
 | Python 3.10 | Stays, unless 2.2.0 E5's trigger fires. |
 | The 3.0 ledger | 3.0. |
 
 ## Before the lanes start (the maintainer)
 
-1. Tag v2.2.2. Until then `main` is the patch line, and only W23-01 opens.
-2. Clear the repository variable `API_RELEASE_TYPE`, so the API jobs check
-   `main` as a minor. A 2.2.3, if one is needed after that, is cut on
-   `release/2.2` from `v2.2.2`.
-3. Say in each lane's brief whether the lane may arm auto-merge on its own
+1. Keep the repository variable `API_RELEASE_TYPE` at `patch`. P22-11's
+   allowed list carries the exception. If P22-11's pull request shows
+   `cargo semver-checks` failing the Rust names, set it to `minor` from that
+   merge to the v2.2.4 tag, then back to `patch`.
+2. Say in each lane's brief whether the lane may arm auto-merge on its own
    pull requests once CI is green and Codex is clean. Without that, it asks
    once, on a card.
-4. Optionally, run W23-01's script on an Apple Silicon Mac, for the column
+3. Optionally, run P22-10's script on an Apple Silicon Mac, for the column
    with SHA extensions.
 
 ## Release checklist (the coordinator)
 
 As 2.2.x's, plus:
 
-1. Every thread-identity and worker-identity test passes on every CI
+1. For 2.2.3: no public name and no flag added; `docs/guides/performance.md`
+   names the version it measured.
+2. For 2.2.4: the API jobs show no addition but the names in
+   `.github/api-exceptions.txt`, and the release pull request empties that
+   list.
+3. Every thread-identity and worker-identity test passes on every CI
    platform, including the free-threaded wheels.
-2. `docs/guides/performance.md` gives 2.3.0's rows at 1, 2 and 4 threads and
+4. `docs/guides/performance.md` gives 2.2.4's rows at 1, 2 and 4 threads and
    names the machine.
-3. `docs/explanation/concurrency.md` describes `--threads` beside
+5. `docs/explanation/concurrency.md` describes `--threads` beside
    `--workers`, and `worker_init_fn`'s reset.
-4. No changelog sentence promises a later default. If D3's default is to
+6. No changelog sentence promises a later default. If D3's default is to
    change in a later minor, the maintainer has settled it, and the sentence
    names that decision.
 
@@ -393,7 +439,7 @@ maintainer answers it, and the plan is updated with the answer.
 
 - **D1 The digest at commit.** Settled by the maintainer on 2026-10-22: an
   amendment keeps hashing the datasets it copied unchanged, so it still
-  refuses a source whose dataset fails its digest (E701), and W23-04 makes
+  refuses a source whose dataset fails its digest (E701), and P22-13 makes
   that hashing parallel, overlapped with the edit inside commands that amend
   and commit in one call. Not chosen: keeping the stored digests of
   unchanged copies (a damaged source dataset would be carried rather than
@@ -407,5 +453,10 @@ maintainer answers it, and the plan is updated with the answer.
 - **D4 Names.** Proposed: `--threads N` for threads inside one call,
   `--workers N` for processes across files. `dataset stats --workers` keeps
   its meaning (threads) and is documented as the exception, as now.
-- **D5 When.** Proposed: the lanes start once v2.2.2 is tagged; W23-01 may
-  start before.
+- **D6 Patches, not a minor.** Settled by the maintainer on 2026-10-22: the
+  work ships as 2.2.3 and 2.2.4, not 2.3.0, and the patch rule is relaxed
+  this once for the thread setting, a small API change. First planned as
+  2.3.0 (D5, when its lanes start, fell away with it).
+- **D7 `--workers` on more commands.** Open, on a card: whether the
+  exception also covers P22-14's `--workers` flags. Proposed: no; 2.2.4
+  measures them and adds the recipe, and the flags wait for the next minor.
