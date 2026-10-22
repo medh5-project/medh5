@@ -236,7 +236,7 @@ Lands alone and first: W23-03 and W23-04 build on it.
     `s13_1_an_amendment_never_restamps_a_digest_its_source_failed`.
   - `verify` (`integrity/verify.rs` `verify_root`) and `validate --level
     integrity` hash the same way, in sequence.
-- **Change.** Under [D1](#decisions-the-maintainer) as proposed, the
+- **Change.** Under [D1](#decisions-the-maintainer), as settled, the
   guarantee stays and its cost falls.
   - Hash datasets on workers, one dataset per worker (a hash is sequential
     within one stream). The caller reads stored chunks raw under the lock,
@@ -271,10 +271,6 @@ Lands alone and first: W23-03 and W23-04 build on it.
     and nothing runs between the calls.
   - Users: `commit`, `verify`, `validate --level integrity`,
     `refuse_failed_digests` and `recompress`'s output check.
-  - If the maintainer picks option 2 of D1 instead, the commit keeps the
-    stored digest of every dataset it copied unchanged and hashes only what
-    it wrote. That is a behaviour change with its own changelog entry, and
-    the test above is rewritten to pin the new rule.
 - **Tests.**
   - The same digests at 1 and 4 threads, for every dtype, strings, compound
     types, and datasets whose slabs fall on and across chunk edges.
@@ -460,16 +456,16 @@ As 2.2.x's, plus:
 
 ## Decisions (the maintainer)
 
-Proposed by this plan. Each is settled when the maintainer answers it, and
-the plan is updated with the answer.
+Proposed by this plan unless marked settled. Each is settled when the
+maintainer answers it, and the plan is updated with the answer.
 
-- **D1 The digest at commit.** Does an amendment keep hashing the datasets it
-  copied unchanged? Proposed: yes, and W23-04 makes it parallel, overlapped
-  with the edit inside commands that amend and commit in one call. The
-  alternatives are to keep the stored digests of unchanged
-  copies (cost follows the edit, but a damaged source dataset is carried with
-  its failing digest rather than refused; `verify` still finds it), or to
-  keep the check by default with an opt-out flag.
+- **D1 The digest at commit.** Settled by the maintainer on 2026-10-22: an
+  amendment keeps hashing the datasets it copied unchanged, so it still
+  refuses a source whose dataset fails its digest (E701), and W23-04 makes
+  that hashing parallel, overlapped with the edit inside commands that amend
+  and commit in one call. Not chosen: keeping the stored digests of
+  unchanged copies (a damaged source dataset would be carried rather than
+  refused), and an opt-out flag.
 - **D2 Scope.** Proposed: parallelism and digests, plus the MEDS export. The
   alternatives are parallelism alone, or MEDS and FHIR export.
 - **D3 The thread setting.** Proposed: one process-wide count, default 1, no
