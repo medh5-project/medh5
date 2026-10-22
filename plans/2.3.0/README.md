@@ -232,13 +232,27 @@ Lands alone and first: W23-03 and W23-04 build on it.
 - **Change.** Under [D1](#decisions-the-maintainer) as proposed, the
   guarantee stays and its cost falls.
   - Hash datasets on workers, one dataset per worker (a hash is sequential
-    within one stream). The caller reads stored chunks raw under the lock;
-    workers decompress them (the Blosc2 path of `window.rs`) and hash in C
-    order. A dataset that is not Blosc2 alone is read through HDF5, as now.
-  - One large dataset is pipelined: reading, decompressing and hashing run
-    at once, so the hash never waits on the lock.
-  - An amendment starts hashing what it inherited when it opens, beside the
-    edit's own work, and the commit waits for the result.
+    within one stream). The caller reads stored chunks raw under the lock,
+    and workers decompress them (the Blosc2 path of `window.rs`). A dataset
+    that is not Blosc2 alone is read through HDF5, as now.
+  - **The hash sees §13.1's C-order stream, never chunk order.** Where a row
+    spans chunks, chunk order is not C order: a 4×4 array in 2×2 chunks
+    holds the left halves of two rows before their right halves. So the
+    chunks covering one slab, as `STREAM_BYTES` cuts it today, are
+    decompressed and placed into that slab in C order (as `window.rs`
+    `fill` and `place` assemble a window), and the slab is hashed whole,
+    slab after slab. A test hashes a dataset whose chunks split every axis,
+    and one whose slabs end inside a chunk, against the sequential digest.
+  - One large dataset is pipelined: the next slab's chunks are read and
+    decompressed while this slab is hashed, so the hash never waits on the
+    lock.
+  - **Overlap stays inside one call** (D3: no thread outlives the call that
+    started it). A command that amends and commits in one call
+    (`resample`, `scrub`, `fix`, `recompress`, an import) hashes what it
+    inherited on workers beside its own work, and joins them before it
+    returns. A writer used across calls (Python's `amend()`, then edits,
+    then `commit()`) hashes what it inherited inside `commit`, in parallel,
+    and nothing runs between the calls.
   - Users: `commit`, `verify`, `validate --level integrity`,
     `refuse_failed_digests` and `recompress`'s output check.
   - If the maintainer picks option 2 of D1 instead, the commit keeps the
@@ -400,8 +414,9 @@ Proposed by this plan. Each is settled when the maintainer answers it, and
 the plan is updated with the answer.
 
 - **D1 The digest at commit.** Does an amendment keep hashing the datasets it
-  copied unchanged? Proposed: yes, and W23-04 makes it parallel and
-  overlapped. The alternatives are to keep the stored digests of unchanged
+  copied unchanged? Proposed: yes, and W23-04 makes it parallel, overlapped
+  with the edit inside commands that amend and commit in one call. The
+  alternatives are to keep the stored digests of unchanged
   copies (cost follows the edit, but a damaged source dataset is carried with
   its failing digest rather than refused; `verify` still finds it), or to
   keep the check by default with an opt-out flag.
