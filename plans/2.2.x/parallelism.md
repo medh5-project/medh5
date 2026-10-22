@@ -35,11 +35,13 @@ exception to what a patch may change ([D6](#decisions-the-maintainer)).
   `public_api.py compare` a list of allowed additions,
   `.github/api-exceptions.txt`, which names each excepted name and the
   decision that allowed it; under `patch`, an addition not on the list still
-  fails. 2.2.4's release pull request empties the list, because from v2.2.4
-  on those names are the baseline. `cargo semver-checks` has no lint for an
-  added item, so the Rust names pass as a patch; P22-11's pull request
-  confirms that on its run, and if the job does fail them, the maintainer
-  sets `API_RELEASE_TYPE` to `minor` from P22-11's merge to the v2.2.4 tag.
+  fails. The list stays through 2.2.4's release pull request, whose gate
+  still compares against the published 2.2.3, and is emptied by the first
+  pull request after v2.2.4 is published, when those names are the baseline.
+  `cargo semver-checks` has no lint for an added item, so the Rust names
+  pass as a patch; P22-11's pull request confirms that on its run, and if
+  the job does fail them, the maintainer sets `API_RELEASE_TYPE` to `minor`
+  from P22-11's merge until v2.2.4 is published.
 
 ## The numbers this plan starts from
 
@@ -88,8 +90,9 @@ exception to what a patch may change ([D6](#decisions-the-maintainer)).
 | 2.2.4 | P22-11 to P22-14: the thread setting, chunk writes, digests, and processes across files | their pull requests have merged and the release checklist passes |
 
 2.2.3 changes no behaviour, so it ships alone and does not wait on 2.2.4.
-Patches are tagged from `main` in order, so P22-11 does not merge before
-v2.2.3 is tagged.
+Patches are tagged from `main` in order, so no 2.2.4 item (P22-11 to P22-14)
+merges before v2.2.3 is tagged. A 2.2.4 pull request may open and pass
+review earlier, and waits to be queued.
 
 ## Work items
 
@@ -362,8 +365,10 @@ from 2.2.1's `p22/measure` and `p22/threads`, which are taken.
 
 - **Edges.**
   - P22-10 starts at once, and v2.2.3 is tagged when it merges.
-  - P22-11 lands alone, after v2.2.3 is tagged and before P22-12 and P22-13.
-  - P22-13 waits on P22-11. Lane B does P22-14 first, which needs neither.
+  - Every 2.2.4 item merges after v2.2.3 is tagged, P22-14 included.
+  - P22-11 lands alone, before P22-12 and P22-13.
+  - P22-13 waits on P22-11. Lane B does P22-14 first, which needs neither
+    to build, and holds it for the v2.2.3 tag.
   - P22-12 and P22-13 both read P22-10's ranked list.
 - **Critical path.** Lane A: the measurement, the enabler, then the chunk
   writer.
@@ -406,7 +411,7 @@ from 2.2.1's `p22/measure` and `p22/threads`, which are taken.
 1. Keep the repository variable `API_RELEASE_TYPE` at `patch`. P22-11's
    allowed list carries the exception. If P22-11's pull request shows
    `cargo semver-checks` failing the Rust names, set it to `minor` from that
-   merge to the v2.2.4 tag, then back to `patch`.
+   merge until v2.2.4 is published, then back to `patch`.
 2. Say in each lane's brief whether the lane may arm auto-merge on its own
    pull requests once CI is green and Codex is clean. Without that, it asks
    once, on a card.
@@ -420,8 +425,9 @@ As 2.2.x's, plus:
 1. For 2.2.3: no public name and no flag added; `docs/guides/performance.md`
    names the version it measured.
 2. For 2.2.4: the API jobs show no addition but the names in
-   `.github/api-exceptions.txt`, and the release pull request empties that
-   list.
+   `.github/api-exceptions.txt`. The release pull request keeps the list;
+   the first pull request after v2.2.4 is published empties it (and, if it
+   was set to `minor`, `API_RELEASE_TYPE` goes back to `patch`).
 3. Every thread-identity and worker-identity test passes on every CI
    platform, including the free-threaded wheels.
 4. `docs/guides/performance.md` gives 2.2.4's rows at 1, 2 and 4 threads and
