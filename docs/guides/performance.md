@@ -298,14 +298,18 @@ of four processes, on the same machine:
 | 512 windows of a `portable` (gzip) CT | 6.16 s | 6.86 s | 6.20 s | 6.64 s |
 | 512 windows of the annotation, `dense()` | 2.40 s | 0.71 s | 2.34 s | 0.73 s |
 | 256 opens, each reading the grid and image metadata | 0.13 s | 0.25 s | 0.14 s | 0.52 s |
+| … the same opens on 2.2.1 | 0.14 s | 0.19 s | 0.14 s | 0.25 s |
 
 Windows that decompress outside HDF5's lock (Blosc2, and the label planes'
 decoding) gain from threads; gzip, which HDF5 decompresses under its lock,
 loses about a tenth to the hand-offs, and opening loses most, because an open
-is many small HDF5 calls and each one changes hands. The free-threaded build
-(Python 3.14t) loses the most there: 2.1.0's free-threaded wheel ran with the
-GIL, and took 0.24 s at four threads. One thread is no slower than 2.1.0 on
-either build. The one-thread Blosc2 row moves between about 0.8 and 1.3 s
+is many small HDF5 calls and each one changes hands. In 2.2.0 the
+free-threaded build (Python 3.14t) lost the most there: 2.1.0's free-threaded
+wheel ran with the GIL, and took 0.24 s at four threads. 2.2.1 reads each value
+an open needs under one take of HDF5's lock, which brings four threads back to
+2.1.0's time on the free-threaded build and below it on the GIL build (the last
+row, built from source and timed beside 2.2.0 on the same machine). One thread
+is no slower than 2.1.0 on either build. The one-thread Blosc2 row moves between about 0.8 and 1.3 s
 with the process rather than the build: timed side by side in one process,
 the two builds read those windows in the same time.
 [Threads or processes](../explanation/concurrency.md#threads-or-processes)
