@@ -2,8 +2,7 @@
 
 A minor release about parallelism: threads for the work inside one file that
 runs outside HDF5's lock, processes for the work across files, and the cost of
-digests at commit. It also takes the MEDS export that 2.2.0 named a candidate
-for 2.3 ([D2](#decisions-the-maintainer)). Read
+digests at commit, and nothing else ([D2](#decisions-the-maintainer)). Read
 [plans/README.md](../README.md) first. Its rules hold here, with `w23/`
 branches and `W23-` titles.
 
@@ -63,7 +62,7 @@ branches and `W23-` titles.
 | P22-06's table set the work of P22-07 to P22-09, and each of those recorded its numbers (lessons §9). | Every item records 1, 2 and 4 threads before and after, on one machine, in its pull request. |
 | P22-08 and P22-09 changed hot paths with every digest pinned to 2.2.0's. | Every parallel path is tested for the same `content_id` and the same stored chunks at 1 and 4 threads. |
 | Arming auto-merge on #96 was stopped by the session's own permission check, and waited for a card. | Each lane's brief says whether the maintainer allows it to arm auto-merge on its own pull requests ([Before the lanes start](#before-the-lanes-start-the-maintainer)). |
-| The weekly limit set 2.2.0's release date (lessons §1). | Three lanes at most, with the enabler first, as in 2.2.x. |
+| The weekly limit set 2.2.0's release date (lessons §1). | Two lanes, with the enabler first. |
 
 ## Work items
 
@@ -310,80 +309,14 @@ Lands alone and first: W23-03 and W23-04 build on it.
 - **Changelog.** Added, area `cli`.
 - **Done when.** Every command listed has a number and a decision.
 
-### W23-06 MEDS export
-
-Under [D2](#decisions-the-maintainer) as proposed.
-
-- **State at 2.2.x.**
-  - `medh5/io/meds.py` imports MEDS 0.3 (`read_meds`, `augment_from_meds`,
-    `augment_cohort_from_meds`), mapping rows to clinical events and inventing
-    nothing MEDS does not say. The `meds` extra is `pyarrow>=14`.
-  - Nothing exports. The 2.2.0 plan's Out of scope named the export as a
-    candidate for 2.3, MEDS first, because it round-trips with the importer.
-- **Change.**
-  - `medh5.io.meds.write_meds(mapping, out, …)` and
-    `medh5 clinical export-meds --mapping`, writing a MEDS 0.3 dataset
-    (`data/` shards and `metadata/dataset.json`) from the samples' clinical
-    histories.
-  - **The caller names each sample's MEDS `subject_id`**, as a mapping from
-    MEDS `subject_id` to sample, the shape `augment_cohort_from_meds` takes
-    (and the same `subject,sample` CSV on the command line). Nothing is
-    minted: a medh5 subject id is any string and MEDS's is an integer, the
-    importer records that "MEDS's id is not written", and an imported event's
-    id hashes the MEDS `subject_id` with the row (`_row_id`), so only the
-    caller's id gives the same ids back.
-  - The mapping is the importer's, inverted, and the pull request gives it as
-    a table: a `static` event to a null `time`, a code system back to its
-    declared prefix, `value_num` and `value_text`, the declared `unit` and
-    `available` columns, and a day span to a time under a `day_precision`
-    prefix.
-  - **What the round trip promises, and what it does not.** An export
-    writes the row each event says, and nothing it does not hold. Two
-    promises follow, stated by rule rather than by a list of cases:
-    - **Export is a fixed point.** Export, import with the same options
-      (`day_precision`, `columns`, `code_systems`, the same subject ids) and
-      export again gives the same rows.
-    - **An import that kept everything comes back whole.** An event whose
-      import kept every field its id hashed (`_row_id` over subject, time,
-      code, both values, and the declared `unit` and `available`) comes back
-      from export and import with the same id, code, value and both time
-      pairs. An import that dropped a field keeps its content but not its id
-      (both values with `both_values` choosing one; a unit on a row with no
-      numeric value), because no export can restore what the event no longer
-      holds. The importer counts both cases in its report; the test tells
-      which events they are from each event's source row.
-    - An event the importer cannot produce (an interval that is not a day
-      span, an availability that is a range rather than one time, a revision
-      chain) is not written at all, in any form the importer would read as
-      something else; the report lists each one, by event id, as not
-      exported. Extension columns that would carry them, with the importer
-      reading them, are a later minor's.
-  - Documents' text is exported only when asked (`texts=True`), as on import.
-- **Tests.**
-  - For every MEDS fixture the importer's tests use, including the
-    day-precision intervals, declared availability, rows holding both values
-    and units on non-numeric rows (`tests/integrations/test_meds.py`):
-    export is a fixed point, every event comes back with the same code,
-    value and both time pairs, and every event whose import dropped nothing
-    keeps its id.
-  - A history holding events the importer cannot produce exports the rest,
-    and its report names each one left out.
-  - A subject id that is not an integer, or one sample under two subject
-    ids, is refused before anything is written.
-- **Documentation.** The clinical guide gains "Export to MEDS".
-- **Changelog.** Added, area `clinical`.
-- **Done when.** The round trip passes, and the CLI reference lists the
-  command.
-
 ## Lanes
 
-At most three sessions at once (lessons §1).
+Two sessions (lessons §1; at most three, as in 2.2.x).
 
 | Lane | Sequence | Branches |
 |---|---|---|
 | A, threads in a file | W23-01 → W23-02 → W23-03 | `w23/measure`, `w23/threads`, `w23/chunk-writes` |
 | B, across files and digests | W23-05 → W23-04 | `w23/workers`, `w23/digests` |
-| C, clinical | W23-06 | `w23/meds-export` |
 
 - **Edges.**
   - W23-01 waits on 2.2.2's resample pull requests, which change what it
@@ -392,10 +325,10 @@ At most three sessions at once (lessons §1).
   - W23-02 lands alone, before W23-03 and W23-04.
   - W23-04 waits on W23-02. Lane B does W23-05 first, which needs neither.
   - W23-03 and W23-04 both read W23-01's ranked list.
-  - W23-06 waits on nothing.
 - **Critical path.** Lane A: the measurement, the enabler, then the chunk
   writer.
-- **With two sessions.** Lane C's work follows lane B's.
+- **Two sessions.** The release needs no third; a third would only wait on
+  W23-02.
 
 ### Shared files (2.3.0)
 
@@ -407,7 +340,6 @@ At most three sessions at once (lessons §1).
 | `crates/medh5/src/sample/writer.rs` | W23-03 (rewritten datasets) | W23-04 (`commit`, `stamp_in`) |
 | `crates/medh5/src/integrity/**` | W23-04 | — |
 | `crates/medh5-cli/src/workers.rs` | W23-05 | — |
-| `medh5/io/meds.py` | W23-06 | — |
 | `docs/explanation/concurrency.md`, `docs/guides/performance.md` | W23-02, W23-01 | every item (its rows) |
 | `tests/project/python_api.txt`, `medh5/_core.pyi`, `docs/reference/cli.md`, `crates/medh5-cli/src/app.rs` | no owner | plans/README.md, "Shared files" |
 
@@ -418,7 +350,7 @@ At most three sessions at once (lessons §1).
 | A default above one thread, or "auto" | 2.3.0 measures first. A later minor may change the default with 2.3.0's numbers, announced a minor ahead. |
 | A persistent thread pool, or a thread-pool dependency | Threads that outlive a call cross a `fork` (D3). |
 | Threads in preflight or opening | Measured slower: the work is HDF5's (2.1.0; #92). |
-| FHIR or OMOP export | After MEDS, if wanted (D2). OMOP needs a vocabulary mapping the user supplies. |
+| MEDS export, then FHIR and OMOP | A later minor (D2). The review of this plan settled two points for whoever plans it: the caller names each sample's MEDS `subject_id` (the importer hashes it into every event id, so none can be minted), and the round trip is promised by rule: export is a fixed point, and an event's id comes back only where its import dropped nothing. OMOP needs a vocabulary mapping the user supplies. |
 | Clinical extension columns in a format minor | Needs the projection study first; candidate for 1.3. |
 | `rle` | Only for a measured case `instances` serves badly. |
 | `open(swmr=True)` | Small, when someone needs it. SWMR writes are out by design. |
@@ -466,8 +398,8 @@ maintainer answers it, and the plan is updated with the answer.
   and commit in one call. Not chosen: keeping the stored digests of
   unchanged copies (a damaged source dataset would be carried rather than
   refused), and an opt-out flag.
-- **D2 Scope.** Proposed: parallelism and digests, plus the MEDS export. The
-  alternatives are parallelism alone, or MEDS and FHIR export.
+- **D2 Scope.** Settled by the maintainer on 2026-10-22: parallelism and
+  digests only. The MEDS export moves to a later minor (Out of scope).
 - **D3 The thread setting.** Proposed: one process-wide count, default 1, no
   "auto"; threads started and joined inside each call, with no persistent
   pool and no new dependency; only the calling thread calls HDF5; loaders'
