@@ -705,6 +705,21 @@ class TestItkHdf5:
         with pytest.raises(MEDH5ValidationError, match="holds no transform"):
             read_itk_transform(tmp_path / "e.h5")
 
+    def test_an_itk_h5_that_does_not_store_its_parameters_is_refused(self, tmp_path):
+        # A chunk never written reads as the fill value: 240 million stated
+        # parameters in a 10 KiB file were read as 1.9 GB of zeros, three
+        # times over.  Refused before anything is read.
+        h5py = pytest.importorskip("h5py")
+        path = _itk_h5(tmp_path / "t.h5", [("AffineTransform_double_3_3", [], [])])
+        with h5py.File(path, "a") as f:
+            del f["TransformGroup/0/TransformParameters"]
+            f["TransformGroup/0"].create_dataset(
+                "TransformParameters", shape=(240_000_000,), dtype="f8", chunks=(4096,)
+            )
+        assert path.stat().st_size < 64 * 1024
+        with pytest.raises(MEDH5ValidationError, match="does not store them all"):
+            read_itk_transform(path)
+
     def test_an_itk_h5_comes_in_through_the_command_line(self, tmp_path):
         from medh5.cli import main
 

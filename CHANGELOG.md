@@ -8,13 +8,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [2.2.2] — 2026-10-22
 
-**A patch release, with no format change.** Memory and time, and nothing
-else: the documented API is unchanged, the format stays 1.2 and the diagnostic
-code table keeps its codes, and every object 2.2.1 wrote, 2.2.2 writes with the
-same digest. `resample` holds one target chunk where it held whole target
-volumes, and takes a third to a seventh of 2.2.1's time; a NIfTI import holds
-one volume at a time where it held every input, and an export writes its
-voxels a megabyte at a time.
+**A patch release, with no format change.** Memory and time, and one fix for
+hostile input: the documented API is unchanged, the format stays 1.2 and the
+diagnostic code table keeps its codes, and every object 2.2.1 wrote, 2.2.2
+writes with the same digest. `resample` holds one target chunk where it held
+whole target volumes, and takes a third to a seventh of 2.2.1's time; a NIfTI
+import holds one volume at a time where it held every input, and an export
+writes its voxels a megabyte at a time. A crafted ITK transform file can no
+longer make reading it take gigabytes.
+
+### Security
+
+- **A crafted ITK transform file no longer takes gigabytes to read.** HDF5
+  reads a chunk that was never written as its fill value, so
+  `TransformParameters` could state any number of values and store none, and
+  the reader held what it stated three times over: a 9.6 KiB file stating 240
+  million parameters was read as 1.9 GB of zeros, three times. A parameter
+  array the file does not store in full is now refused, as is one whose
+  chunks take more bytes than the file, and the array read is held once.
 
 ### Performance
 
