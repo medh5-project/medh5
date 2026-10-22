@@ -6,6 +6,77 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.2] — 2026-10-22
+
+**A patch release, with no format change.** Memory and time, and two fixes
+for hostile input: the documented API is unchanged, the format stays 1.2 and
+the diagnostic code table keeps its codes, and every object 2.2.1 wrote, 2.2.2
+writes with the same digest. `resample` holds one target chunk where it held
+whole target volumes, and takes a third to a seventh of 2.2.1's time; a NIfTI
+import holds one volume at a time where it held every input, and an export
+writes its voxels a megabyte at a time. A crafted file of 1 KiB can no longer
+make opening it take 4 GiB, nor a crafted ITK transform file make reading it
+take gigabytes.
+
+### Security
+
+- **A crafted file of 1 KiB no longer takes 4 GiB and half a minute to open.**
+  One structure inside HDF5 states its own size, and the library allocated
+  and read that much, past the end of the file, before it refused the file.
+  HDF5 is now built with a second fix (`vendor/hdf5-metno-src/PATCHES.md`),
+  and the file is reported as unreadable (`E001`) at once. The wheels and the
+  release binaries carry it; a build from crates.io does not until HDF5
+  releases the fix (`SECURITY.md`).
+
+- **A crafted ITK transform file no longer takes gigabytes to read.** HDF5
+  reads a chunk that was never written as its fill value, so
+  `TransformParameters` could state any number of values and store none, and
+  the reader held what it stated three times over: a 9.6 KiB file stating 240
+  million parameters was read as 1.9 GB of zeros, three times. A parameter
+  array the file does not store in full is now refused, as is one whose
+  chunks take more bytes than the file, and the array read is held once.
+
+### Performance
+
+- **`resample` holds one target chunk, not one target volume.** The
+  `valid_mask`, a carried mask or label map, and a new ignore mask were built
+  whole on the target grid before they were written; each is now written a
+  chunk at a time, as the image already was, with the same content. Resampling
+  a 512×512×256 `int16` CT to 512×512×512 with an annotation peaked at 304 MiB
+  (nearest), 318 MiB (linear) and 498 MiB (nearest, past the source's edge),
+  and now at 109, 109 and 114 MiB. A probability map is still built whole, and
+  `cubic` still prefilters the whole source; the resampling guide says what
+  each costs.
+- **A digest hashes a block a piece at a time.** It copied a whole slab into
+  little-endian bytes before hashing it, up to 64 MiB, and now copies 1 MiB at
+  a time.
+- **`resample` takes a third to a seventh of 2.2.1's time, and writes the
+  same content.** Resampling a 512×512×256 `int16` CT to 512×512×512 on one
+  thread took 43 s (nearest), 76 s (nearest, with an 8-class annotation),
+  112 s (linear, with it) and 331 s (cubic, with it) on the machine measured,
+  and now takes 14, 18, 34 and 49 s. Two changes make it. Each voxel does less
+  work: whether any target voxel lies outside the source is read from the
+  target's corners for an affine mapping, rather than by mapping every voxel
+  once more; a block's indices are counted up rather than divided out of the
+  row number; `linear` and `cubic` find each point's taps once an axis, rather
+  than for every term through a full index; and no floor is called where a
+  cast is the same. That alone gives 27, 36, 52 and 74 s, and is all a target
+  turned against the source's axes gains. And a target on the source's
+  own axes, as a respacing is, maps each axis once rather than each voxel: its
+  source coordinates are a short table an axis, worked out by the same
+  arithmetic a voxel's row was, which nearest, linear, cubic and a carried
+  annotation read. Every object it writes has the digest 2.2.0's had.
+- **A NIfTI import holds one volume at a time.** `from-nifti` read every input
+  before it wrote the first, and held each twice while decoding it. It now
+  reads every header first, so a refusal still comes before anything is
+  written, then decodes each image into its array a megabyte at a time and
+  writes it, one image after another. Four 512×512×256 inputs (two `int16`
+  CTs, a `float32` PET and a mask) peaked at 721 MiB and now at 301 MiB, the
+  PET and the writer's buffers; one CT at 272 MiB, now 158 MiB.
+- **A NIfTI export writes its voxels a megabyte at a time**, rather than
+  copying the volume into Fortran order whole first: one 512×512×256 `int16`
+  image peaked at 275 MiB, now 157 MiB.
+
 ## [2.2.1] — 2026-10-22
 
 **A patch release, with no format change.** Fixes for hostile input and one

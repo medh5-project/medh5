@@ -9,7 +9,9 @@
 //! Blosc2 chunk that claims more than its dataset's chunk --- written by the
 //! engine's own writer and the HDF5 calls its unit tests make, or one
 //! structure of HDF5's own edited in the bytes it wrote: a global heap object
-//! smaller than its header, which HDF5 2.2.0 decoded without end.  Random damage
+//! smaller than its header, which HDF5 2.2.0 decoded without end, and a driver
+//! info block whose stated size runs past the end of the file, which it read
+//! up to 4 GiB of before refusing.  Random damage
 //! (`damaged.py`'s other mode) rarely produces these shapes.  They are not in
 //! the corpus: the limits they cross are this implementation's, not the
 //! specification's.
@@ -66,7 +68,45 @@ pub fn write(dir: &Path) -> Result<Vec<PathBuf>> {
         }
         out.push(path);
     }
+    let path = dir.join("driver-info-block-past-the-end.medh5");
+    driver_info_past_the_end(&path)?;
+    out.push(path);
     Ok(out)
+}
+
+/// An empty HDF5 file with a version 0 superblock, as HDF5 writes one by
+/// default, given a driver info block after its last byte that states it holds
+/// `0xFFFF_FFF0` bytes.  HDF5 2.2.0 allocated that much and read it, zeros past
+/// the end, before it refused the block: 4 GiB and half a minute for a file of
+/// 1 KiB.  Not a sample: the block only exists in a superblock older than any
+/// the engine writes.
+fn driver_info_past_the_end(path: &Path) -> Result<()> {
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    use hdf5::file::LibraryVersion;
+    let create = || {
+        hdf5::File::with_options()
+            .with_fapl(|p| p.libver_bounds(LibraryVersion::Earliest, LibraryVersion::V18))
+            .create(path)
+    };
+    drop(crate::h5::file::marked(create)?);
+    let mut bytes = std::fs::read(path)?;
+    // Version 0, eight-byte addresses: the driver info address is the fourth,
+    // after the base address, the free-space address and the end of file.
+    if bytes.get(..8) != Some(b"\x89HDF\r\n\x1a\n".as_slice()) || bytes.get(8) != Some(&0) || bytes.get(13) != Some(&8)
+    {
+        return Err(Error::Io("HDF5 did not write a version 0 superblock".into()));
+    }
+    let block = bytes.len() as u64;
+    bytes.extend([0, 0, 0, 0]);
+    bytes.extend(0xFFFF_FFF0u32.to_le_bytes());
+    bytes.extend(b"NCSAmult");
+    let end = bytes.len() as u64;
+    bytes[40..48].copy_from_slice(&end.to_le_bytes());
+    bytes[48..56].copy_from_slice(&block.to_le_bytes());
+    std::fs::write(path, bytes)?;
+    Ok(())
 }
 
 /// A chain of groups 4,096 deep: HDF5's own walk of it recursed without
@@ -315,7 +355,7 @@ mod tests {
     fn every_robustness_fixture_validates_to_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let paths = write(dir.path()).unwrap();
-        assert_eq!(paths.len(), 5);
+        assert_eq!(paths.len(), 6);
         for path in paths {
             let name = path.file_stem().unwrap().to_string_lossy().into_owned();
             let errors = bounded(&path, Duration::from_secs(30)).unwrap_or_else(|| panic!("{name} hung"));
@@ -342,6 +382,22 @@ mod tests {
         let errors = bounded(&path, Duration::from_secs(60)).expect("validation returns");
         let codes: Vec<_> = errors.iter().map(|d| d["code"].as_str().unwrap()).collect();
         assert_eq!(codes, ["E001"], "{errors:?}");
+    }
+
+    /// HDF5 2.2.0 read a driver info block at the size it stated, 4 GiB past
+    /// the end of a file of 1 KiB; the patched HDF5 refuses the file at open.
+    #[test]
+    fn a_driver_info_block_past_the_end_is_refused_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("driver.medh5");
+        driver_info_past_the_end(&path).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() < 4096);
+        let started = Instant::now();
+        let errors = bounded(&path, Duration::from_secs(60)).expect("validation returns");
+        let codes: Vec<_> = errors.iter().map(|d| d["code"].as_str().unwrap()).collect();
+        assert_eq!(codes, ["E001"], "{errors:?}");
+        assert!(errors[0]["message"].as_str().unwrap().contains("driver info block"), "{errors:?}");
+        assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
     }
 
     /// Only a collection whose objects lead exactly to its end is edited, and
