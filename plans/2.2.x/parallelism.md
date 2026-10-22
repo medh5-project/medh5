@@ -30,18 +30,24 @@ exception to what a patch may change ([D6](#decisions-the-maintainer)).
     writes the same `content_id`, the same stored chunk bytes and the same
     command output at any thread or worker count, and the same as 2.2.2 at
     one thread. Tests hold that for each path (see each item's Tests).
-- **The API gates.** `API_RELEASE_TYPE` stays `patch`, so the `python-api`
-  job keeps failing any addition but the exception's. P22-11 gives
-  `public_api.py compare` a list of allowed additions,
-  `.github/api-exceptions.txt`, which names each excepted name and the
-  decision that allowed it; under `patch`, an addition not on the list still
-  fails. The list stays through 2.2.4's release pull request, whose gate
-  still compares against the published 2.2.3, and is emptied by the first
-  pull request after v2.2.4 is published, when those names are the baseline.
-  `cargo semver-checks` has no lint for an added item, so the Rust names
-  pass as a patch; P22-11's pull request confirms that on its run, and if
-  the job does fail them, the maintainer sets `API_RELEASE_TYPE` to `minor`
-  from P22-11's merge until v2.2.4 is published.
+- **The API gates.** `API_RELEASE_TYPE` stays `patch`. One list of allowed
+  additions, `.github/api-exceptions.txt`, names each excepted Rust path and
+  Python name and the decision that allowed it, and CI holds both languages
+  to it:
+  - **Python.** P22-11 has `public_api.py compare` read the list: under
+    `patch`, an addition not on it still fails.
+  - **Rust.** `cargo semver-checks` has no lint for an added item, so today
+    nothing fails a new Rust name. P22-11 adds a check of additions to the
+    `semver` job: each crate's public items against the baseline's (a pinned
+    `cargo public-api` diff, or the rustdoc JSON `cargo semver-checks`
+    already builds), failing under `patch` on an item not on the list.
+  - **Everything else stays private.** The engine's new code (the chunk
+    writer in `h5/`, the hashing in `integrity/`, the timings) is
+    `pub(crate)`, and `medh5-sys` gains no Rust name but the one
+    compression entry point P22-12 needs, which is on the list.
+  - The list stays through 2.2.4's release pull request, whose gate still
+    compares against the published 2.2.3, and is emptied by the first pull
+    request after v2.2.4 is published, when those names are the baseline.
 
 ## The numbers this plan starts from
 
@@ -162,10 +168,11 @@ exception allows ([D6](#decisions-the-maintainer)).
       (processes, across files).
     - Precedence: a command's flag, then `set_threads`, then the
       environment, then 1. `0` is refused: there is no "auto".
-  - **These names are the whole exception.** P22-11 lists them in
-    `.github/api-exceptions.txt` with D6, and teaches `public_api.py compare`
-    to read that list (see [The API gates](#medh5-223-and-224-parallelism)).
-    A test holds the list to this item's names.
+  - **These names are the whole exception**, with P22-12's one `medh5-sys`
+    entry point. P22-11 lists them in `.github/api-exceptions.txt` with D6,
+    and makes both API jobs read that list (see
+    [The API gates](#medh5-223-and-224-parallelism)). A test holds the list
+    to these names.
   - **Threads live inside one call.** Each call that uses threads starts them
     (`std::thread::scope`) and joins them before it returns, so no thread
     outlives a call and nothing is left running across a `fork`. There is no
@@ -214,14 +221,18 @@ exception allows ([D6](#decisions-the-maintainer)).
   - `blosc2_filter_function` reports a failure with `H5Epush`, an HDF5 call,
     so it cannot run outside the lock as it is. Its compression is split into
     an entry point that calls no HDF5 function and returns an error code,
-    which both the filter and the chunk writer call. The change is a patch to
+    which both the filter and the chunk writer call. Its Rust declaration
+    in `medh5-sys`, beside `medh5_b2nd_read_slice`, is the one public name
+    this item adds (on the list). The change is a patch to
     the vendored filter, listed in its `PATCHES.md`
     (`crates/medh5-sys/vendor/hdf5-blosc2/`) as the others are.
   - **C-Blosc2's process state is touched only by the caller.**
-    `blosc2_init` is not safe from two threads at once, so the caller starts
-    the library through `medh5-sys`'s `start_blosc2` (a `std::sync::Once`,
-    which the filter's registration and the window reader already call)
-    before any worker starts, and the entry point calls no `blosc2_init`.
+    `blosc2_init` is not safe from two threads at once. The engine already
+    starts it once: `medh5_sys::register_blosc2_filter`, which `h5/mod.rs`
+    calls before any Blosc2 dataset is opened or made, runs the private
+    `start_blosc2` (a `std::sync::Once`). The caller makes sure that has
+    run before any worker starts, so no new Rust name is needed for it, and
+    the entry point calls no `blosc2_init`.
     Each call compresses with its own context (`blosc2_create_cctx`, as the
     filter does), with Blosc2's own thread count at one, and never through
     the global context or a `blosc1_*` setter. Workers that decompress for
@@ -453,9 +464,7 @@ from 2.2.1's `p22/measure` and `p22/threads`, which are taken.
 ## Before the lanes start (the maintainer)
 
 1. Keep the repository variable `API_RELEASE_TYPE` at `patch`. P22-11's
-   allowed list carries the exception. If P22-11's pull request shows
-   `cargo semver-checks` failing the Rust names, set it to `minor` from that
-   merge until v2.2.4 is published, then back to `patch`.
+   allowed list carries the exception, for Python and Rust alike.
 2. Say in each lane's brief whether the lane may arm auto-merge on its own
    pull requests once CI is green and Codex is clean. Without that, it asks
    once, on a card.
@@ -470,8 +479,7 @@ As 2.2.x's, plus:
    names the version it measured.
 2. For 2.2.4: the API jobs show no addition but the names in
    `.github/api-exceptions.txt`. The release pull request keeps the list;
-   the first pull request after v2.2.4 is published empties it (and, if it
-   was set to `minor`, `API_RELEASE_TYPE` goes back to `patch`).
+   the first pull request after v2.2.4 is published empties it.
 3. Every thread-identity and worker-identity test passes on every CI
    platform, including the free-threaded wheels.
 4. `docs/guides/performance.md` gives 2.2.4's rows at 1, 2 and 4 threads and

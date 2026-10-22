@@ -21,12 +21,14 @@ The reasons are in [What 2.2.0 taught](what-2.2.0-taught.md), cited below as
   - It may fix a wrong answer, a crash, a hang, a cost out of proportion to
     the file, the documentation, or CI.
   - It adds no public API, in Rust or Python, and no command-line flag.
-    `cargo semver-checks` and the API snapshot hold the first, but only once
-    they check as a patch: with the workspace still at 2.2.0 on `main`,
-    `release.py`'s `api_baseline` calls the tree a minor, which may add.
-    The repository variable `API_RELEASE_TYPE=patch` makes it a patch
+    The Python API job holds the first for Python, but only once it checks
+    as a patch: with the workspace still at 2.2.0 on `main`, `release.py`'s
+    `api_baseline` calls the tree a minor, which may add. The repository
+    variable `API_RELEASE_TYPE=patch` makes it a patch
     ([Before the lanes start](#before-the-lanes-start-the-maintainer)).
-    Review holds the rest: a new flag fails review.
+    `cargo semver-checks` reports breaks, not additions, so until P22-11
+    adds a Rust check of additions ([parallelism.md](parallelism.md)),
+    review holds a new Rust name, as it holds a new flag.
   - **One exception.** 2.2.4 adds one thread setting (`set_threads`,
     `MEDH5_THREADS`, `--threads`), which the maintainer allowed on
     2026-10-22 as a small API change. It is listed name by name in
@@ -431,8 +433,10 @@ As 2.2.0's, plus:
 2. No bot pull request is open and red; the lock refresh is merged or closed.
 3. The documentation tests of P22-05 pass. Every changelog sentence they flag
    is confirmed by the maintainer.
-4. `cargo semver-checks` and the Python API job show no addition, not only no
-   break. In 2.2.4, none but the names in `.github/api-exceptions.txt`.
+4. The Python API job shows no addition, not only no break. `cargo
+   semver-checks` reports breaks only, so a Rust addition is held by review
+   until P22-11 adds a check of additions; in 2.2.4, none but the names in
+   `.github/api-exceptions.txt`.
 5. For 2.2.1 and 2.2.2: `docs/guides/performance.md` names the version it
    measured.
 
