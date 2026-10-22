@@ -111,32 +111,20 @@ pub fn linear_sample(field: &ArrayD<f64>, coords: &Array2<f64>, extrapolation: &
     }
     let n = coords.nrows();
     let mut out = Array2::<f64>::zeros((n, components));
-    let mut base = vec![0i64; dim];
-    let mut frac = vec![0f64; dim];
-    let mut index = vec![0usize; dim + 1];
+    // Each axis's two taps, as offsets into the C-order values, and their
+    // weights are worked out once a point; each corner then sums its axes'
+    // weights in axis order, as the whole computation did a corner.
+    let mut taps = vec![[0usize; 2]; dim];
+    let mut weights = vec![[0f64; 2]; dim];
+    let field = field.as_standard_layout();
+    let values = field.as_slice().expect("standard layout");
+    let plane: usize = spatial.iter().product();
+    let strides = c_strides(&spatial);
     for (row, point) in coords.outer_iter().enumerate() {
         for axis in 0..dim {
-            let extent = spatial[axis] as i64;
-            let clamped = point[axis].max(0.0).min(extent as f64 - 1.0);
-            let b = (clamped.floor() as i64).min((extent - 2).max(0));
-            base[axis] = b;
-            frac[axis] = clamped - b as f64;
+            (taps[axis], weights[axis]) = linear_axis(point[axis], spatial[axis], strides[axis]);
         }
-        for corner in 0..(1usize << dim) {
-            let mut weight = 1.0;
-            let mut first = true;
-            for axis in 0..dim {
-                let w = if (corner >> axis) & 1 == 1 { frac[axis] } else { 1.0 - frac[axis] };
-                weight = if first { w } else { weight * w };
-                first = false;
-                let offset = ((corner >> axis) & 1) as i64;
-                index[axis + 1] = (base[axis] + offset).min(spatial[axis] as i64 - 1).max(0) as usize;
-            }
-            for c in 0..components {
-                index[0] = c;
-                out[[row, c]] += weight * field[IxDyn(&index)];
-            }
-        }
+        add_corners(out.row_mut(row), &taps, &weights, values, plane);
     }
     if extrapolation == "zero" {
         for (row, ok) in inside.iter().enumerate() {
@@ -146,6 +134,114 @@ pub fn linear_sample(field: &ArrayD<f64>, coords: &Array2<f64>, extrapolation: &
         }
     }
     Ok(out)
+}
+
+/// [`linear_sample`] under `nearest` at the C-order product of `axes`: the
+/// points of a block whose every voxel takes its coordinate on axis `k`
+/// from `axes[k]`, `(N, S)` with `N` the product of the axes' lengths.  Each
+/// axis's taps and weights are worked out once a coordinate, not once a
+/// point; every sum is [`linear_sample`]'s, term by term.
+pub(crate) fn linear_sample_axes(field: &ArrayD<f64>, axes: &[Vec<f64>]) -> Result<Array2<f64>> {
+    check_field(field)?;
+    let components = field.shape()[0];
+    let spatial: Vec<usize> = field.shape()[1..].to_vec();
+    let dim = spatial.len();
+    check_axes(&spatial, axes)?;
+    let field = field.as_standard_layout();
+    let values = field.as_slice().expect("standard layout");
+    let plane: usize = spatial.iter().product();
+    let strides = c_strides(&spatial);
+    let found: Vec<Vec<([usize; 2], [f64; 2])>> = axes
+        .iter()
+        .enumerate()
+        .map(|(axis, coords)| coords.iter().map(|v| linear_axis(*v, spatial[axis], strides[axis])).collect())
+        .collect();
+    let lengths: Vec<usize> = axes.iter().map(Vec::len).collect();
+    let n: usize = lengths.iter().product();
+    let mut out = Array2::<f64>::zeros((n, components));
+    let mut taps = vec![[0usize; 2]; dim];
+    let mut weights = vec![[0f64; 2]; dim];
+    let mut at = vec![0usize; dim];
+    for row in 0..n {
+        for axis in 0..dim {
+            (taps[axis], weights[axis]) = found[axis][at[axis]];
+        }
+        add_corners(out.row_mut(row), &taps, &weights, values, plane);
+        count_up(&mut at, &lengths);
+    }
+    Ok(out)
+}
+
+/// One axis of a multilinear sample at `coordinate`, clamped to the axis's
+/// `extent` samples: its two taps, as offsets `stride` apart a sample into
+/// the C-order values, and their weights.
+fn linear_axis(coordinate: f64, extent: usize, stride: usize) -> ([usize; 2], [f64; 2]) {
+    let extent = extent as i64;
+    let clamped = coordinate.max(0.0).min(extent as f64 - 1.0);
+    // `clamped` is at least 0, where truncating is the floor.
+    let b = (clamped as i64).min((extent - 2).max(0));
+    let frac = clamped - b as f64;
+    let mut taps = [0usize; 2];
+    for (offset, tap) in taps.iter_mut().enumerate() {
+        *tap = (b + offset as i64).min(extent - 1).max(0) as usize * stride;
+    }
+    (taps, [1.0 - frac, frac])
+}
+
+/// Add each corner's term to `sums`, one a component: the corner's weight is
+/// its axes' weights multiplied in axis order, as the whole computation did a
+/// corner.
+fn add_corners(
+    mut sums: ndarray::ArrayViewMut1<f64>,
+    taps: &[[usize; 2]],
+    weights: &[[f64; 2]],
+    values: &[f64],
+    plane: usize,
+) {
+    for corner in 0..(1usize << taps.len()) {
+        let mut weight = weights[0][corner & 1];
+        let mut at = taps[0][corner & 1];
+        for axis in 1..taps.len() {
+            let bit = (corner >> axis) & 1;
+            weight *= weights[axis][bit];
+            at += taps[axis][bit];
+        }
+        for (c, sum) in sums.iter_mut().enumerate() {
+            *sum += weight * values[c * plane + at];
+        }
+    }
+}
+
+/// The C-order strides, in elements, of an array of `shape`.
+pub(crate) fn c_strides(shape: &[usize]) -> Vec<usize> {
+    let mut strides = vec![1usize; shape.len()];
+    for axis in (0..shape.len().saturating_sub(1)).rev() {
+        strides[axis] = strides[axis + 1] * shape[axis + 1];
+    }
+    strides
+}
+
+/// The next of the C-order positions in a product of axes `lengths` long.
+pub(crate) fn count_up(at: &mut [usize], lengths: &[usize]) {
+    for k in (0..at.len()).rev() {
+        at[k] += 1;
+        if at[k] < lengths[k] {
+            return;
+        }
+        at[k] = 0;
+    }
+}
+
+/// Refuse `axes` that are not one list of coordinates per spatial axis.
+fn check_axes(spatial: &[usize], axes: &[Vec<f64>]) -> Result<()> {
+    if axes.len() != spatial.len() {
+        return Err(Error::Value(format!(
+            "points have {} coordinate(s) and the field {} spatial axes; each point needs one per axis",
+            axes.len(),
+            spatial.len()
+        )));
+    }
+    Ok(())
 }
 
 // -- cubic: SciPy's `map_coordinates(order=3)` -------------------------------------
@@ -287,63 +383,103 @@ fn mirror_index(idx: i64, len: i64) -> i64 {
 }
 
 /// Interpolate one prefiltered component at `(N, S)` coordinates.
+///
+/// Each point's footprint is 4 taps an axis: the taps' offsets into the
+/// C-order coefficients are worked out once an axis, and the 4**S terms
+/// summed in C order (last axis fastest), each the coefficient times its
+/// axes' weights in axis order --- the arithmetic, in its order, of reading
+/// every term through a full index.
 fn spline_interpolate(coeffs: &ArrayD<f64>, coords: &Array2<f64>, boundary: Boundary, npad: usize) -> Vec<f64> {
     let dim = coeffs.ndim();
     let dims: Vec<i64> = coeffs.shape().iter().map(|n| *n as i64).collect();
-    let filter_size = 4usize.pow(dim as u32);
+    let coeffs = coeffs.as_standard_layout();
+    let values = coeffs.as_slice().expect("standard layout");
+    let strides = c_strides(coeffs.shape());
     let mut out = Vec::with_capacity(coords.nrows());
-    let mut starts = vec![0i64; dim];
     let mut weights = vec![[0.0f64; 4]; dim];
-    let mut idx = vec![0usize; dim];
+    let mut taps = vec![[0usize; 4]; dim];
     let mut digits = vec![0usize; dim];
     for point in coords.outer_iter() {
         let mut constant = false;
         for axis in 0..dim {
-            let mut cc = point[axis] + npad as f64;
-            if boundary == Boundary::Constant && (cc < 0.0 || cc > (dims[axis] - 1) as f64) {
-                cc = -1.0;
-            }
-            if cc > -1.0 || boundary == Boundary::Nearest {
-                starts[axis] = cc.floor() as i64 - 1;
-                weights[axis] = cubic_weights(cc);
-            } else {
-                constant = true;
-                break;
+            match cubic_axis(point[axis], dims[axis], strides[axis], boundary, npad) {
+                Some(found) => (taps[axis], weights[axis]) = found,
+                None => {
+                    constant = true;
+                    break;
+                }
             }
         }
-        if constant {
-            out.push(0.0);
-            continue;
+        out.push(if constant { 0.0 } else { spline_sum(values, &taps, &weights, &mut digits) });
+    }
+    out
+}
+
+/// One axis's four taps, as offsets into the C-order coefficients, and their
+/// weights.
+type CubicAxis = ([usize; 4], [f64; 4]);
+
+/// One axis of a cubic sample at `coordinate`: its four taps, as offsets
+/// `stride` apart a sample into the C-order coefficients of an axis `extent`
+/// long (mirrored or clamped past its ends), and their weights; `None` where
+/// the constant boundary gives the point no value.
+fn cubic_axis(coordinate: f64, extent: i64, stride: usize, boundary: Boundary, npad: usize) -> Option<CubicAxis> {
+    let mut cc = coordinate + npad as f64;
+    if boundary == Boundary::Constant && (cc < 0.0 || cc > (extent - 1) as f64) {
+        cc = -1.0;
+    }
+    if !(cc > -1.0 || boundary == Boundary::Nearest) {
+        return None;
+    }
+    let start = cc.floor() as i64 - 1;
+    let mut taps = [0usize; 4];
+    for (digit, tap) in taps.iter_mut().enumerate() {
+        let i = start + digit as i64;
+        let mapped = if i < 0 || i >= extent {
+            match boundary {
+                Boundary::Constant => mirror_index(i, extent),
+                Boundary::Nearest => i.clamp(0, extent - 1),
+            }
+        } else {
+            i
+        };
+        *tap = mapped as usize * stride;
+    }
+    Some((taps, cubic_weights(cc)))
+}
+
+/// A point's 4**S terms summed in C order (last axis fastest), each the
+/// coefficient times its axes' weights in axis order.
+fn spline_sum(values: &[f64], taps: &[[usize; 4]], weights: &[[f64; 4]], digits: &mut [usize]) -> f64 {
+    let dim = taps.len();
+    let mut t = 0.0;
+    if dim == 3 {
+        let ([ta, tb, tc], [wa, wb, wc]) = ([taps[0], taps[1], taps[2]], [weights[0], weights[1], weights[2]]);
+        for a in 0..4 {
+            for b in 0..4 {
+                for c in 0..4 {
+                    t += values[ta[a] + tb[b] + tc[c]] * wa[a] * wb[b] * wc[c];
+                }
+            }
         }
-        let mut t = 0.0;
-        for h in 0..filter_size {
-            // Odometer over the 4**S footprint, last axis fastest.
-            let mut rest = h;
-            for axis in (0..dim).rev() {
-                digits[axis] = rest % 4;
-                rest /= 4;
-            }
-            for axis in 0..dim {
-                let i = starts[axis] + digits[axis] as i64;
-                let mapped = if i < 0 || i >= dims[axis] {
-                    match boundary {
-                        Boundary::Constant => mirror_index(i, dims[axis]),
-                        Boundary::Nearest => i.clamp(0, dims[axis] - 1),
-                    }
-                } else {
-                    i
-                };
-                idx[axis] = mapped as usize;
-            }
-            let mut coeff = coeffs[IxDyn(&idx)];
+    } else {
+        digits.fill(0);
+        for _ in 0..4usize.pow(dim as u32) {
+            let mut coeff = values[(0..dim).map(|axis| taps[axis][digits[axis]]).sum::<usize>()];
             for axis in 0..dim {
                 coeff *= weights[axis][digits[axis]];
             }
             t += coeff;
+            for axis in (0..dim).rev() {
+                digits[axis] += 1;
+                if digits[axis] < 4 {
+                    break;
+                }
+                digits[axis] = 0;
+            }
         }
-        out.push(t);
     }
-    out
+    t
 }
 
 /// Cubic interpolation of `(C, *spatial)` data at `(N, S)` continuous indices,
@@ -446,6 +582,78 @@ impl CubicCoefficients {
             let coeffs = &self.planes[*component];
             for (row, v) in spline_interpolate(coeffs, &clamped, self.boundary, self.npad).into_iter().enumerate() {
                 out[[row, c]] = if self.extrapolation == "zero" && !inside[row] { 0.0 } else { v };
+            }
+        }
+        Ok(out)
+    }
+
+    /// [`CubicCoefficients::sample_components`] at the C-order product of
+    /// `axes`, as [`linear_sample_axes`] takes its points: each axis's taps
+    /// and weights are worked out once a coordinate, and every sum is
+    /// [`spline_interpolate`]'s, term by term.
+    pub(crate) fn sample_components_axes(&self, axes: &[Vec<f64>], components: &[usize]) -> Result<Array2<f64>> {
+        let spatial = &self.spatial;
+        check_axes(spatial, axes)?;
+        let lengths: Vec<usize> = axes.iter().map(Vec::len).collect();
+        let n: usize = lengths.iter().product();
+        let dim = spatial.len();
+        // Whether each coordinate lies within its axis's extent, edges
+        // included: a point is inside where all of its coordinates are.
+        let within: Vec<Vec<bool>> = axes
+            .iter()
+            .zip(spatial)
+            .map(|(coords, m)| coords.iter().map(|v| *v >= -0.5 && *v <= *m as f64 - 0.5).collect())
+            .collect();
+        let mut inside = Vec::with_capacity(n);
+        let mut at = vec![0usize; dim];
+        for _ in 0..n {
+            inside.push((0..dim).all(|axis| within[axis][at[axis]]));
+            count_up(&mut at, &lengths);
+        }
+        if self.extrapolation == "error" {
+            refuse_outside(&inside)?;
+        }
+        let mut out = Array2::<f64>::zeros((n, components.len()));
+        let Some(first) = self.planes.first() else { return Ok(out) };
+        let dims: Vec<i64> = first.shape().iter().map(|n| *n as i64).collect();
+        let strides = c_strides(first.shape());
+        let found: Vec<Vec<Option<CubicAxis>>> = axes
+            .iter()
+            .enumerate()
+            .map(|(axis, coords)| {
+                coords
+                    .iter()
+                    .map(|v| {
+                        let clamped = match self.boundary {
+                            Boundary::Constant => v.clamp(0.0, (spatial[axis] as f64 - 1.0).max(0.0)),
+                            Boundary::Nearest => v.clamp(-EXACT_INTEGER, EXACT_INTEGER),
+                        };
+                        cubic_axis(clamped, dims[axis], strides[axis], self.boundary, self.npad)
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut taps = vec![[0usize; 4]; dim];
+        let mut weights = vec![[0.0f64; 4]; dim];
+        let mut digits = vec![0usize; dim];
+        for (c, component) in components.iter().enumerate() {
+            let coeffs = self.planes[*component].as_standard_layout();
+            let values = coeffs.as_slice().expect("standard layout");
+            at.fill(0);
+            for row in 0..n {
+                let mut constant = false;
+                for axis in 0..dim {
+                    match found[axis][at[axis]] {
+                        Some(tap) => (taps[axis], weights[axis]) = tap,
+                        None => {
+                            constant = true;
+                            break;
+                        }
+                    }
+                }
+                let v = if constant { 0.0 } else { spline_sum(values, &taps, &weights, &mut digits) };
+                out[[row, c]] = if self.extrapolation == "zero" && !inside[row] { 0.0 } else { v };
+                count_up(&mut at, &lengths);
             }
         }
         Ok(out)

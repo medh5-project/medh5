@@ -1910,14 +1910,15 @@ class TestDistribution:
         (tmp_path / "corpus").mkdir()
         write_sample(tmp_path / "corpus" / "case.medh5")
         assert damaged.main([binary, str(tmp_path / "corpus"), "--runs", "6"]) == 0
-        # The shapes of 2.0.2's denial-of-service bugs, and the global heap
-        # HDF5 2.2.0 never left (2.2.1), as the binary writes them, each
-        # reported as an error within bounds; a valid file is not.
+        # The shapes of 2.0.2's denial-of-service bugs, the global heap HDF5
+        # 2.2.0 never left (2.2.1) and the driver info block it read 4 GiB of
+        # (2.2.2), as the binary writes them, each reported as an error within
+        # bounds; a valid file is not.
         hostile = tmp_path / "robustness"
         subprocess.run(
             [binary, "conformance", "build", "--robustness", str(hostile)], check=True
         )
-        assert len(list(hostile.glob("*.medh5"))) == 5
+        assert len(list(hostile.glob("*.medh5"))) == 6
         corpus = [binary, str(tmp_path / "corpus"), "--runs", "1"]
         assert damaged.main([*corpus, "--structural", str(hostile)]) == 0
         # A valid file is not an error.  (What follows the colon is the

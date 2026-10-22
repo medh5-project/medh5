@@ -21,7 +21,9 @@ use indexmap::IndexMap;
 use ndarray::{Array2, ArrayD, IxDyn};
 use serde_json::{json, Value};
 
-use super::{blocks, linear_sample, unit_scale, Body, Mapping, ResamplePlan, Transform};
+use super::{
+    block_indices, blocks, c_strides, linear_sample, step, unit_scale, Body, Mapping, ResamplePlan, Transform,
+};
 use crate::annotations::encode::{encode_instances, encode_probmap, InstanceInput};
 use crate::annotations::header::AnnotationHeader;
 use crate::annotations::payload::{Payload, PayloadData};
@@ -770,20 +772,64 @@ impl<'a> Nearest<'a> {
         let dims: Vec<usize> = block.iter().map(|(a, b)| b - a).collect();
         for part in blocks(&dims, &block_shape(&dims)) {
             let within: Vec<(usize, usize)> = part.iter().zip(block).map(|((a, b), (o, _))| (a + o, b + o)).collect();
-            let (indices, _) = block_indices(&within);
-            let points = self.mapping.map(&indices)?;
-            for (row, point) in points.outer_iter().enumerate() {
-                let local = indices.row(row).into_iter().zip(block).map(|(v, (o, _))| *v as usize - o);
-                visit(flat_index(local, &dims), self.source_voxel(point));
+            if let Some(voxels) = self.axis_voxels(&within)? {
+                // The part's voxels in C order, each the sum of its axes'.
+                let mut local: Vec<usize> = part.iter().map(|(a, _)| *a).collect();
+                let n: usize = part.iter().map(|(a, b)| b - a).product();
+                for _ in 0..n {
+                    let source = voxels
+                        .iter()
+                        .zip(&local)
+                        .zip(&part)
+                        .try_fold(0, |flat, ((axis, i), (a, _))| axis[i - a].map(|v| flat + v));
+                    visit(flat_index(local.iter().copied(), &dims), source);
+                    step(&mut local, &part);
+                }
+                continue;
+            }
+            let points = self.mapping.map(&block_indices(&within))?;
+            // The part's voxels in C order, as the points are: where each
+            // lies in the block, counted up rather than read back from the
+            // indices.
+            let mut local: Vec<usize> = part.iter().map(|(a, _)| *a).collect();
+            for point in points.outer_iter() {
+                visit(flat_index(local.iter().copied(), &dims), self.source_voxel(point));
+                step(&mut local, &part);
             }
         }
         Ok(())
     }
 
+    /// Where the mapping moves each axis alone ([`Mapping::axes`]), the
+    /// source voxel nearest each coordinate of `block`'s axes, times the
+    /// source's stride along the axis, and `None` where the coordinate is
+    /// outside its axis: a voxel's flat index is the sum of its axes', as
+    /// [`Nearest::source_voxel`] works it out from the voxel's row.
+    fn axis_voxels(&self, block: &[(usize, usize)]) -> Result<Option<Vec<Vec<Option<usize>>>>> {
+        let Some(axes) = self.mapping.axes(block)? else { return Ok(None) };
+        let strides = c_strides(&self.source);
+        Ok(Some(
+            axes.iter()
+                .enumerate()
+                .map(|(k, coords)| {
+                    let m = self.source[k];
+                    coords
+                        .iter()
+                        .map(|v| {
+                            (*v >= -0.5 && *v <= m as f64 - 0.5).then(|| ((v + 0.5) as usize).min(m - 1) * strides[k])
+                        })
+                        .collect()
+                })
+                .collect(),
+        ))
+    }
+
     /// The flat index of the source voxel nearest `point`, when it is inside.
     fn source_voxel(&self, point: ndarray::ArrayView1<f64>) -> Option<usize> {
         inside(point, &self.source).then(|| {
-            let voxel = point.iter().zip(&self.source).map(|(v, m)| ((v + 0.5).floor().max(0.0) as usize).min(m - 1));
+            // The cast truncates, the floor at and above zero, and saturates
+            // to 0 below it: the floor, clamped at 0, without the call.
+            let voxel = point.iter().zip(&self.source).map(|(v, m)| ((v + 0.5) as usize).min(m - 1));
             flat_index(voxel, &self.source)
         })
     }
@@ -792,11 +838,25 @@ impl<'a> Nearest<'a> {
     /// indices, a block at a time; `source` is `None` outside the source.
     fn each(&self, mut visit: impl FnMut(usize, Option<usize>)) -> Result<()> {
         for block in blocks(&self.shape, &block_shape(&self.shape)) {
-            let (indices, _) = block_indices(&block);
-            let points = self.mapping.map(&indices)?;
-            for (row, point) in points.outer_iter().enumerate() {
-                let t = flat_index(indices.row(row).iter().map(|v| *v as usize), &self.shape);
-                visit(t, self.source_voxel(point));
+            if let Some(voxels) = self.axis_voxels(&block)? {
+                let mut at: Vec<usize> = block.iter().map(|(a, _)| *a).collect();
+                let n: usize = block.iter().map(|(a, b)| b - a).product();
+                for _ in 0..n {
+                    let source = voxels
+                        .iter()
+                        .zip(&at)
+                        .zip(&block)
+                        .try_fold(0, |flat, ((axis, i), (a, _))| axis[i - a].map(|v| flat + v));
+                    visit(flat_index(at.iter().copied(), &self.shape), source);
+                    step(&mut at, &block);
+                }
+                continue;
+            }
+            let points = self.mapping.map(&block_indices(&block))?;
+            let mut at: Vec<usize> = block.iter().map(|(a, _)| *a).collect();
+            for point in points.outer_iter() {
+                visit(flat_index(at.iter().copied(), &self.shape), self.source_voxel(point));
+                step(&mut at, &block);
             }
         }
         Ok(())
@@ -813,22 +873,6 @@ fn block_shape(shape: &[usize]) -> Vec<usize> {
     block
 }
 
-/// The `(n, S)` target indices of a block, in C order.
-fn block_indices(block: &[(usize, usize)]) -> (Array2<f64>, Vec<usize>) {
-    let dims: Vec<usize> = block.iter().map(|(a, b)| b - a).collect();
-    let s = dims.len();
-    let n: usize = dims.iter().product();
-    let mut indices = Array2::<f64>::zeros((n, s));
-    for (row, mut point) in indices.outer_iter_mut().enumerate() {
-        let mut rest = row;
-        for k in (0..s).rev() {
-            point[k] = (block[k].0 + rest % dims[k]) as f64;
-            rest /= dims[k];
-        }
-    }
-    (indices, dims)
-}
-
 /// The flat C-order index of `at` in `shape`.
 fn flat_index(at: impl Iterator<Item = usize>, shape: &[usize]) -> usize {
     at.zip(shape).fold(0, |flat, (i, n)| flat * n + i)
@@ -839,10 +883,24 @@ fn inside(point: ndarray::ArrayView1<f64>, shape: &[usize]) -> bool {
 }
 
 /// Whether any target voxel lies outside the source, stopping at the first.
+///
+/// An affine mapping answers from the target's corners.  Each source
+/// coordinate it computes is a chain of rounded products and sums, and
+/// rounding is monotone, so along every target axis the coordinate moves one
+/// way only; its least and greatest over the target are at corners, mapped
+/// by the same arithmetic as every other voxel.
 fn any_outside(mapping: &Mapping, source: &[usize], target: &[usize]) -> Result<bool> {
+    if target.contains(&0) {
+        return Ok(false);
+    }
+    if let Mapping::Affine(_) = mapping {
+        let s = target.len();
+        let corners =
+            Array2::from_shape_fn((1 << s, s), |(c, k)| if (c >> k) & 1 == 1 { (target[k] - 1) as f64 } else { 0.0 });
+        return Ok(mapping.map(&corners)?.outer_iter().any(|point| !inside(point, source)));
+    }
     for block in blocks(target, &block_shape(target)) {
-        let (indices, _) = block_indices(&block);
-        if mapping.map(&indices)?.outer_iter().any(|point| !inside(point, source)) {
+        if mapping.map(&block_indices(&block))?.outer_iter().any(|point| !inside(point, source)) {
             return Ok(true);
         }
     }
@@ -1096,19 +1154,44 @@ impl DenseGather {
             let flat = a.as_slice().expect("standard layout");
             let per_lane = flat.len() / lanes;
             let outside = Element::from_f64(if self.widen { 1.0 } else { 0.0 });
+            let groups: Vec<Vec<(usize, usize)>> = blocks(&self.leading, &leading_chunk).collect();
             for block in blocks(&near.shape, &chunk) {
                 let dims: Vec<usize> = block.iter().map(|(a, b)| b - a).collect();
                 let voxels: usize = dims.iter().product();
-                let mut source = vec![None; voxels];
-                near.block(&block, |row, at| source[row] = at)?;
-                for group in blocks(&self.leading, &leading_chunk) {
-                    let group_lanes = super::lane_indices(&self.leading, &group);
+                // One group of planes (no stack, or a stack chunked whole) is
+                // gathered as it is mapped.  A stack chunked a plane deep keeps
+                // each voxel's source voxel, `usize::MAX` outside, for its
+                // groups to share.
+                let source: Option<Vec<usize>> = if groups.len() == 1 {
+                    None
+                } else {
+                    let mut source = vec![usize::MAX; voxels];
+                    near.block(&block, |row, at| {
+                        if let Some(at) = at {
+                            source[row] = at;
+                        }
+                    })?;
+                    Some(source)
+                };
+                for group in &groups {
+                    let group_lanes = super::lane_indices(&self.leading, group);
                     let mut out = vec![outside; group_lanes.len() * voxels];
-                    for (k, lane) in group_lanes.iter().enumerate() {
-                        let plane = &flat[lane * per_lane..(lane + 1) * per_lane];
-                        for (to, from) in out[k * voxels..(k + 1) * voxels].iter_mut().zip(&source) {
-                            if let Some(i) = from {
-                                *to = plane[*i];
+                    let mut gather = |row: usize, at: usize| {
+                        for (k, lane) in group_lanes.iter().enumerate() {
+                            out[k * voxels + row] = flat[lane * per_lane + at];
+                        }
+                    };
+                    match &source {
+                        None => near.block(&block, |row, at| {
+                            if let Some(at) = at {
+                                gather(row, at);
+                            }
+                        })?,
+                        Some(source) => {
+                            for (row, at) in source.iter().enumerate() {
+                                if *at != usize::MAX {
+                                    gather(row, *at);
+                                }
                             }
                         }
                     }
@@ -1167,7 +1250,7 @@ fn probmap_payload(
     let mut planes = vec![vec![0.0f64; voxels]; classes.len()];
     let mut filled = 0u64;
     for block in blocks(&target_spatial, &block_shape(&target_spatial)) {
-        let (indices, _) = block_indices(&block);
+        let indices = block_indices(&block);
         let points = mapping.map(&indices)?;
         let rows: Vec<usize> = (0..points.nrows()).filter(|r| inside(points.row(*r), &source)).collect();
         filled += (points.nrows() - rows.len()) as u64;
