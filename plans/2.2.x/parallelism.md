@@ -188,6 +188,14 @@ exception allows ([D6](#decisions-the-maintainer)).
     shared hold while it waits for HDF5's lock finishes, and the fork goes
     ahead after it. A call with one thread starts no worker and takes no
     hold.
+  - **The child gets the lock fresh.** A thread that asks for a shared hold
+    between the barrier's exclusive hold and the `fork` is queued in the
+    lock's state, and the child inherits that queue without the thread. So
+    the lock is a `parking_lot` lock, as HDF5's is, and `release_in_child`
+    unparks every key it parks under (`parking_lot`'s `RwLock` parks
+    readers and writers apart) before letting it go, as it does for HDF5's
+    lock today. A Rust test queues a contender for a shared hold behind the
+    exclusive hold, forks, and has the child run a threaded call to the end.
   - **Only the calling thread talks to HDF5.** Workers get bytes and return
     bytes. The caller does every HDF5 call, under `h5::locked`, in a fixed
     order, so the file's layout does not depend on which worker finished
