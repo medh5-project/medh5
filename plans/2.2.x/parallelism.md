@@ -176,8 +176,18 @@ exception allows ([D6](#decisions-the-maintainer)).
     the list to these names.
   - **Threads live inside one call.** Each call that uses threads starts them
     (`std::thread::scope`) and joins them before it returns, so no thread
-    outlives a call and nothing is left running across a `fork`. There is no
-    persistent pool and no new dependency.
+    outlives a call. There is no persistent pool and no new dependency.
+  - **A `fork` waits for every worker.** Joining before return is not
+    enough when another thread forks during the call: the child would
+    inherit allocator or C-Blosc2 locks held by workers it does not have.
+    So the call holds a shared hold on a new lock, the parallel sections,
+    from before its first worker starts until its last has joined, and
+    `h5/fork.rs` adds that lock to its `LOCKS`, taken exclusively in the
+    barrier as the HDF5 and checked-file locks are. The barrier takes each
+    lock only when it is free and waits otherwise, so a call that holds its
+    shared hold while it waits for HDF5's lock finishes, and the fork goes
+    ahead after it. A call with one thread starts no worker and takes no
+    hold.
   - **Only the calling thread talks to HDF5.** Workers get bytes and return
     bytes. The caller does every HDF5 call, under `h5::locked`, in a fixed
     order, so the file's layout does not depend on which worker finished
@@ -186,7 +196,10 @@ exception allows ([D6](#decisions-the-maintainer)).
     thread in each `DataLoader` worker, so a parent's setting is not
     multiplied by the worker count.
 - **Tests.** Precedence; the refusals; the environment read once; one thread
-  starts no thread (a Rust test counts them); `worker_init_fn` resets it;
+  starts no thread (a Rust test counts them) and takes no hold; the fork
+  barrier waits for a call's workers (a Rust test forks while a call that
+  holds the parallel sections waits on HDF5's lock); `worker_init_fn` resets
+  it;
   `public_api.py compare` under `patch` passes a listed addition and fails an
   unlisted one.
 - **Documentation.** `docs/explanation/concurrency.md` gains "Threads inside
@@ -290,8 +303,10 @@ exception allows ([D6](#decisions-the-maintainer)).
   - `recompress --rechunk` of a source whose chunks are not the canonical
     ones (smaller, larger, and crossing the new boundaries), and of a
     contiguous source, gives what it gives today, at 1 and 4 threads.
-  - A `fork` from another thread during a threaded write leaves a child that
-    opens and reads files.
+  - A `fork` from another thread during a threaded write, and during a
+    threaded digest, waits until the call's workers have joined, and leaves
+    a child that opens, reads and writes files; on the free-threaded build
+    too.
 - **Changelog.** Added (`--threads`), area `cli`; Performance, area `writer`.
 - **Done when.**
   - P22-10's rows for these commands are measured again at 1, 2 and 4
@@ -455,7 +470,7 @@ from 2.2.1's `p22/measure` and `p22/threads`, which are taken.
 | File | Owner | Others touch it for |
 |---|---|---|
 | `crates/medh5/src/parallel.rs` (new), `medh5/__init__.py`'s thread setting, `.github/api-exceptions.txt` (new), `.github/scripts/public_api.py` | P22-11 | P22-14 (its flags, if D7 takes them) |
-| `crates/medh5/src/h5/**` (a chunk writer beside `window.rs`) | P22-12 | P22-13 (raw chunk reads for hashing) |
+| `crates/medh5/src/h5/**` (a chunk writer beside `window.rs`) | P22-12 | P22-11 (the parallel sections in `h5/fork.rs`), P22-13 (raw chunk reads for hashing) |
 | `crates/medh5/src/transforms/resample*`, `storage/recompress.rs`, `convert/nifti/**` | P22-12 | — |
 | `crates/medh5/src/sample/writer.rs` | P22-12 (rewritten datasets) | P22-13 (`commit`, `stamp_in`) |
 | `crates/medh5/src/integrity/**` | P22-13 | — |
