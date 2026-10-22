@@ -149,7 +149,7 @@ pub struct Annotation {
 pub(crate) type ClassVisitor<'a> = dyn FnMut(usize, usize, &[usize], usize) + 'a;
 
 fn cached<T>(cell: &OnceLock<Result<T>>, init: impl FnOnce() -> Result<T>) -> Result<&T> {
-    match cell.get_or_init(init) {
+    match crate::h5::once(cell, init) {
         Ok(v) => Ok(v),
         Err(e) => Err(e.clone()),
     }

@@ -109,7 +109,7 @@ fn image_grids(location: &hdf5::Location) -> Result<Vec<String>> {
 /// before the close is no answer from a file that is gone.
 fn cached<'a, T>(root: &hdf5::Group, cell: &'a OnceLock<Result<T>>, init: impl FnOnce() -> Result<T>) -> Result<&'a T> {
     crate::h5::alive(root)?;
-    match cell.get_or_init(init) {
+    match crate::h5::once(cell, init) {
         Ok(v) => Ok(v),
         Err(e) => Err(e.clone()),
     }
@@ -1109,6 +1109,11 @@ pub fn require_major(root: &hdf5::Location, path: &Path) -> Result<String> {
 
 /// Open a `.medh5` sample file, read-only.
 pub fn open_sample(path: &Path) -> Result<Sample> {
+    // One take of HDF5's lock for the open's calls ([`crate::h5::once`]).
+    crate::h5::locked(|| open_sample_locked(path))
+}
+
+fn open_sample_locked(path: &Path) -> Result<Sample> {
     let handle = file::open_read(path)?;
     require_major(&handle, path)?;
     let kind = attrs::get_str(&handle, "medh5_kind")?.unwrap_or_else(|| "sample".into());
