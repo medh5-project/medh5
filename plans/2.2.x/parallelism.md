@@ -217,6 +217,17 @@ exception allows ([D6](#decisions-the-maintainer)).
     which both the filter and the chunk writer call. The change is a patch to
     the vendored filter, listed in its `PATCHES.md`
     (`crates/medh5-sys/vendor/hdf5-blosc2/`) as the others are.
+  - **C-Blosc2's process state is touched only by the caller.**
+    `blosc2_init` is not safe from two threads at once, so the caller starts
+    the library through `medh5-sys`'s `start_blosc2` (a `std::sync::Once`,
+    which the filter's registration and the window reader already call)
+    before any worker starts, and the entry point calls no `blosc2_init`.
+    Each call compresses with its own context (`blosc2_create_cctx`, as the
+    filter does), with Blosc2's own thread count at one, and never through
+    the global context or a `blosc1_*` setter. Workers that decompress for
+    P22-13 use the window reader's path, which follows the same rules. A
+    test compresses from four threads as the first Blosc2 use in a fresh
+    process.
   - Anything else goes through `H5Dwrite` as now: `portable`, a second
     filter, a type HDF5 would convert, a write that covers part of a chunk.
     "HDF5's bytes or HDF5's write", as the reader's invariant says.
