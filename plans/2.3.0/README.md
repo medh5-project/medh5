@@ -354,8 +354,8 @@ Under [D2](#decisions-the-maintainer) as proposed.
       pairs. An import that dropped a field keeps its content but not its id
       (both values with `both_values` choosing one; a unit on a row with no
       numeric value), because no export can restore what the event no longer
-      holds. The importer reports both cases already, so the test tells them
-      apart from its report, not from a list kept beside it.
+      holds. The importer counts both cases in its report; the test tells
+      which events they are from each event's source row.
     - An event the importer cannot produce (an interval that is not a day
       span, an availability that is a range rather than one time, a revision
       chain) is not written at all, in any form the importer would read as
