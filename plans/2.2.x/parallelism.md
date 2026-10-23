@@ -383,6 +383,13 @@ exception allows ([D6](#decisions-the-maintainer)).
     returns. A writer used across calls (Python's `amend()`, then edits,
     then `commit()`) hashes what it inherited inside `commit`, in parallel,
     and nothing runs between the calls.
+  - **An early hash is only ever of bytes nothing will change.** The
+    overlapped pass reads the *source* file, which the call never writes,
+    so its result answers E701 for the source as it stands. The writer
+    records every path the call writes, replaces or deletes (`scrub`'s
+    `rewrite_strings`, `fix`, a re-encoded annotation). At commit, an early
+    digest is used only for a path the call never wrote; every written path
+    is hashed after its last write, from the output, as today.
   - Users: `commit`, `verify`, `validate --level integrity`,
     `refuse_failed_digests` and `recompress`'s output check. `verify` and
     `validate` gain `--threads N` (D6).
@@ -390,6 +397,9 @@ exception allows ([D6](#decisions-the-maintainer)).
   - The same digests at 1 and 4 threads, for every dtype, strings, compound
     types, and datasets whose slabs fall on and across chunk edges.
   - The E701 refusal at any thread count.
+  - A `scrub` that rewrites inherited strings, a `fix` that rewrites a
+    dataset, and an amendment that replaces one, each at 1 and 4 threads:
+    the same digests and `content_id` as the sequential commit.
   - `verify`'s report the same, line for line, at 1 and 4 threads.
   - `validate --level integrity`'s findings the same, in the same order, at
     1 and 4 threads, on samples with probability maps that fail E404 and
