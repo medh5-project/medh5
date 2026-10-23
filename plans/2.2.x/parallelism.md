@@ -479,9 +479,22 @@ merge after P22-11, whose allowed list they join.
   - **The flags.** Add `--workers` to each command that measured at least
     1.3 times faster, and list them in `.github/api-exceptions.txt` beside
     P22-11's names, with D7. A command below 1.3 gains no flag, and the
-    performance guide gives its number. Keep `workers.rs`'s rules: output in input order,
-    byte for byte the one-process run's; a writing command's paths that name
-    one file go to one worker; a worker that dies fails only its unit.
+    performance guide gives its number. Keep `workers.rs`'s rules: output
+    in input order, byte for byte the one-process run's; a worker that dies
+    fails only its unit.
+  - **Units that touch one file run in one worker, in input order.** Today
+    `workers.rs` `units` groups a writing command's inputs that name one
+    file. A command gaining the flag widens that to every file a unit
+    writes: before any worker starts, the parent resolves each unit's
+    destinations as the command would (`scrub --out-dir`'s name from a
+    source's basename or pseudonymised sample id, `migrate`'s and
+    `to-nnunet`'s output files), with the command's own checks of the whole
+    invocation, and units that share an input or a destination go to one
+    worker in input order. Two sources that derive one destination then
+    meet the same `exists()` refusal or replacement, in the same order, as
+    in one process; no two workers race for a file. Where a destination
+    cannot be known before the unit runs, the command does not gain the
+    flag, and the pull request says why.
   - **A worker gets a whole unit of the command, never a bare path.** The
     unit is what the command computes without looking at another, and
     anything shared across the cohort is computed once, by the parent,
@@ -510,10 +523,13 @@ merge after P22-11, whose allowed list they join.
 
     A command whose unit cannot be cut this way from its code does not gain
     the flag, and the pull request says why.
-- **Tests.** The recipe runs (`test_docs_python.py`). For each command that gains one, the text, `--json` and the exit code the
-  same at 1 and 4 workers, as the existing commands' tests do, on a cohort
-  where a unit spans several files (a subject's legacy files for `migrate`)
-  and the shared state matters (labels a file lacks, an uneven split), and
+- **Tests.** The recipe runs (`test_docs_python.py`). For each command
+  that gains the flag: the text, `--json` and the exit code the same at 1
+  and 4 workers, as the existing commands' tests do, on a cohort where a
+  unit spans several files (a subject's legacy files for `migrate`), where
+  two units derive one destination (`scrub --apply --out-dir` on two
+  sources with one basename), and where the shared state matters (labels a
+  file lacks, an uneven split); and
   for `augment-cohort`, subjects whose rows span several MEDS shards and
   FHIR bulk files.
 - **Changelog.** Added, area `cli`: each command that gains `--workers`, and
