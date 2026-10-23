@@ -147,6 +147,9 @@ fn release() {
 /// have, and the child's first HDF5 call would wait for it forever.  So they
 /// are taken off the queue first.  The parallel sections queue no thread
 /// (`crate::parallel::Sections`), so letting them go touches no queue.
+///
+/// The command line's runs on other threads end here: the child does not
+/// have those threads, so nothing else would end them.
 fn release_in_child() {
     // SAFETY: only the raw lock's address is used, the key parking_lot
     // queues its waiters under.
@@ -155,6 +158,7 @@ fn release_in_child() {
     // process has; the lock they waited for is held, by this thread.
     unsafe { parking_lot_core::unpark_all(hdf5, parking_lot_core::DEFAULT_UNPARK_TOKEN) };
     release();
+    crate::parallel::end_other_threads_runs();
 }
 
 #[cfg(test)]
@@ -162,6 +166,40 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
+
+    /// `fork`, the child closing every descriptor past stderr before
+    /// anything else.  A file another test has open at the fork is the
+    /// child's too, and HDF5 locks a file it opens: held open by the child,
+    /// the file would stay locked after that test closed it, and its next
+    /// open would be refused.
+    ///
+    /// # Safety
+    ///
+    /// As `libc::fork`'s: the child runs only what is safe after a fork.
+    #[cfg(unix)]
+    pub(crate) unsafe fn fork() -> libc::pid_t {
+        // SAFETY: the caller's child runs only what is safe after a fork.
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            close_inherited();
+        }
+        pid
+    }
+
+    /// Close every descriptor past stderr, in a child just forked.
+    #[cfg(unix)]
+    fn close_inherited() {
+        #[cfg(target_os = "linux")]
+        // SAFETY: closes this process's descriptors from 3 up; none is used again.
+        if unsafe { libc::syscall(libc::SYS_close_range, 3, libc::c_uint::MAX, 0) } == 0 {
+            return;
+        }
+        // SAFETY: as above, one at a time, up to the process's limit.
+        let limit = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+        for fd in 3..limit.clamp(256, 1 << 16) as libc::c_int {
+            unsafe { libc::close(fd) };
+        }
+    }
 
     /// The status of `pid`, a child just forked; one that has not exited
     /// in 20 seconds is killed and fails the test, rather than hanging it.
@@ -241,7 +279,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
             // SAFETY: the child runs a threaded call, which makes no HDF5
             // call, and exits.
-            let pid = unsafe { libc::fork() };
+            let pid = unsafe { fork() };
             if pid == 0 {
                 // SAFETY: an alarm ends a child that waits forever.
                 unsafe { libc::alarm(5) };
@@ -289,7 +327,7 @@ mod tests {
         for _ in 0..40 {
             std::thread::sleep(std::time::Duration::from_millis(1));
             // SAFETY: the child begins and ends a run, and exits.
-            let pid = unsafe { libc::fork() };
+            let pid = unsafe { fork() };
             if pid == 0 {
                 let run = crate::parallel::for_this_run(2).unwrap();
                 let code = i32::from(crate::parallel::threads().ok() != Some(2));
@@ -301,6 +339,46 @@ mod tests {
         stop.store(true, Ordering::SeqCst);
         busy.join().unwrap();
         assert_eq!(failed, 0, "a child could not begin a run");
+    }
+
+    /// A child forked while another thread's run is going has no such run:
+    /// that thread, which would end it, is not in the child.  The run goes
+    /// on in the parent, and a run the forking thread had goes on in both.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_forked_during_another_threads_run_is_not_in_it() {
+        let _serial = crate::parallel::tests::serial();
+        install();
+        let before = crate::parallel::threads().unwrap();
+        let (begun, end) = (mpsc::channel(), mpsc::channel::<()>());
+        let other = std::thread::spawn(move || {
+            let run = crate::parallel::for_this_run(before + 2).unwrap();
+            begun.0.send(()).unwrap();
+            end.1.recv().unwrap();
+            drop(run);
+        });
+        begun.1.recv().unwrap();
+        let mut statuses = Vec::new();
+        for own in [None, Some(before + 1)] {
+            let run = own.map(|n| crate::parallel::for_this_run(n).unwrap());
+            // SAFETY: the child reads the count, begins and ends a run, and exits.
+            let pid = unsafe { fork() };
+            if pid == 0 {
+                let first = crate::parallel::threads().ok() == Some(own.unwrap_or(before));
+                let next = crate::parallel::for_this_run(before + 3).unwrap();
+                let during = crate::parallel::threads().ok() == Some(before + 3);
+                drop(next);
+                let after = crate::parallel::threads().ok() == Some(own.unwrap_or(before));
+                unsafe { libc::_exit(i32::from(!(first && during && after))) };
+            }
+            statuses.push(exit_status(pid));
+            drop(run);
+            assert_eq!(crate::parallel::threads().unwrap(), before + 2, "the parent's run went on");
+        }
+        end.0.send(()).unwrap();
+        other.join().unwrap();
+        assert_eq!(crate::parallel::threads().unwrap(), before);
+        assert_eq!(statuses, [0, 0], "a child kept a run of a thread it does not have");
     }
 
     /// A fork made while a call holds the parallel sections and waits for
@@ -332,7 +410,7 @@ mod tests {
         }
         let fork = std::thread::spawn(|| {
             // SAFETY: the child exits at once.
-            let pid = unsafe { libc::fork() };
+            let pid = unsafe { fork() };
             if pid == 0 {
                 unsafe { libc::_exit(0) };
             }

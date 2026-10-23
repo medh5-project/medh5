@@ -277,9 +277,21 @@ def cli_entries(
     tree: dict[str, Any], path: str = "medh5"
 ) -> Iterator[tuple[str, str, str]]:
     """The command line in `tree`, `medh5._core.cli_command_tree()`'s shape:
-    each command, and each option a command has that `medh5` does not
-    (clap copies a global option into every command)."""
-    inherited = set(tree["options"])
+    each command, and each option a command has that it does not inherit.
+
+    clap copies a global option into every command, and the tree does not
+    say which are global, so an option is taken as inherited when `medh5`
+    and every command under it have it: printed once, under `medh5`.  An
+    option only `medh5` has (`--version`) is not, so a command that takes
+    one of its own by the same spelling still prints it."""
+
+    def everywhere(node: dict[str, Any]) -> set[str]:
+        options = set(node["options"])
+        for child in node["commands"].values():
+            options &= everywhere(child)
+        return options
+
+    inherited = everywhere(tree)
 
     def walk(
         node: dict[str, Any], path: str, top: bool

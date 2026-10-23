@@ -374,22 +374,35 @@ def test_the_command_line_dump_lists_commands_and_their_own_options(
     api: ModuleType,
 ) -> None:
     """clap copies a global option into every command; it prints once, under
-    `medh5`, so a new global option is one addition and not one per command."""
+    `medh5`, so a new global option is one addition and not one per command.
+    An option only `medh5` has is not inherited: a command's own option by
+    the same spelling prints under the command."""
     tree = _tree(
-        ["--threads", "--help"],
-        {"info": _tree(["--json", "--threads", "--help"], {"x": _tree(["--help"])})},
+        ["--threads", "--version", "--help"],
+        {
+            "info": _tree(
+                ["--json", "--version", "--threads", "--help"],
+                {"x": _tree(["--threads", "--help"])},
+            ),
+            "show": _tree(["--threads", "--help"]),
+        },
     )
     assert list(api.cli_entries(tree)) == [
         ("medh5", "command", ""),
         ("medh5 --threads", "option", ""),
+        ("medh5 --version", "option", ""),
         ("medh5 --help", "option", ""),
         ("medh5 info", "command", ""),
         ("medh5 info --json", "option", ""),
+        ("medh5 info --version", "option", ""),
         ("medh5 info x", "command", ""),
+        ("medh5 show", "command", ""),
     ]
     dumped = api.parse(api.dump_cli())
     assert dumped["medh5 --threads"].kind == "option"
+    assert dumped["medh5 --version"].kind == "option"
     assert "medh5 info --threads" not in dumped
+    assert "medh5 info --help" not in dumped
     assert dumped["medh5 convert from-nifti"].kind == "command"
 
 
