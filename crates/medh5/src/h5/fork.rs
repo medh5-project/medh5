@@ -148,8 +148,8 @@ fn release() {
 /// are taken off the queue first.  The parallel sections queue no thread
 /// (`crate::parallel::Sections`), so letting them go touches no queue.
 ///
-/// The command line's runs on other threads end here: the child does not
-/// have those threads, so nothing else would end them.
+/// The command line's runs end here: the child is in none of the parent's
+/// (`crate::parallel::end_runs_in_child`).
 fn release_in_child() {
     // SAFETY: only the raw lock's address is used, the key parking_lot
     // queues its waiters under.
@@ -158,7 +158,7 @@ fn release_in_child() {
     // process has; the lock they waited for is held, by this thread.
     unsafe { parking_lot_core::unpark_all(hdf5, parking_lot_core::DEFAULT_UNPARK_TOKEN) };
     release();
-    crate::parallel::end_other_threads_runs();
+    crate::parallel::end_runs_in_child();
 }
 
 #[cfg(test)]
@@ -341,12 +341,13 @@ mod tests {
         assert_eq!(failed, 0, "a child could not begin a run");
     }
 
-    /// A child forked while another thread's run is going has no such run:
-    /// that thread, which would end it, is not in the child.  The run goes
-    /// on in the parent, and a run the forking thread had goes on in both.
+    /// A forked child is in none of the parent's command line runs: not
+    /// another thread's, which nothing would end there, nor the forking
+    /// thread's, whose count would override what the child sets (a loader's
+    /// worker sets one thread).  The runs go on in the parent.
     #[cfg(unix)]
     #[test]
-    fn a_child_forked_during_another_threads_run_is_not_in_it() {
+    fn a_forked_child_is_in_none_of_the_parents_runs() {
         let _serial = crate::parallel::tests::serial();
         install();
         let before = crate::parallel::threads().unwrap();
@@ -361,15 +362,18 @@ mod tests {
         let mut statuses = Vec::new();
         for own in [None, Some(before + 1)] {
             let run = own.map(|n| crate::parallel::for_this_run(n).unwrap());
-            // SAFETY: the child reads the count, begins and ends a run, and exits.
+            // SAFETY: the child reads and sets the count, begins and ends a
+            // run, and exits.
             let pid = unsafe { fork() };
             if pid == 0 {
-                let first = crate::parallel::threads().ok() == Some(own.unwrap_or(before));
+                let first = crate::parallel::threads().ok() == Some(before);
                 let next = crate::parallel::for_this_run(before + 3).unwrap();
                 let during = crate::parallel::threads().ok() == Some(before + 3);
                 drop(next);
-                let after = crate::parallel::threads().ok() == Some(own.unwrap_or(before));
-                unsafe { libc::_exit(i32::from(!(first && during && after))) };
+                let after = crate::parallel::threads().ok() == Some(before);
+                crate::parallel::set_threads(1).unwrap();
+                let set = crate::parallel::threads().ok() == Some(1);
+                unsafe { libc::_exit(i32::from(!(first && during && after && set))) };
             }
             statuses.push(exit_status(pid));
             drop(run);
@@ -378,7 +382,7 @@ mod tests {
         end.0.send(()).unwrap();
         other.join().unwrap();
         assert_eq!(crate::parallel::threads().unwrap(), before);
-        assert_eq!(statuses, [0, 0], "a child kept a run of a thread it does not have");
+        assert_eq!(statuses, [0, 0], "a child was in a run of its parent's");
     }
 
     /// A fork made while a call holds the parallel sections and waits for

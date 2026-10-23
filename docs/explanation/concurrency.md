@@ -177,7 +177,10 @@ are the parallelism there, and they already fill the cores.
 The command line takes `--threads N` before or after any command name, and passes the count to
 every process it starts. It sits beside `--workers`: `--workers M` runs files in *M* processes, and
 `--threads N` lets each call in each of them use *N* threads, so `--workers 4 --threads 2` can keep
-eight threads busy. A command whose work has no threaded path runs as it did.
+eight threads busy. A command whose work has no threaded path runs as it did. The count is the
+command's own: a process it starts is told it, but a child forked from it, such as a `DataLoader`
+worker of `medh5 bench`, is outside the command and takes its count as any process does, so
+`worker_init_fn`'s one thread holds there too.
 
 ```bash
 medh5 resample case.medh5 --image CT --spacing 1,1,1 --grid-id iso -o iso.medh5 --threads 4
