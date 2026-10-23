@@ -12,8 +12,10 @@ rustdoc JSON of a crate at the baseline release and at this tree (the files
 every public path the new one has and the old one lacks: modules, functions,
 types and their fields, variants and inherent methods, traits and their
 items, constants, statics and macros, reached from the crate root through
-public modules and re-exports, as a caller names them.  Items rustdoc hides
-(`#[doc(hidden)]`) are not in the JSON and are not API.  Under `patch` an
+public modules and re-exports, as a caller names them.  Items marked
+`#[doc(hidden)]` are not API: `cargo semver-checks` builds the JSON with
+them in (`--document-hidden-items`), so the walk skips them, and what only
+they reach.  Under `patch` an
 addition that `.github/api-exceptions.txt` does not list (kind `rust`) fails;
 under `minor` and `major` the additions are listed only.  Standard library
 only.
@@ -24,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from collections.abc import Container
 from pathlib import Path
@@ -34,6 +37,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from public_api import EXCEPTIONS, RELEASE_TYPES, ROOT, exceptions
 
 MEMBERS = ("struct", "enum", "union", "trait")
+HIDDEN = re.compile(r"#\[doc\((?:[^)]*,\s*)?hidden\b")
+
+
+def hidden(item: dict[str, Any]) -> bool:
+    """Whether `item` is `#[doc(hidden)]`: an attribute is the text itself
+    in older formats, `{"other": text}` in newer ones."""
+    for attr in item.get("attrs") or []:
+        texts = attr.values() if isinstance(attr, dict) else [attr]
+        if any(isinstance(t, str) and HIDDEN.search(t) for t in texts):
+            return True
+    return False
 
 
 def items(doc: dict[str, Any]) -> dict[str, str]:
@@ -51,7 +65,7 @@ def items(doc: dict[str, Any]) -> dict[str, str]:
     def visit(id_: Any, path: list[str], name: str | None = None) -> None:
         item = index.get(str(id_))
         # A re-export cycle (`pub use super::*`) would name paths forever.
-        if item is None or len(path) > 16:
+        if item is None or len(path) > 16 or hidden(item):
             return
         (kind, inner), *_ = item["inner"].items()
         if kind == "use":
@@ -118,7 +132,7 @@ def items(doc: dict[str, Any]) -> dict[str, str]:
                 children += body.get("items", [])
         for child_id in children:
             child = index.get(str(child_id))
-            if child is None or not child.get("name"):
+            if child is None or not child.get("name") or hidden(child):
                 continue
             (child_kind, _), *_ = child["inner"].items()
             public = child.get("visibility") == "public" or kind in ("enum", "trait")

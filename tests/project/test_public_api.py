@@ -514,11 +514,17 @@ def _rustdoc(extra: bool = False, version: str = "2.2.2") -> dict:
     }
     if extra:
         index["0"]["inner"]["module"]["items"].append("20")
-        index["20"] = item("parallel", "module", {"items": ["21", "22"]})
+        index["20"] = item("parallel", "module", {"items": ["21", "22", "24"]})
         index["21"] = item("threads", "function", {})
         index["22"] = item("set_threads", "function", {})
-        index["10"]["inner"]["impl"]["items"].append("23")
+        index["10"]["inner"]["impl"]["items"] += ["23", "25"]
         index["23"] = item("spacing", "function", {})
+        # Hidden, as the JSON `cargo semver-checks` builds still holds them:
+        # an attribute is `{"other": text}` in newer formats, the text in older.
+        index["24"] = item("for_this_run", "function", {})
+        index["24"]["attrs"] = [{"other": "#[doc(hidden)]"}]
+        index["25"] = item("internal", "function", {})
+        index["25"]["attrs"] = ['#[doc(alias = "x", hidden)]']
     return {"root": "0", "crate_version": version, "index": index}
 
 
@@ -566,6 +572,8 @@ def test_a_patch_adds_only_the_rust_items_the_exceptions_list_allows(
     # of its paths is two additions.
     assert "- `medh5::parallel: new module`" in report
     assert "medh5::parallel::threads" not in report
+    # What `#[doc(hidden)]` marks is not API.
+    assert "for_this_run" not in report and "internal" not in report
     assert "- `medh5::Grid::spacing: new function`" in report
     assert "- `medh5::geometry::Grid::spacing: new function`" in report
     allowed = {
