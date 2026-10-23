@@ -495,6 +495,20 @@ merge after P22-11, whose allowed list they join.
     in one process; no two workers race for a file. Where a destination
     cannot be known before the unit runs, the command does not gain the
     flag, and the pull request says why.
+  - **Nothing a unit reads from the clock reaches what is compared.** A unit
+    that puts the time it ran into what the command prints or into what a
+    file's `content_id` covers cannot match the one-process run, since
+    which second it reads depends on scheduling. `scrub --apply` is one:
+    its de-identification record in `/meta` takes `utcnow()`
+    (`curation/scrub.rs`). Such a command, or such a mode of one, does not
+    gain the flag in 2.2.3; `scrub` without `--apply` may. The pull request
+    reads every clock call the command reaches (at 0e5e61c, `utcnow` in
+    `sample/writer.rs` is the one whose value is written; the others name
+    scratch directories, time phases, or seed `rng.rs` when the caller gave
+    no seed, which no run repeats) and lists each it excludes. A
+    file's `created` attribute, which `content_id` does not cover and no
+    command prints, is outside the promise, as it is for today's `fix` and
+    `recompress`.
   - **A worker gets a whole unit of the command, never a bare path.** The
     unit is what the command computes without looking at another, and
     anything shared across the cohort is computed once, by the parent,
@@ -519,7 +533,8 @@ merge after P22-11, whose allowed list they join.
       reading, where the cohort-wide answer (the assignment, the
       comparison, the cohort checks) is then made by the parent from every
       worker's result;
-    - `scrub` and `conformance run`: a file, and a case.
+    - `scrub` (without `--apply`, above) and `conformance run`: a file,
+      and a case.
 
     A command whose unit cannot be cut this way from its code does not gain
     the flag, and the pull request says why.
@@ -527,8 +542,8 @@ merge after P22-11, whose allowed list they join.
   that gains the flag: the text, `--json` and the exit code the same at 1
   and 4 workers, as the existing commands' tests do, on a cohort where a
   unit spans several files (a subject's legacy files for `migrate`), where
-  two units derive one destination (`scrub --apply --out-dir` on two
-  sources with one basename), and where the shared state matters (labels a
+  two units derive one destination (for each command whose destinations
+  are derived, two inputs that derive the same one), and where the shared state matters (labels a
   file lacks, an uneven split); and
   for `augment-cohort`, subjects whose rows span several MEDS shards and
   FHIR bulk files.
