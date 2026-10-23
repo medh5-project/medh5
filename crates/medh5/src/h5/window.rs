@@ -163,12 +163,12 @@ pub(crate) fn read_window(
     let mut file_bytes = None;
     let (mut frame, mut part) = (Vec::new(), Vec::new());
     window.values(|itemsize, out| {
-        window.origins().iter().all(|origin| {
+        window.origins().all(|origin| {
             let offset: Vec<u64> = origin.iter().map(|o| *o as u64).collect();
             let Some(len) = stored_chunk(ds, &offset, window.chunk_bytes, &mut file_bytes, &mut frame) else {
                 return false;
             };
-            window.put(origin, &frame[..len], itemsize, &mut part, out)
+            window.put(&origin, &frame[..len], itemsize, &mut part, out)
         })
     })
 }
@@ -192,7 +192,7 @@ pub(crate) fn read_frames(
         let offset: Vec<u64> = origin.iter().map(|o| *o as u64).collect();
         let mut frame = Vec::new();
         let len = stored_chunk(ds, &offset, window.chunk_bytes, &mut file_bytes, &mut frame)?;
-        held = held.saturating_add(len);
+        held = held.saturating_add(holding(len, origin.len()));
         if held > max_stored {
             return None;
         }
@@ -200,6 +200,12 @@ pub(crate) fn read_frames(
         stored.push((origin, frame));
     }
     Some(Frames { window, stored })
+}
+
+/// What [`read_frames`] counts against its cap for one chunk: its stored
+/// bytes and their bookkeeping, so that many small chunks count too.
+fn holding(frame_len: usize, rank: usize) -> usize {
+    frame_len + std::mem::size_of::<(Vec<usize>, Vec<u8>)>() + rank * std::mem::size_of::<usize>()
 }
 
 /// The stored chunks a window covers, read under the lock: what
@@ -286,29 +292,13 @@ impl Window {
         })
     }
 
-    /// The origin of each chunk the window touches, last axis fastest.
-    fn origins(&self) -> Vec<Vec<usize>> {
-        let (chunk, start, count) = (&self.chunk, &self.start, &self.count);
-        let rank = chunk.len();
-        let first: Vec<usize> = (0..rank).map(|a| start[a] / chunk[a]).collect();
-        let last: Vec<usize> = (0..rank).map(|a| (start[a] + count[a] - 1) / chunk[a]).collect();
-        let mut at = first.clone();
-        let mut origins = Vec::new();
-        loop {
-            origins.push((0..rank).map(|a| at[a] * chunk[a]).collect());
-            let mut axis = rank;
-            loop {
-                if axis == 0 {
-                    return origins;
-                }
-                axis -= 1;
-                if at[axis] < last[axis] {
-                    at[axis] += 1;
-                    at[axis + 1..].copy_from_slice(&first[axis + 1..]);
-                    break;
-                }
-            }
-        }
+    /// The origin of each chunk the window touches, last axis fastest, one
+    /// at a time: a window over many small chunks has many.
+    fn origins(&self) -> Origins<'_> {
+        let rank = self.chunk.len();
+        let first: Vec<usize> = (0..rank).map(|a| self.start[a] / self.chunk[a]).collect();
+        let last: Vec<usize> = (0..rank).map(|a| (self.start[a] + self.count[a] - 1) / self.chunk[a]).collect();
+        Origins { chunk: &self.chunk, at: Some(first.clone()), first, last }
     }
 
     /// The window's values, `fill` writing their bytes, C-ordered, given the
@@ -366,6 +356,39 @@ impl Window {
         let corner: Vec<usize> = (0..rank).map(|a| origin[a] + lo[a] as usize - start[a]).collect();
         place(&part[..n], &shape, out, count, &corner, itemsize);
         true
+    }
+}
+
+/// [`Window::origins`].
+struct Origins<'w> {
+    chunk: &'w [usize],
+    first: Vec<usize>,
+    last: Vec<usize>,
+    /// The next chunk's index along each axis; `None` past the last.
+    at: Option<Vec<usize>>,
+}
+
+impl Iterator for Origins<'_> {
+    type Item = Vec<usize>;
+
+    fn next(&mut self) -> Option<Vec<usize>> {
+        let at = self.at.as_mut()?;
+        let origin = at.iter().zip(self.chunk).map(|(i, c)| i * c).collect();
+        // The next chunk, last axis fastest.
+        let mut axis = at.len();
+        loop {
+            if axis == 0 {
+                self.at = None;
+                break;
+            }
+            axis -= 1;
+            if at[axis] < self.last[axis] {
+                at[axis] += 1;
+                at[axis + 1..].copy_from_slice(&self.first[axis + 1..]);
+                break;
+            }
+        }
+        Some(origin)
     }
 }
 
@@ -470,6 +493,29 @@ mod tests {
         }
     }
 
+    /// The chunks a window touches are walked one at a time, last axis
+    /// fastest: 2**26 of them cost nothing until each is asked for.
+    #[test]
+    fn s14_2_a_window_walks_its_chunks_one_at_a_time() {
+        let window = |start: Vec<usize>, count: Vec<usize>, chunk: Vec<usize>| Window {
+            dtype: DType::U8,
+            chunk,
+            chunk_bytes: 1,
+            out_shape: count.clone(),
+            start,
+            count,
+        };
+        let many = window(vec![0, 0], vec![8192, 8192], vec![1, 1]);
+        let first: Vec<Vec<usize>> = many.origins().take(3).collect();
+        assert_eq!(first, [vec![0, 0], vec![0, 1], vec![0, 2]]);
+        let few = window(vec![3, 9], vec![10, 8], vec![4, 8]);
+        let all: Vec<Vec<usize>> = few.origins().collect();
+        assert_eq!(
+            all,
+            [vec![0, 8], vec![0, 16], vec![4, 8], vec![4, 16], vec![8, 8], vec![8, 16], vec![12, 8], vec![12, 16]]
+        );
+    }
+
     /// Frames held for a worker decode to the window's bytes, and are not
     /// held past their cap: a thin window across many chunks holds the
     /// chunks' stored bytes, many times its values, and HDF5 reads it.
@@ -488,7 +534,7 @@ mod tests {
         let axes = data::resolve(&ds.shape(), &thin).unwrap();
         let out: Vec<usize> = axes.iter().filter(|a| a.3).map(|a| a.1).collect();
         let frames = read_frames(&ds, DType::I16, &axes, &out, usize::MAX).expect("Blosc2 frames");
-        let held: usize = frames.stored.iter().map(|(_, f)| f.len()).sum();
+        let held: usize = frames.stored.iter().map(|(origin, f)| holding(f.len(), origin.len())).sum();
         assert_eq!(frames.stored.len(), 3 * 4, "every chunk of the plane x = 5");
         assert!(frames.fit());
         assert_eq!(frames.decode().unwrap().unwrap(), through_hdf5(&ds, &thin));
