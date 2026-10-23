@@ -216,17 +216,40 @@ thread_local! {
     /// Whether this thread is in a parallel section already: an inner one
     /// runs under the outer one's hold.
     static INSIDE: Cell<bool> = const { Cell::new(false) };
+    /// Whether this thread is the one that forked the process it is in.
+    static FORKED_HERE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Mark this thread, in a forked child, as the one that forked: on macOS
+/// it then runs every parallel section itself (`h5::fork`).
+pub(crate) fn forked_here() {
+    FORKED_HERE.set(true);
+}
+
+/// Whether this thread runs a parallel section without workers because it
+/// forked the process it is in, on macOS.
+///
+/// A section's caller waits for its workers by parking, and the standard
+/// library parks a thread on macOS on a libdispatch semaphore, made the first
+/// time the thread parks.  The semaphore is a Mach port, which a forked
+/// child does not inherit: a thread that had parked in the parent, waiting
+/// for its workers in the child, waited on a port that is not there, and
+/// libdispatch stopped the child (`SIGTRAP`).  Elsewhere a parked thread
+/// waits on an address, which the child has.
+fn alone() -> bool {
+    cfg!(target_vendor = "apple") && FORKED_HERE.get()
 }
 
 /// Workers started, for the test that one thread starts none.
 #[cfg(test)]
-static STARTED: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static STARTED: AtomicUsize = AtomicUsize::new(0);
 
 /// `work` on each of `items`, on up to `threads` workers, and each result
 /// handed to `sink` on the calling thread, in the order of `items`.
 ///
-/// With one thread, or inside another parallel section, everything runs here,
-/// one item after another, and no thread is started and no hold is taken.
+/// With one thread, inside another parallel section, or on the thread that
+/// forked a child on macOS ([`alone`]), everything runs here, one item after
+/// another, and no thread is started and no hold is taken.
 /// Otherwise at most twice `threads` items are in flight, so memory is
 /// bounded however many there are.  `work` must make no HDF5 call; `sink`
 /// is where they go.  The first `Err` from `sink` stops the workers and is
@@ -242,7 +265,7 @@ where
     T: Send,
     R: Send,
 {
-    if threads <= 1 || INSIDE.get() {
+    if threads <= 1 || INSIDE.get() || alone() {
         return items.map(work).try_for_each(sink);
     }
     debug_assert!(!crate::h5sys::LOCK.is_owned_by_current_thread(), "a parallel section entered holding HDF5's lock");

@@ -124,20 +124,30 @@ unsafe extern "C" fn run_jobs(
     let base = jobdata as usize;
     let job = move |i: usize| {
         // SAFETY: Blosc2 hands `numjobs` records of `jobdata_elsize` bytes,
-        // each the argument of one call of `dojob`.
+        // each the argument of one call of `dojob`, until this returns; each
+        // thread is joined before it does, and `dojob` cannot unwind.
         unsafe { dojob((base + i * jobdata_elsize) as *mut c_void) }
     };
-    std::thread::scope(|scope| {
-        let mut here = vec![0];
-        for i in 1..numjobs.max(1) as usize {
-            if std::thread::Builder::new().spawn_scoped(scope, move || job(i)).is_err() {
-                here.push(i);
-            }
+    // Threads joined one by one rather than a scope, whose end parks this
+    // thread while one still runs.  On macOS a thread parks on a libdispatch
+    // semaphore, a Mach port made the first time it parks, which a forked
+    // child does not inherit: a child's first scope, on a thread that had
+    // parked in the parent, stopped the child (`SIGTRAP`).  A join parks
+    // nothing.
+    let mut here = vec![0];
+    let mut started = Vec::new();
+    for i in 1..numjobs.max(1) as usize {
+        match std::thread::Builder::new().spawn(move || job(i)) {
+            Ok(handle) => started.push(handle),
+            Err(_) => here.push(i),
         }
-        for i in here {
-            job(i);
-        }
-    });
+    }
+    for i in here {
+        job(i);
+    }
+    for handle in started {
+        let _ = handle.join();
+    }
 }
 
 /// Start C-Blosc2, once per process.  `blosc2_init` is not safe to enter
@@ -520,5 +530,52 @@ mod tests {
             blosc2_init();
             assert_eq!(blosc2_compname_to_compcode(name.as_ptr()), 250);
         }
+    }
+
+    /// A child forked by a thread that had parked runs Blosc2's jobs on
+    /// threads, each to the end.  On macOS a thread parks on a libdispatch
+    /// semaphore, a Mach port the child does not inherit, so the jobs'
+    /// threads are joined, which parks nothing: the end of a scope parked
+    /// the thread on that port, and libdispatch stopped the child
+    /// (`SIGTRAP`).  The jobs are slow enough that it would.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_forked_by_a_thread_that_parked_runs_blosc2s_jobs() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        unsafe extern "C" {
+            fn fork() -> c_int;
+            fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
+            fn alarm(seconds: c_uint) -> c_uint;
+            fn _exit(code: c_int) -> !;
+        }
+        static SUM: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn dojob(record: *mut c_void) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            // SAFETY: each record is one `usize` of `records`.
+            SUM.fetch_add(unsafe { *record.cast::<usize>() }, Ordering::SeqCst);
+        }
+        let mut records: Vec<usize> = (1..=4).collect();
+        let run = |records: &mut Vec<usize>| {
+            SUM.store(0, Ordering::SeqCst);
+            // SAFETY: four records of one `usize` each, alive for the call.
+            unsafe { run_jobs(std::ptr::null_mut(), dojob, 4, size_of::<usize>(), records.as_mut_ptr().cast()) };
+            SUM.load(Ordering::SeqCst)
+        };
+        std::thread::park_timeout(std::time::Duration::from_millis(1));
+        assert_eq!(run(&mut records), 10);
+        // SAFETY: the child runs the jobs, which make no HDF5 call, and exits.
+        let pid = unsafe { fork() };
+        if pid == 0 {
+            // SAFETY: an alarm ends a child that waits forever; the child
+            // ends without running the parent's exit handlers.
+            unsafe {
+                alarm(10);
+                _exit(if run(&mut records) == 10 { 0 } else { 1 })
+            }
+        }
+        let mut status = 0;
+        // SAFETY: waits for the child just forked.
+        assert_eq!(unsafe { waitpid(pid, &mut status, 0) }, pid);
+        assert_eq!(status, 0, "the child did not run the jobs to the end (wait status {status})");
     }
 }

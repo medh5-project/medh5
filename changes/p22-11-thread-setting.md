@@ -9,3 +9,6 @@
   a patch release by the maintainer's decision, as the one setting 2.2.3's
   parallel work needs.
   `medh5.torch.worker_init_fn` sets one thread in each `DataLoader` worker.
+  On macOS, the thread that forked a child runs each call by itself in the
+  child: it would wait for threads on a Mach port made before the fork, which
+  the child does not inherit.

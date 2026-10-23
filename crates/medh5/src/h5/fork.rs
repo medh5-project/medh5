@@ -149,7 +149,9 @@ fn release() {
 /// (`crate::parallel::Sections`), so letting them go touches no queue.
 ///
 /// The command line's runs end here: the child is in none of the parent's
-/// (`crate::parallel::end_runs_in_child`).
+/// (`crate::parallel::end_runs_in_child`).  And this thread is marked as the
+/// one that forked, which on macOS starts no worker in the child
+/// (`crate::parallel::forked_here`).
 fn release_in_child() {
     // SAFETY: only the raw lock's address is used, the key parking_lot
     // queues its waiters under.
@@ -159,6 +161,7 @@ fn release_in_child() {
     unsafe { parking_lot_core::unpark_all(hdf5, parking_lot_core::DEFAULT_UNPARK_TOKEN) };
     release();
     crate::parallel::end_runs_in_child();
+    crate::parallel::forked_here();
 }
 
 #[cfg(test)]
@@ -472,6 +475,48 @@ mod tests {
             failed
         });
         assert_eq!(failed, Vec::<String>::new(), "a child could not write and read");
+    }
+
+    /// A child forked by a thread that had parked runs a threaded call to
+    /// the end, on that thread alone on macOS.
+    ///
+    /// There a thread parks on a libdispatch semaphore, a Mach port made the
+    /// first time it parks, which the child does not inherit: waiting for
+    /// its workers in the child, the thread waited on a port that is not
+    /// there, and libdispatch stopped the child with `SIGTRAP`.  The work is
+    /// slow enough that the caller parks for it.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_forked_by_a_thread_that_parked_runs_a_threaded_call() {
+        use crate::parallel::STARTED;
+        let _serial = crate::parallel::tests::serial();
+        install();
+        std::thread::park_timeout(std::time::Duration::from_millis(1));
+        let slow = |i: usize| {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            i
+        };
+        crate::parallel::ordered(4, 0..8usize, slow, |_| Ok::<_, ()>(())).unwrap();
+        // SAFETY: the child runs a threaded call, which makes no HDF5 call,
+        // and exits.
+        let pid = unsafe { fork() };
+        if pid == 0 {
+            // SAFETY: an alarm ends a child that waits forever.
+            unsafe { libc::alarm(10) };
+            let (sum, before) = (std::sync::atomic::AtomicUsize::new(0), STARTED.load(Ordering::SeqCst));
+            let ran = crate::parallel::ordered(4, 0..8usize, slow, |i| {
+                sum.fetch_add(i, Ordering::SeqCst);
+                Ok::<_, ()>(())
+            });
+            let workers = if cfg!(target_vendor = "apple") { 0 } else { 4 };
+            let ok =
+                ran.is_ok() && sum.load(Ordering::SeqCst) == 28 && STARTED.load(Ordering::SeqCst) == before + workers;
+            // SAFETY: the child ends without running the parent's exit handlers.
+            unsafe { libc::_exit(if ok { 0 } else { 1 }) };
+        }
+        let status = exit_status(pid);
+        assert!(!libc::WIFSIGNALED(status), "the child was stopped by signal {}", libc::WTERMSIG(status));
+        assert_eq!(libc::WEXITSTATUS(status), 0, "the child's call did not run to the end on the threads it may use");
     }
 
     /// A fork made while a call holds the parallel sections and waits for

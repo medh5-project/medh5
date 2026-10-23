@@ -170,6 +170,12 @@ since there is no automatic count. The threads are started inside the call and j
 returns: there is no pool, and nothing runs between calls. A `fork` waits for a call's threads to
 finish, so a child never inherits a lock held by a thread it does not have.
 
+On macOS, the thread that forked runs every call by itself in the child, whatever the count. A
+call waits for its threads by parking, and Rust parks a thread there on a libdispatch semaphore,
+a Mach port the thread makes the first time it parks; a forked child does not inherit Mach ports,
+so a thread that had parked in the parent would wait on one that is not there, and the child would
+be stopped with `SIGTRAP`. Threads the child starts itself make their own and use the count.
+
 Training loaders keep one thread per call. `medh5.torch.worker_init_fn` sets one in each
 `DataLoader` worker, so a parent's count is not multiplied by the number of workers: the workers
 are the parallelism there, and they already fill the cores.
