@@ -10,6 +10,8 @@ run theirs with :func:`run`, on the same rules:
   process's;
 - an exception a unit raises is raised again at its turn and stops the run
   there, as it would in one process;
+- units that share a file run one after another, in input order: two
+  workers never touch one file at once;
 - a worker that dies fails only the unit it held, as the command words that
   (``died``); what no worker is left to take runs here, as does everything
   when the system refuses to start one;
@@ -25,11 +27,10 @@ free for, so no more start than there are units.
 from __future__ import annotations
 
 import contextlib
-import itertools
 import multiprocessing
 import os
 import sys
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from multiprocessing.connection import Connection, wait
 from pathlib import PurePath
 from typing import Any, TypeVar
@@ -40,26 +41,32 @@ R = TypeVar("R")
 
 def run(
     fn: Callable[[T], R],
-    units: Iterable[tuple[str, T]],
+    units: Iterable[tuple[str, T, Sequence[str | os.PathLike[str]]]],
     workers: int,
     died: Callable[[str, T, str], R],
 ) -> Iterator[R]:
-    """``fn(task)`` for each ``(label, task)`` of *units*, on up to *workers*
-    processes; the results in the order of *units*.
+    """``fn(task)`` for each ``(label, task, files)`` of *units*, on up to
+    *workers* processes; the results in the order of *units*.
 
     *fn* and each task cross to a worker by pickle, so *fn* is a function a
-    module defines.  A unit whose worker dies yields ``died(label, task,
-    status)``, *status* the worker's exit (``exit status: 1``, ``signal:
-    9``), or raises what it raises, at the unit's turn.  With one worker, or
-    none, every unit runs here, in order.
+    module defines.  *files* are those the unit reads or writes: a unit that
+    shares one with a unit still running waits for it, so two never touch a
+    file at once and a file's units run in input order, as in one process.
+    A unit whose worker dies yields ``died(label, task, status)``, *status*
+    the worker's exit (``exit status: 1``, ``signal: 9``), or raises what it
+    raises, at the unit's turn.  With one worker, or none, every unit runs
+    here, in order.
     """
     if workers <= 1:
-        for label, task in units:
+        for label, task, _ in units:
             yield _unit(fn, label, task)
         return
     pending = iter(units)
     context = multiprocessing.get_context("spawn")
     pool: list[_Worker] = []
+    # A unit taken from *units* and not yet handed out: its files are
+    # another running unit's, or no worker could be started for it.
+    waiting: tuple[str, T, frozenset[str]] | None = None
     try:
         done: dict[int, tuple[bool, Any]] = {}
         given = 0
@@ -68,13 +75,18 @@ def run(
         while True:
             # A worker is started only for a unit no started one is free
             # for: never more than there are units.
-            while not exhausted:
+            while waiting is not None or not exhausted:
                 idle = next((w for w in pool if w.alive and w.held is None), None)
                 if idle is None and len(pool) >= workers:
                     break
-                unit = next(pending, None)
-                if unit is None:
-                    exhausted = True
+                if waiting is None:
+                    unit = next(pending, None)
+                    if unit is None:
+                        exhausted = True
+                        break
+                    label, task, files = unit
+                    waiting = (label, task, frozenset(map(_file_key, files)))
+                if any(waiting[2] & w.keys for w in pool if w.held is not None):
                     break
                 if idle is None:
                     try:
@@ -90,10 +102,10 @@ def run(
                                 file=sys.stderr,
                             )
                         workers = len(pool)
-                        pending = itertools.chain([unit], pending)
                         break
                     pool.append(idle)
-                idle.give(given, *unit)
+                idle.give(given, *waiting)
+                waiting = None
                 given += 1
             while out in done:
                 ok, value = done.pop(out)
@@ -103,10 +115,12 @@ def run(
                 yield value
             busy = [w for w in pool if w.held is not None]
             if not busy:
-                if exhausted:
+                if exhausted and waiting is None:
                     return
                 # No worker is left: the rest runs here, in order.
-                for label, task in pending:
+                if waiting is not None:
+                    yield _unit(fn, waiting[0], waiting[1])
+                for label, task, _ in pending:
                     yield _unit(fn, label, task)
                 return
             ready = wait([w.connection for w in busy])
@@ -117,6 +131,17 @@ def run(
     finally:
         for worker in pool:
             worker.close()
+
+
+def _file_key(path: str | os.PathLike[str]) -> str:
+    """A file by what it is: its device and inode when it exists, so a
+    second name or a hard link is the same file; otherwise its path, links
+    resolved, case folded --- over-joining two units costs only order."""
+    try:
+        status = os.stat(path)
+    except OSError:
+        return "path:" + os.path.normcase(os.path.realpath(path)).casefold()
+    return f"file:{status.st_dev}:{status.st_ino}"
 
 
 def _unit(fn: Callable[[T], R], label: str, task: T) -> R:
@@ -150,9 +175,11 @@ class _Worker:
             theirs.close()
         self.alive = True
         self.held: tuple[int, str, Any] | None = None
+        self.keys: frozenset[str] = frozenset()
 
-    def give(self, index: int, label: str, task: Any) -> None:
+    def give(self, index: int, label: str, task: Any, keys: frozenset[str]) -> None:
         self.held = (index, label, task)
+        self.keys = keys
         # One that has ended says so when its answer is read.
         with contextlib.suppress(OSError, EOFError):
             self.connection.send((index, label, task))
@@ -161,6 +188,7 @@ class _Worker:
         assert self.held is not None
         index, label, task = self.held
         self.held = None
+        self.keys = frozenset()
         try:
             got, ok, value = self.connection.recv()
         except (OSError, EOFError):

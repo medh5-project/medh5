@@ -3482,8 +3482,41 @@ class TestWorkersBeyondFiles:
         died = lambda label, task, status: None  # noqa: E731
         assert list(_workers.run(str, [], 8, died)) == []
         assert started == []
-        assert list(_workers.run(str, [("a", 1), ("b", 2)], 8, died)) == ["1", "2"]
+        units = [("a", 1, []), ("b", 2, [])]
+        assert list(_workers.run(str, units, 8, died)) == ["1", "2"]
         assert 1 <= len(started) <= 2
+
+    def test_units_sharing_a_file_never_run_at_once(self, monkeypatch, tmp_path):
+        """Two cases of one source, or two subjects writing one output, went
+        to two workers at once; the second now waits for the first, by any
+        name of the file, and the results keep their order."""
+        from medh5 import _workers
+
+        started: list[Any] = []
+        overlaps = []
+
+        class Watched(_workers._Worker):
+            def __init__(self, *args: Any) -> None:
+                super().__init__(*args)
+                started.append(self)
+
+            def give(self, index: int, label: str, task: Any, keys: Any) -> None:
+                overlaps.extend(
+                    label for w in started if w.held is not None and keys & w.keys
+                )
+                super().give(index, label, task, keys)
+
+        monkeypatch.setattr(_workers, "_Worker", Watched)
+        (tmp_path / "x.medh5").write_bytes(b"")
+        units = [
+            ("a", 1, [tmp_path / "x.medh5"]),
+            ("b", 2, [tmp_path / "." / "x.medh5"]),
+            ("c", 3, [tmp_path / "y.medh5"]),
+            ("d", 4, [str(tmp_path / "y.medh5")]),
+        ]
+        died = lambda label, task, status: None  # noqa: E731
+        assert list(_workers.run(str, units, 4, died)) == ["1", "2", "3", "4"]
+        assert overlaps == []
 
     @pytest.mark.parametrize("refused", [1, 2])
     def test_a_worker_the_system_refuses_leaves_the_rest_to_the_others(
@@ -3505,7 +3538,7 @@ class TestWorkersBeyondFiles:
 
         monkeypatch.setattr(_workers, "_Worker", Limited)
         died = lambda label, task, status: None  # noqa: E731
-        units = [(str(i), i) for i in range(5)]
+        units = [(str(i), i, []) for i in range(5)]
         assert list(_workers.run(str, units, 3, died)) == list("01234")
         assert len(started) == refused - 1
         err = capsys.readouterr().err

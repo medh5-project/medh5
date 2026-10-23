@@ -875,7 +875,9 @@ def _write(
 
     shared: tuple[Any, ...] = (root, plan.channels, labels, ignore_value)
     shared += (annotation, file_ending, plan.order, plan.by_label)
-    jobs = ((case.name, (case, *shared)) for case in plan.cases)
+    jobs = (
+        (case.name, (case, *shared), _case_files(case, *shared)) for case in plan.cases
+    )
     for targets, notes in _workers.run(_write_case, jobs, workers, _case_died):
         log.outputs.extend(place(target) for target in targets)
         log.notes.extend(notes)
@@ -965,6 +967,22 @@ def _write_case(job: tuple[Any, ...]) -> tuple[list[Path], list[Any]]:
             # path that did not exist.
             targets.append(target)
     return targets, log.notes
+
+
+def _case_files(
+    case: Any, root: Path, channels: Sequence[str], *rest: Any
+) -> list[Path]:
+    """The files one case of :func:`_write` reads and writes: two cases that
+    share one (an output linked to another's) run one after the other."""
+    file_ending = rest[3]
+    files = [Path(case.path)]
+    files += [
+        root / case.images / f"{case.name}_{index:04d}{file_ending}"
+        for index in range(len(channels))
+    ]
+    if case.labeled:
+        files.append(root / case.labels / f"{case.name}{file_ending}")
+    return files
 
 
 def _case_died(name: str, job: tuple[Any, ...], status: str) -> Any:

@@ -775,7 +775,7 @@ def _cohort_from_meds(
     # What a worker's read needs of the scan: not the open dataset.
     scanned = replace(scan, dataset=None)
 
-    def units() -> Iterator[tuple[str, tuple[Any, ...]]]:
+    def units() -> Iterator[tuple[str, tuple[Any, ...], list[Path]]]:
         pending: dict[int, list[Any]] = {}
         read_rows: Counter[int] = Counter()
         if not expected:
@@ -802,7 +802,7 @@ def _cohort_from_meds(
                         timezone,
                         origin,
                     )
-                    yield str(subject), task
+                    yield str(subject), task, [sample, *([out] if out else [])]
 
     for result in _workers.run(
         _import_subject, units(), workers, _clinical.subject_died

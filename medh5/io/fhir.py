@@ -834,13 +834,14 @@ def _cohort_from_fhir(
             index.scan(n, path)
         index.notes(cohort.report)
 
-        def units() -> Iterator[tuple[str, tuple[Any, ...]]]:
+        def units() -> Iterator[tuple[str, tuple[Any, ...], list[Path]]]:
             for subject, sample, out in targets:
                 try:
                     found: Any = list(_bulk_read(files, index.lines(subject)))
                 except Exception as exc:  # raised in the subject's read
                     found = exc
-                yield str(subject), (subject, sample, out, clock, found, options)
+                task = (subject, sample, out, clock, found, options)
+                yield str(subject), task, [sample, *([out] if out else [])]
 
         cohort.subjects.extend(
             _workers.run(_import_subject, units(), workers, _clinical.subject_died)
