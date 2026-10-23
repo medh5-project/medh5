@@ -402,7 +402,9 @@ median of three:
 | `resample`, linear, carrying the annotation | 43.4 | 40.0 | 33.4 | 29.1 |
 
 Compression is nearly all of an archive recompression, so it is the command
-threads shorten most. A `training` recompression and a nearest resample spend
+threads shorten most. One thread is faster than 2.2.2 there too: 2.2.2 with
+`BLOSC_NTHREADS=1` took 104.6 s, so about 12 s of its time was Blosc2
+starting threads it never used, which it no longer does. A `training` recompression and a nearest resample spend
 little time compressing, and most of the rest is digests, which the threads
 do not reach. Every file written at four threads holds the bytes one thread
 writes.
