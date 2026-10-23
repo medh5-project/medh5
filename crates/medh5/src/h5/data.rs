@@ -467,8 +467,9 @@ pub(crate) enum Region {
 
 /// [`read_region`], but for a region it would read through the Blosc2 blocks
 /// it covers: that one's stored chunks are returned as they are, so that the
-/// blocks can be decompressed on another thread.
-pub(crate) fn read_region_stored(ds: &hdf5::Dataset, index: &[Index]) -> Result<Region> {
+/// blocks can be decompressed on another thread --- unless they come to more
+/// than `max_stored` bytes, when HDF5 reads the region.
+pub(crate) fn read_region_stored(ds: &hdf5::Dataset, index: &[Index], max_stored: usize) -> Result<Region> {
     super::alive(ds)?;
     let dtype = dtype(ds)?;
     let shape = ds.shape();
@@ -477,7 +478,7 @@ pub(crate) fn read_region_stored(ds: &hdf5::Dataset, index: &[Index]) -> Result<
     ensure_allocatable(ds, &axes.iter().map(|a| a.1).collect::<Vec<_>>(), dtype.itemsize())?;
     let enumeration = is_plain_enum(ds);
     if !enumeration && axes.iter().all(|a| a.1 > 0) {
-        if let Some(frames) = super::window::read_frames(ds, dtype, &axes, &out_shape) {
+        if let Some(frames) = super::window::read_frames(ds, dtype, &axes, &out_shape, max_stored) {
             counted(Read::Window);
             return Ok(Region::Stored(frames, axes));
         }

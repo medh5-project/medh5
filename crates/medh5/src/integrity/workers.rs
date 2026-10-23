@@ -290,7 +290,7 @@ fn feed_all(
                 return false;
             }
             let Some(index) = cursor.next() else { return false };
-            match read_slab(&jobs[*s].ds, &index) {
+            match read_slab(&jobs[*s].ds, &index, budget) {
                 Ok(item) => {
                     feed.push(*s, item);
                     true
@@ -336,10 +336,10 @@ fn feed_whole(
     Ok(())
 }
 
-/// One slab: its stored chunks, where a worker can decompress them all, else
-/// its values, read here.
-fn read_slab(ds: &hdf5::Dataset, index: &[Index]) -> Result<Item> {
-    Ok(match data::read_region_stored(ds, index)? {
+/// One slab: its stored chunks, where a worker can decompress them all and
+/// they hold no more than `budget` bytes, else its values, read here.
+fn read_slab(ds: &hdf5::Dataset, index: &[Index], budget: usize) -> Result<Item> {
+    Ok(match data::read_region_stored(ds, index, budget)? {
         Region::Values(values) => Item::Values(values),
         Region::Stored(frames, axes) if frames.fit() => Item::Frames(frames, axes),
         Region::Stored(_, axes) => Item::Values(data::read_axes(ds, &axes)?),
@@ -592,13 +592,16 @@ mod tests {
                 .unwrap();
         // A B2ND frame whose blocks are damaged: its metadata parses, and
         // its blocks do not decompress.  Found by damaging 16 bytes at a time.
-        let stored =
-            |ds: &hdf5::Dataset, at: i64| match data::read_region_stored(ds, &[Index::Slice(Slice::new(at, at + 6))])
-                .unwrap()
-            {
-                Region::Stored(frames, _) => Some(frames),
-                Region::Values(_) => None,
-            };
+        let stored = |ds: &hdf5::Dataset, at: i64| match data::read_region_stored(
+            ds,
+            &[Index::Slice(Slice::new(at, at + 6))],
+            usize::MAX,
+        )
+        .unwrap()
+        {
+            Region::Stored(frames, _) => Some(frames),
+            Region::Values(_) => None,
+        };
         let (_, original) = crate::h5::ops::read_raw_chunk(&bad, &[6, 0, 0]).unwrap();
         let damaged = (0..original.len()).step_by(16).find_map(|at| {
             let mut frame = original.clone();

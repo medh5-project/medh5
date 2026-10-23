@@ -149,81 +149,67 @@ fn stored_chunk(
 
 /// Read the window `axes` --- [`super::data::read_region`]'s per-axis
 /// `(start, count, step, kept)` --- by decompressing only the blocks it
-/// covers; `None` when that cannot give exactly what HDF5 would.
+/// covers; `None` when that cannot give exactly what HDF5 would.  One stored
+/// chunk is held at a time, beside the window's values.
 pub(crate) fn read_window(
     ds: &hdf5::Dataset,
     dtype: DType,
     axes: &[(usize, usize, usize, bool)],
     out_shape: &[usize],
 ) -> Result<Option<NdArray>> {
-    match read_frames(ds, dtype, axes, out_shape) {
-        Some(frames) => frames.decode(),
-        None => Ok(None),
-    }
+    let Some(window) = Window::new(ds, dtype, axes, out_shape) else {
+        return Ok(None);
+    };
+    let mut file_bytes = None;
+    let (mut frame, mut part) = (Vec::new(), Vec::new());
+    window.values(|itemsize, out| {
+        window.origins().iter().all(|origin| {
+            let offset: Vec<u64> = origin.iter().map(|o| *o as u64).collect();
+            let Some(len) = stored_chunk(ds, &offset, window.chunk_bytes, &mut file_bytes, &mut frame) else {
+                return false;
+            };
+            window.put(origin, &frame[..len], itemsize, &mut part, out)
+        })
+    })
 }
 
-/// The stored chunks a window covers, read under the lock: what
-/// [`Frames::decode`] turns into the window's values with no HDF5 call, on
-/// any thread.  A digest's workers decompress a slab so (`integrity::streams`).
-pub(crate) struct Frames {
-    dtype: DType,
-    chunk: Vec<usize>,
-    start: Vec<usize>,
-    count: Vec<usize>,
-    out_shape: Vec<usize>,
-    /// Each touched chunk's origin and stored bytes, last axis fastest.
-    stored: Vec<(Vec<usize>, Vec<u8>)>,
-}
-
-/// The stored chunks of the window `axes`, as [`read_window`] reads them;
-/// `None` when the window cannot be read so, and HDF5 must read it.
+/// The stored chunks of the window `axes`, as [`read_window`] reads them,
+/// held to be decompressed later: `None` when the window cannot be read so,
+/// and HDF5 must read it, or when its frames would hold more than
+/// `max_stored` bytes --- a thin window across many chunks holds far more
+/// stored bytes than values.
 pub(crate) fn read_frames(
     ds: &hdf5::Dataset,
     dtype: DType,
     axes: &[(usize, usize, usize, bool)],
     out_shape: &[usize],
+    max_stored: usize,
 ) -> Option<Frames> {
-    // B2ND frames are rank 2 and up; a `bool` is an enumeration HDF5 maps.
-    if dtype == DType::Bool || axes.len() < 2 || axes.iter().any(|(_, count, step, _)| *step != 1 || *count == 0) {
-        return None;
-    }
-    let (chunk, chunk_bytes) = blosc2_chunk(ds, axes.len(), dtype.itemsize())?;
-    // Another byte order, say: HDF5 would convert, and the stored bytes are
-    // not the type's.
-    let native = with_dtype!(dtype, T => hdf5::Datatype::from_type::<T>());
-    match (ds.dtype(), native) {
-        (Ok(stored), Ok(native)) if stored == native => {}
-        _ => return None,
-    }
-    let start: Vec<usize> = axes.iter().map(|a| a.0).collect();
-    let count: Vec<usize> = axes.iter().map(|a| a.1).collect();
-    let rank = chunk.len();
-    let first: Vec<usize> = (0..rank).map(|a| start[a] / chunk[a]).collect();
-    let last: Vec<usize> = (0..rank).map(|a| (start[a] + count[a] - 1) / chunk[a]).collect();
-    let mut at = first.clone();
-    let mut stored = Vec::new();
+    let window = Window::new(ds, dtype, axes, out_shape)?;
     let mut file_bytes = None;
-    loop {
-        let origin: Vec<usize> = (0..rank).map(|a| at[a] * chunk[a]).collect();
+    let (mut stored, mut held) = (Vec::new(), 0usize);
+    for origin in window.origins() {
         let offset: Vec<u64> = origin.iter().map(|o| *o as u64).collect();
         let mut frame = Vec::new();
-        let len = stored_chunk(ds, &offset, chunk_bytes, &mut file_bytes, &mut frame)?;
+        let len = stored_chunk(ds, &offset, window.chunk_bytes, &mut file_bytes, &mut frame)?;
+        held = held.saturating_add(len);
+        if held > max_stored {
+            return None;
+        }
         frame.truncate(len);
         stored.push((origin, frame));
-        // The next chunk, last axis fastest.
-        let mut axis = rank;
-        loop {
-            if axis == 0 {
-                return Some(Frames { dtype, chunk, start, count, out_shape: out_shape.to_vec(), stored });
-            }
-            axis -= 1;
-            if at[axis] < last[axis] {
-                at[axis] += 1;
-                at[axis + 1..].copy_from_slice(&first[axis + 1..]);
-                break;
-            }
-        }
     }
+    Some(Frames { window, stored })
+}
+
+/// The stored chunks a window covers, read under the lock: what
+/// [`Frames::decode`] turns into the window's values with no HDF5 call, on
+/// any thread.  A digest's workers decompress a slab so
+/// (`integrity::workers`).
+pub(crate) struct Frames {
+    window: Window,
+    /// Each touched chunk's origin and stored bytes, last axis fastest.
+    stored: Vec<(Vec<usize>, Vec<u8>)>,
 }
 
 impl Frames {
@@ -231,7 +217,7 @@ impl Frames {
     /// that do not decompress: B2ND, of the chunk's rank, shape and item
     /// size.  Parses each frame's metadata, decompressing nothing.
     pub(crate) fn fit(&self) -> bool {
-        let chunk_shape: Vec<i64> = self.chunk.iter().map(|c| *c as i64).collect();
+        let chunk_shape: Vec<i64> = self.window.chunk.iter().map(|c| *c as i64).collect();
         self.stored.iter().all(|(_, frame)| {
             // SAFETY: the pointers span the lengths passed with them.
             unsafe {
@@ -240,7 +226,7 @@ impl Frames {
                     frame.len() as i64,
                     chunk_shape.len() as i8,
                     chunk_shape.as_ptr(),
-                    self.dtype.itemsize() as i32,
+                    self.window.dtype.itemsize() as i32,
                 ) == 0
             }
         })
@@ -250,6 +236,84 @@ impl Frames {
     /// frame cannot be read so (one that is not B2ND), and HDF5 must read it.
     /// Makes no HDF5 call.
     pub(crate) fn decode(&self) -> Result<Option<NdArray>> {
+        let mut part = Vec::new();
+        self.window.values(|itemsize, out| {
+            self.stored.iter().all(|(origin, frame)| self.window.put(origin, frame, itemsize, &mut part, out))
+        })
+    }
+}
+
+/// A window of a dataset whose chunks are Blosc2 frames, and the chunks it
+/// touches.
+struct Window {
+    dtype: DType,
+    chunk: Vec<usize>,
+    /// What each chunk holds decompressed ([`stored_chunk`]).
+    chunk_bytes: u64,
+    start: Vec<usize>,
+    count: Vec<usize>,
+    out_shape: Vec<usize>,
+}
+
+impl Window {
+    /// The window `axes`, or `None` when its blocks cannot give exactly what
+    /// HDF5 would.
+    fn new(
+        ds: &hdf5::Dataset,
+        dtype: DType,
+        axes: &[(usize, usize, usize, bool)],
+        out_shape: &[usize],
+    ) -> Option<Window> {
+        // B2ND frames are rank 2 and up; a `bool` is an enumeration HDF5 maps.
+        if dtype == DType::Bool || axes.len() < 2 || axes.iter().any(|(_, count, step, _)| *step != 1 || *count == 0) {
+            return None;
+        }
+        let (chunk, chunk_bytes) = blosc2_chunk(ds, axes.len(), dtype.itemsize())?;
+        // Another byte order, say: HDF5 would convert, and the stored bytes
+        // are not the type's.
+        let native = with_dtype!(dtype, T => hdf5::Datatype::from_type::<T>());
+        match (ds.dtype(), native) {
+            (Ok(stored), Ok(native)) if stored == native => {}
+            _ => return None,
+        }
+        Some(Window {
+            dtype,
+            chunk,
+            chunk_bytes,
+            start: axes.iter().map(|a| a.0).collect(),
+            count: axes.iter().map(|a| a.1).collect(),
+            out_shape: out_shape.to_vec(),
+        })
+    }
+
+    /// The origin of each chunk the window touches, last axis fastest.
+    fn origins(&self) -> Vec<Vec<usize>> {
+        let (chunk, start, count) = (&self.chunk, &self.start, &self.count);
+        let rank = chunk.len();
+        let first: Vec<usize> = (0..rank).map(|a| start[a] / chunk[a]).collect();
+        let last: Vec<usize> = (0..rank).map(|a| (start[a] + count[a] - 1) / chunk[a]).collect();
+        let mut at = first.clone();
+        let mut origins = Vec::new();
+        loop {
+            origins.push((0..rank).map(|a| at[a] * chunk[a]).collect());
+            let mut axis = rank;
+            loop {
+                if axis == 0 {
+                    return origins;
+                }
+                axis -= 1;
+                if at[axis] < last[axis] {
+                    at[axis] += 1;
+                    at[axis + 1..].copy_from_slice(&first[axis + 1..]);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// The window's values, `fill` writing their bytes, C-ordered, given the
+    /// item size; `None` when it cannot.
+    fn values(&self, fill: impl FnOnce(usize, &mut [u8]) -> bool) -> Result<Option<NdArray>> {
         Ok(with_dtype!(self.dtype, T => {
             let mut values = vec![T::default(); self.count.iter().product()];
             // SAFETY: `T` is a number (`bool` was turned away), for which
@@ -258,51 +322,49 @@ impl Frames {
             let bytes = unsafe {
                 std::slice::from_raw_parts_mut(values.as_mut_ptr().cast::<u8>(), std::mem::size_of_val(values.as_slice()))
             };
-            if !self.fill(std::mem::size_of::<T>(), bytes) {
+            if !fill(std::mem::size_of::<T>(), bytes) {
                 return Ok(None);
             }
             Some(NdArray::from(ArrayD::from_shape_vec(IxDyn(&self.out_shape), values)?))
         }))
     }
 
-    /// Decompress each chunk's part of the window `[start, start + count)`
-    /// into `out`, in C order; `false` when a frame cannot be read so.
-    fn fill(&self, itemsize: usize, out: &mut [u8]) -> bool {
+    /// Decompress the window's part of the chunk at `origin`, stored as
+    /// `frame`, into `out` (through `part`); `false` when the frame cannot be
+    /// read so.
+    fn put(&self, origin: &[usize], frame: &[u8], itemsize: usize, part: &mut Vec<u8>, out: &mut [u8]) -> bool {
         let (chunk, start, count) = (&self.chunk, &self.start, &self.count);
         let rank = chunk.len();
         let chunk_shape: Vec<i64> = chunk.iter().map(|c| *c as i64).collect();
-        let mut part = Vec::new();
-        for (origin, frame) in &self.stored {
-            let lo: Vec<i64> = (0..rank).map(|a| (start[a].max(origin[a]) - origin[a]) as i64).collect();
-            let hi: Vec<i64> =
-                (0..rank).map(|a| ((start[a] + count[a]).min(origin[a] + chunk[a]) - origin[a]) as i64).collect();
-            let shape: Vec<usize> = lo.iter().zip(&hi).map(|(l, h)| (h - l) as usize).collect();
-            let n = shape.iter().product::<usize>() * itemsize;
-            if part.len() < n {
-                part.resize(n, 0u8);
-            }
-            phase!(Window, n);
-            // SAFETY: every pointer spans the length passed with it; the
-            // helper reads `frame` and writes at most `n` bytes of `part`.
-            let rc = unsafe {
-                medh5_sys::medh5_b2nd_read_slice(
-                    frame.as_ptr(),
-                    frame.len() as i64,
-                    rank as i8,
-                    chunk_shape.as_ptr(),
-                    itemsize as i32,
-                    lo.as_ptr(),
-                    hi.as_ptr(),
-                    part.as_mut_ptr().cast(),
-                    n as i64,
-                )
-            };
-            if rc != 0 {
-                return false;
-            }
-            let corner: Vec<usize> = (0..rank).map(|a| origin[a] + lo[a] as usize - start[a]).collect();
-            place(&part[..n], &shape, out, count, &corner, itemsize);
+        let lo: Vec<i64> = (0..rank).map(|a| (start[a].max(origin[a]) - origin[a]) as i64).collect();
+        let hi: Vec<i64> =
+            (0..rank).map(|a| ((start[a] + count[a]).min(origin[a] + chunk[a]) - origin[a]) as i64).collect();
+        let shape: Vec<usize> = lo.iter().zip(&hi).map(|(l, h)| (h - l) as usize).collect();
+        let n = shape.iter().product::<usize>() * itemsize;
+        if part.len() < n {
+            part.resize(n, 0u8);
         }
+        phase!(Window, n);
+        // SAFETY: every pointer spans the length passed with it; the helper
+        // reads `frame` and writes at most `n` bytes of `part`.
+        let rc = unsafe {
+            medh5_sys::medh5_b2nd_read_slice(
+                frame.as_ptr(),
+                frame.len() as i64,
+                rank as i8,
+                chunk_shape.as_ptr(),
+                itemsize as i32,
+                lo.as_ptr(),
+                hi.as_ptr(),
+                part.as_mut_ptr().cast(),
+                n as i64,
+            )
+        };
+        if rc != 0 {
+            return false;
+        }
+        let corner: Vec<usize> = (0..rank).map(|a| origin[a] + lo[a] as usize - start[a]).collect();
+        place(&part[..n], &shape, out, count, &corner, itemsize);
         true
     }
 }
@@ -405,6 +467,38 @@ mod tests {
                 assert_eq!(fast.unwrap(), through_hdf5(&ds, &index), "{profile} {dtype:?} {index:?}");
                 assert_eq!(data::read_region(&ds, &index).unwrap(), through_hdf5(&ds, &index));
             }
+        }
+    }
+
+    /// Frames held for a worker decode to the window's bytes, and are not
+    /// held past their cap: a thin window across many chunks holds the
+    /// chunks' stored bytes, many times its values, and HDF5 reads it.
+    #[test]
+    fn s14_2_held_frames_decode_to_the_window_and_stop_at_their_cap() {
+        crate::h5::init();
+        let dir = tempfile::tempdir().unwrap();
+        let file = crate::h5::file::create_truncate(&dir.path().join("w.h5")).unwrap();
+        let mut rng = Rng::new(15);
+        let layout = Layout {
+            chunks: Some(vec![8, 16, 16]),
+            filters: resolve_profile(Some("training")).unwrap().codec(Role::Image).filters(),
+        };
+        let ds = data::create(&file, "d", &volume(&[24, 64, 64], DType::I16, &mut rng), &layout).unwrap();
+        let thin = [Index::Slice(Slice::new(0, 24)), Index::Slice(Slice::new(0, 64)), Index::At(5)];
+        let axes = data::resolve(&ds.shape(), &thin).unwrap();
+        let out: Vec<usize> = axes.iter().filter(|a| a.3).map(|a| a.1).collect();
+        let frames = read_frames(&ds, DType::I16, &axes, &out, usize::MAX).expect("Blosc2 frames");
+        let held: usize = frames.stored.iter().map(|(_, f)| f.len()).sum();
+        assert_eq!(frames.stored.len(), 3 * 4, "every chunk of the plane x = 5");
+        assert!(frames.fit());
+        assert_eq!(frames.decode().unwrap().unwrap(), through_hdf5(&ds, &thin));
+        let values = 24 * 64 * 2;
+        assert!(held > values, "the frames ({held} B) hold more than the window ({values} B)");
+        assert!(read_frames(&ds, DType::I16, &axes, &out, held - 1).is_none());
+        assert!(read_frames(&ds, DType::I16, &axes, &out, held).is_some());
+        match data::read_region_stored(&ds, &thin, values).unwrap() {
+            data::Region::Values(read) => assert_eq!(read, through_hdf5(&ds, &thin)),
+            data::Region::Stored(..) => panic!("held past the cap"),
         }
     }
 
