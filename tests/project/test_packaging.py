@@ -1847,6 +1847,7 @@ class TestDistribution:
         )
         needed = [
             ".github/dependabot.yml",
+            ".github/api-exceptions.txt",
             ".pre-commit-config.yaml",
             "deny.toml",
             ".github/workflows/ci.yml",
