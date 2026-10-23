@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from medh5._core import __format_version__, __version__
+from medh5._core import __format_version__, __version__, get_threads, set_threads
 from medh5.annotations import Annotation, Instance, VoxelAnnotation
 from medh5.curation import (
     Activity,
@@ -169,11 +169,13 @@ __all__ = [
     "audit_splits",
     "compare_annotations",
     "create",
+    "get_threads",
     "grid_patches",
     "open",
     "open_collection",
     "open_sample",
     "pack",
+    "set_threads",
     "unpack",
     "validate_cache",
 ]

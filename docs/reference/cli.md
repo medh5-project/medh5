@@ -47,6 +47,14 @@ that dies fails the file it held, named on stderr; the others take what it had
 not begun. `medh5 dataset stats --workers` is threads in one process, and
 reads only.
 
+`--threads N`, before or after any command name, is how many threads one call
+may use for its work outside HDF5 (default: `MEDH5_THREADS`, else 1; `0` is
+refused). Every process the command starts — a `--workers` process, or the
+Python that runs a converter — is given the same count, so `--workers 4
+--threads 2` can keep eight threads busy. A command with no threaded work runs
+as before. [Threads inside one call](../explanation/concurrency.md#threads-inside-one-call)
+says what the threads do.
+
 A command that changes a file in place — `fix`, `index build`, `seg convert`,
 `scrub --apply`, `recompress` without `--out`, `resample` without `--out`,
 `dataset split --write-claims`, `clinical augment` without `--out` — writes the new version beside it and

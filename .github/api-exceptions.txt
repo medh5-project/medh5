@@ -1,0 +1,17 @@
+# Public names a patch release may add, each with the decision that allowed
+# it (plans/2.2.x/parallelism.md).  Under API_RELEASE_TYPE=patch, CI's
+# `python-api` job (public_api.py compare, and compare --cli for the command
+# line) and `semver` job (rust_api.py) fail an addition that is not here.  One line per name, tab-separated:
+#
+#     KIND<TAB>NAME<TAB>DECISION
+#
+# KIND is `rust` (a path as rustdoc names it), `python` (a name as
+# tests/project/python_api.txt prints it) or `cli` (`medh5 COMMAND --flag`,
+# checked against the parser).  Emptied by the first pull request after the
+# release that ships these names, when they are the baseline.
+rust	medh5::parallel	D6
+rust	medh5::parallel::set_threads	D6
+rust	medh5::parallel::threads	D6
+python	medh5.set_threads	D6
+python	medh5.get_threads	D6
+cli	medh5 --threads	D6

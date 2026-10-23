@@ -190,6 +190,7 @@ include = [
   # built with, so `pytest tests/project` and `mkdocs build` run from the
   # unpacked sdist as they do from a checkout.
   { path = ".github/dependabot.yml", format = "sdist" },
+  { path = ".github/api-exceptions.txt", format = "sdist" },
   { path = ".pre-commit-config.yaml", format = "sdist" },
   { path = "deny.toml", format = "sdist" },
   { path = ".github/scripts/*.py", format = "sdist" },

@@ -61,6 +61,7 @@ from collections import OrderedDict
 from collections.abc import Iterator
 from pathlib import Path
 
+from medh5._core import set_threads
 from medh5.sample import Sample, open_sample
 
 DEFAULT_MAXSIZE = 32
@@ -373,8 +374,11 @@ def open_cached(path: str | os.PathLike[str], sample_key: str | None = None) -> 
 
 def worker_init_fn(worker_id: int) -> None:
     """``DataLoader(worker_init_fn=...)``: drop handles inherited across ``fork``
-    (in a process that opened them, close them; see :meth:`HandleCache.clear`)."""
+    (in a process that opened them, close them; see :meth:`HandleCache.clear`),
+    and set one thread per call (:func:`medh5.set_threads`), so the workers
+    do not each use the parent's count."""
     CACHE.clear()
+    set_threads(1)
 
 
 def set_cache_size(maxsize: int) -> None:

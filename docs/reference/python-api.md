@@ -572,6 +572,25 @@ so a class-bearing annotation gets an ignore region over them (§7.7): its own i
 (its `source`, the id written, `kind`, `ignore_mask` and `note`) in the
 report's `annotations`, and `not_carried` lists the ones left on their grids.
 
+## Threads
+
+```python
+import medh5
+
+medh5.set_threads(2)          # one call may use two threads outside HDF5
+assert medh5.get_threads() == 2
+medh5.set_threads(1)          # the default: every call on its caller's thread
+```
+
+`medh5.set_threads(n)` sets how many threads one call may use for its work
+outside HDF5, for every thread of the process; `0` raises `ValueError`.
+`medh5.get_threads()` is what was set, else `MEDH5_THREADS` (read once, the
+first time it is needed; a value that is not a positive integer raises
+`ValueError` naming it), else 1. `medh5.torch.worker_init_fn` sets one in each
+`DataLoader` worker. [Threads inside one call](../explanation/concurrency.md#threads-inside-one-call)
+says what the threads do and how `--threads` passes the count to the command
+line's processes.
+
 ## Clinical history (format 1.1)
 
 ```python

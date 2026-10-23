@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import importlib.util
+import json
 import sys
 import textwrap
 from pathlib import Path
@@ -324,20 +325,385 @@ def test_a_deprecated_name_leaves_only_in_a_major(api: ModuleType) -> None:
     assert "1 breaking change(s), allowed in a major" in report
 
 
-def test_a_patch_lists_its_additions(
+def test_a_patch_adds_only_what_the_exceptions_list_allows(
     api: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A patch adds no API without saying so: the additions go to the job's
-    summary, where the release's author reads them."""
+    """A patch adds no API without a decision: an addition the list does not
+    name fails, and a listed one goes to the job's summary with its decision,
+    where the release's author reads it."""
     old, new, summary = tmp_path / "old.txt", tmp_path / "new.txt", tmp_path / "s.md"
+    listed, empty = tmp_path / "listed.txt", tmp_path / "empty.txt"
     old.write_text(BEFORE, encoding="utf-8")
     new.write_text(BEFORE + "medh5.extra\tfunction\t()\n", encoding="utf-8")
+    listed.write_text("# a comment\n\npython\tmedh5.extra\tD6\n", encoding="utf-8")
+    empty.write_text("rust\tmedh5::extra\tD6\n", encoding="utf-8")
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
-    assert api.main(["compare", str(old), str(new), "--release-type", "patch"]) == 0
+    compare = ["compare", str(old), str(new), "--release-type"]
+    assert api.main([*compare, "patch", "--exceptions", str(listed)]) == 0
     text = summary.read_text(encoding="utf-8")
     assert "No breaking change." in text
-    assert "- `medh5.extra: new function`" in text
+    assert "- `medh5.extra: new function` (D6)" in text
+    # The list's Rust names are not Python's.
+    assert api.main([*compare, "patch", "--exceptions", str(empty)]) == 1
+    assert "1 addition(s) in a patch release, not allowed" in summary.read_text(
+        encoding="utf-8"
+    )
+    assert api.main([*compare, "minor", "--exceptions", str(empty)]) == 0
     assert api.main(["compare", str(new), str(old), "--release-type", "patch"]) == 1
+
+
+def test_a_patch_allowing_a_class_allows_none_of_its_members(api: ModuleType) -> None:
+    """A listed class's members are additions of their own: listing a class
+    is no way to add methods unreviewed."""
+    after = BEFORE + "medh5.Reader\tclass\t(path) bases=\n"
+    after += "medh5.Reader.read\tmethod\t()\n"
+    assert api.compare(BEFORE, after, "patch")[0] == 1
+    status, report = api.compare(BEFORE, after, "patch", {"medh5.Reader": "D6"})
+    assert status == 1
+    assert "- `medh5.Reader: new class` (D6)" in report
+    assert "- `medh5.Reader.read: new method`\n" in report
+    allowed = {"medh5.Reader": "D6", "medh5.Reader.read": "D6"}
+    assert api.compare(BEFORE, after, "patch", allowed)[0] == 0
+
+
+def _tree(options: list[str], commands: dict | None = None) -> dict:
+    return {"options": options, "positionals": [], "commands": commands or {}}
+
+
+def test_the_command_line_dump_lists_commands_and_their_own_options(
+    api: ModuleType,
+) -> None:
+    """clap copies a global option into every command; it prints once, under
+    `medh5`, so a new global option is one addition and not one per command.
+    An option only `medh5` has is not inherited: a command's own option by
+    the same spelling prints under the command."""
+    tree = _tree(
+        ["--threads", "--version", "--help"],
+        {
+            "info": _tree(
+                ["--json", "--version", "--threads", "--help"],
+                {"x": _tree(["--threads", "--help"])},
+            ),
+            "show": _tree(["--threads", "--help"]),
+        },
+    )
+    assert list(api.cli_entries(tree)) == [
+        ("medh5", "command", ""),
+        ("medh5 --threads", "option", ""),
+        ("medh5 --version", "option", ""),
+        ("medh5 --help", "option", ""),
+        ("medh5 info", "command", ""),
+        ("medh5 info --json", "option", ""),
+        ("medh5 info --version", "option", ""),
+        ("medh5 info x", "command", ""),
+        ("medh5 show", "command", ""),
+    ]
+    dumped = api.parse(api.dump_cli())
+    assert dumped["medh5 --threads"].kind == "option"
+    assert dumped["medh5 --version"].kind == "option"
+    assert "medh5 info --threads" not in dumped
+    assert "medh5 info --help" not in dumped
+    assert dumped["medh5 convert from-nifti"].kind == "command"
+
+
+def test_a_patch_adds_only_the_flags_the_exceptions_list_allows(
+    api: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new flag is an addition like a new name: a patch fails one the
+    list's `cli` names do not hold, and a removed flag is a break."""
+    old, new = tmp_path / "old.txt", tmp_path / "new.txt"
+    listed = tmp_path / "listed.txt"
+    before = "medh5\tcommand\nmedh5 info\tcommand\nmedh5 info --json\toption\n"
+    old.write_text(before, encoding="utf-8")
+    new.write_text(before + "medh5 info --key\toption\n", encoding="utf-8")
+    listed.write_text("cli\tmedh5 info --key\tD6\n", encoding="utf-8")
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    compare = ["compare", "--cli", str(old), str(new), "--release-type"]
+    # The list's Python names are not the command line's.
+    python = tmp_path / "python.txt"
+    python.write_text("python\tmedh5 info --key\tD6\n", encoding="utf-8")
+    assert api.main([*compare, "patch", "--exceptions", str(python)]) == 1
+    assert api.main([*compare, "patch", "--exceptions", str(listed)]) == 0
+    assert api.main([*compare, "minor", "--exceptions", str(python)]) == 0
+    status, report = api.compare(before, new.read_text(), "patch", {}, "Command line")
+    assert status == 1 and report.startswith("## Command line (patch)")
+    assert "- `medh5 info --key: new option`" in report
+    removed = api.compare(before, "medh5\tcommand\n", "minor", {}, "Command line")
+    assert removed[0] == 1
+    assert "- `medh5 info: the command was removed`" in removed[1]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "python\tmedh5.x",
+        "go\tmedh5.x\tD6",
+        "python\tmedh5.x \tD6",
+        "python\tmedh5.x\tD6\textra",
+    ],
+)
+def test_an_exceptions_line_is_kind_name_and_decision(
+    api: ModuleType, line: str
+) -> None:
+    with pytest.raises(ValueError, match="line 1"):
+        api.exceptions(line + "\n")
+    with pytest.raises(ValueError, match="listed twice"):
+        api.exceptions("python\tmedh5.x\tD6\npython\tmedh5.x\tD7\n")
+
+
+def test_the_exceptions_are_the_thread_setting_and_the_workers_flags(
+    api: ModuleType,
+) -> None:
+    """The list holds the names the maintainer's decisions allow in 2.2.3 and
+    nothing else: the thread setting (D6), and command line flags (D6, D7),
+    each of which the parser has."""
+    from medh5._core import cli_command_tree
+
+    allowed = api.exceptions(api.EXCEPTIONS.read_text(encoding="utf-8"))
+    assert allowed["rust"] == {
+        "medh5::parallel": "D6",
+        "medh5::parallel::set_threads": "D6",
+        "medh5::parallel::threads": "D6",
+    }
+    assert allowed["python"] == {"medh5.set_threads": "D6", "medh5.get_threads": "D6"}
+    snapshot = api.parse(
+        (ROOT / "tests" / "project" / "python_api.txt").read_text(encoding="utf-8")
+    )
+    assert set(allowed["python"]) <= set(snapshot)
+    tree = cli_command_tree()
+    for flag, decision in allowed["cli"].items():
+        assert decision in ("D6", "D7"), flag
+        program, *words, option = flag.split(" ")
+        assert program == "medh5" and option.startswith("--"), flag
+        node = tree
+        for word in words:
+            node = node["commands"][word]
+        assert option in node["options"], flag
+
+
+# --- Rust additions ---
+
+
+@pytest.fixture(scope="module")
+def rust_api() -> ModuleType:
+    return _script("rust_api.py")
+
+
+def _rustdoc(extra: bool = False, version: str = "2.2.2") -> dict:
+    """A crate's rustdoc JSON, as much of it as the walk reads: modules, a
+    function, a struct with a field and an inherent method, a trait impl, a
+    private item, a re-export of another crate and one of its own."""
+
+    def item(name, kind, inner, visibility="public"):
+        return {"name": name, "visibility": visibility, "inner": {kind: inner}}
+
+    index = {
+        "0": item("medh5", "module", {"items": ["1", "2", "5", "6", "7"]}),
+        "1": item("geometry", "module", {"items": ["3", "4"]}),
+        "2": item(
+            "hdf5",
+            "use",
+            {"source": "hdf5", "name": "hdf5", "id": "99", "is_glob": False},
+        ),
+        "3": item(
+            "Grid",
+            "struct",
+            {"kind": {"plain": {"fields": ["8", "9"]}}, "impls": ["10", "11"]},
+        ),
+        "4": item("private", "function", {}, visibility="crate"),
+        "5": item(
+            "Grid",
+            "use",
+            {"source": "geometry::Grid", "name": "Grid", "id": "3", "is_glob": False},
+        ),
+        "6": item(None, "impl", {"items": [], "trait": None}),
+        "7": item("VERSION", "constant", {}),
+        "8": item("shape", "struct_field", {}),
+        "9": item("hidden", "struct_field", {}, visibility="default"),
+        "10": item(None, "impl", {"items": ["12"], "trait": None}),
+        "11": item(None, "impl", {"items": ["13"], "trait": {"path": "Clone"}}),
+        "12": item("ndim", "function", {}),
+        "13": item("clone", "function", {}, visibility="default"),
+    }
+    if extra:
+        index["0"]["inner"]["module"]["items"].append("20")
+        index["20"] = item("parallel", "module", {"items": ["21", "22", "24"]})
+        index["21"] = item("threads", "function", {})
+        index["22"] = item("set_threads", "function", {})
+        index["10"]["inner"]["impl"]["items"] += ["23", "25"]
+        index["23"] = item("spacing", "function", {})
+        # Hidden, as the JSON `cargo semver-checks` builds still holds them:
+        # an attribute is `{"other": text}` in newer formats, the text in older.
+        index["24"] = item("for_this_run", "function", {})
+        index["24"]["attrs"] = [{"other": "#[doc(hidden)]"}]
+        index["25"] = item("internal", "function", {})
+        index["25"]["attrs"] = ['#[doc(alias = "x", hidden)]']
+    return {"root": "0", "crate_version": version, "index": index}
+
+
+def test_a_glob_of_another_crate_is_an_addition(rust_api: ModuleType) -> None:
+    """A `pub use dependency::*` names a module the JSON does not hold, so the
+    names it brings cannot be listed: the glob is recorded as one item, and a
+    new one fails a patch rather than adding nothing."""
+    old = _rustdoc()
+    new = _rustdoc()
+    new["index"]["0"]["inner"]["module"]["items"].append("30")
+    new["index"]["30"] = {
+        "name": "ndarray",
+        "visibility": "public",
+        "inner": {
+            "use": {"source": "ndarray", "name": "ndarray", "id": "98", "is_glob": True}
+        },
+    }
+    assert rust_api.items(new)["medh5::ndarray::*"] == "use"
+    status, report = rust_api.compare([(json.dumps(old), json.dumps(new))], "patch")
+    assert status == 1 and "- `medh5::ndarray::*: new use`" in report
+
+
+def test_a_deep_module_is_walked_and_a_glob_cycle_ends(rust_api: ModuleType) -> None:
+    """Depth is no reason to stop: a function twenty modules down is an item.
+    A cycle is, and only a cycle: `pub use super::*` names its parent's items
+    once more under the child, and not the child again; two modules that
+    glob each other name each other's items once."""
+
+    def item(name, kind, inner):
+        return {"name": name, "visibility": "public", "inner": {kind: inner}}
+
+    index = {"0": item("medh5", "module", {"items": ["1"]})}
+    for level in range(1, 21):
+        index[str(level)] = item(f"m{level}", "module", {"items": [str(level + 1)]})
+    index["21"] = item("deep", "function", {})
+    index["0"]["inner"]["module"]["items"].append("30")
+    index["30"] = item("a", "module", {"items": ["31", "32"]})
+    index["31"] = item("f", "function", {})
+    index["32"] = item("b", "module", {"items": ["33"]})
+    index["33"] = item(
+        None, "use", {"source": "super", "name": "super", "id": "30", "is_glob": True}
+    )
+    # And two modules that glob each other.
+    index["0"]["inner"]["module"]["items"] += ["40", "41"]
+    index["40"] = item("x", "module", {"items": ["42"]})
+    index["41"] = item("y", "module", {"items": ["43", "44"]})
+    index["42"] = item(
+        None, "use", {"source": "y", "name": "y", "id": "41", "is_glob": True}
+    )
+    index["43"] = item(
+        None, "use", {"source": "x", "name": "x", "id": "40", "is_glob": True}
+    )
+    index["44"] = item("g", "function", {})
+    found = rust_api.items({"root": "0", "index": index})
+    assert {path for path in found if path.startswith(("medh5::x", "medh5::y"))} == {
+        "medh5::x",
+        "medh5::x::g",
+        "medh5::y",
+        "medh5::y::g",
+    }
+    deep = "::".join(["medh5", *(f"m{level}" for level in range(1, 21)), "deep"])
+    assert found[deep] == "function"
+    assert {path for path in found if path.startswith("medh5::a")} == {
+        "medh5::a",
+        "medh5::a::f",
+        "medh5::a::b",
+        "medh5::a::b::f",
+    }
+
+
+def test_rust_items_are_the_paths_a_caller_names(rust_api: ModuleType) -> None:
+    assert rust_api.items(_rustdoc()) == {
+        "medh5": "module",
+        "medh5::geometry": "module",
+        "medh5::geometry::Grid": "struct",
+        "medh5::geometry::Grid::shape": "struct_field",
+        "medh5::geometry::Grid::ndim": "function",
+        "medh5::hdf5": "use",
+        "medh5::Grid": "struct",
+        "medh5::Grid::shape": "struct_field",
+        "medh5::Grid::ndim": "function",
+        "medh5::VERSION": "constant",
+    }
+
+
+def test_a_patch_adds_only_the_rust_items_the_exceptions_list_allows(
+    rust_api: ModuleType,
+) -> None:
+    old, new = json.dumps(_rustdoc()), json.dumps(_rustdoc(extra=True))
+    status, report = rust_api.compare([(old, new)], "patch")
+    assert status == 1
+    # A new module's items come with it; a method added to a type at both
+    # of its paths is two additions.
+    assert "- `medh5::parallel: new module`" in report
+    assert "medh5::parallel::threads" not in report
+    # What `#[doc(hidden)]` marks is not API.
+    assert "for_this_run" not in report and "internal" not in report
+    assert "- `medh5::Grid::spacing: new function`" in report
+    assert "- `medh5::geometry::Grid::spacing: new function`" in report
+    allowed = {
+        "medh5::parallel": "D6",
+        "medh5::Grid::spacing": "D9",
+        "medh5::geometry::Grid::spacing": "D9",
+    }
+    # Allowing a module allows the module, not what it holds.
+    status, report = rust_api.compare([(old, new)], "patch", allowed)
+    assert status == 1
+    assert "- `medh5::parallel: new module` (D6)" in report
+    assert "- `medh5::parallel::threads: new function`\n" in report
+    assert "- `medh5::parallel::set_threads: new function`\n" in report
+    allowed |= {"medh5::parallel::threads": "D6", "medh5::parallel::set_threads": "D6"}
+    status, report = rust_api.compare([(old, new)], "patch", allowed)
+    assert status == 0
+    assert "- `medh5::parallel::threads: new function` (D6)" in report
+    assert rust_api.compare([(old, new)], "minor")[0] == 0
+    assert rust_api.compare([(old, old)], "patch") == (
+        0,
+        "## Rust API additions (patch)\n\nNo public item added.\n",
+    )
+
+
+def test_the_rust_files_are_found_where_semver_checks_left_them(
+    rust_api: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    checks = tmp_path / "semver-checks"
+    cache = checks / "cache"
+    local = checks / "local-medh5-2_2_2-x86_64-unknown-linux-gnu-abc" / "target" / "doc"
+    cache.mkdir(parents=True)
+    local.mkdir(parents=True)
+    (cache / "medh5-2_2_2-x86_64-unknown-linux-gnu-abc.json").write_text(
+        json.dumps(_rustdoc())
+    )
+    (cache / "medh5-2_2_2-x86_64-unknown-linux-gnu-abc.metadata.json").write_text("{}")
+    (cache / "medh5-2_2_1-x86_64-unknown-linux-gnu-abc.json").write_text(
+        json.dumps(_rustdoc(version="2.2.1"))
+    )
+    (local / "medh5.json").write_text(json.dumps(_rustdoc(extra=True)))
+    (local / "hdf5.json").write_text(json.dumps(_rustdoc()))
+    exceptions = tmp_path / "exceptions.txt"
+    exceptions.write_text("rust\tmedh5::parallel\tD6\n")
+    argv = [
+        "compare",
+        "--semver-checks",
+        str(checks),
+        "--crate",
+        "medh5",
+        "--release-type",
+        "patch",
+    ]
+    assert (
+        rust_api.main([*argv, "--baseline", "2.2.2", "--exceptions", str(exceptions)])
+        == 1
+    )
+    out = capsys.readouterr().out
+    assert "- `medh5::parallel: new module` (D6)" in out
+    assert "4 addition(s), not allowed in a patch" in out
+    with pytest.raises(SystemExit, match="0 baseline and 1 local"):
+        rust_api.main([*argv, "--baseline", "2.2.0"])
+
+
+def test_ci_checks_rust_additions_after_semver_checks() -> None:
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    job = ci[ci.index("\n  semver:") : ci.index("\n  python-api:")]
+    assert job.index("cargo semver-checks") < job.index("rust_api.py compare")
+    for crate in ("medh5-sys", "medh5", "medh5-cli"):
+        assert f"--crate {crate}" in job
 
 
 # --- the baseline ---

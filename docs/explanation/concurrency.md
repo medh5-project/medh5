@@ -148,6 +148,45 @@ medh5 verify --workers 4 case.medh5 case2.medh5
 medh5 dataset stats cohort.json --workers 4 -o stats.json
 ```
 
+## Threads inside one call
+
+One setting says how many threads a single medh5 call may use for the work it does outside HDF5:
+compressing chunks before HDF5 stores them, hashing bytes it has already read. HDF5's own calls stay
+on the calling thread, one at a time, in a fixed order, so a file written with four threads holds
+the same bytes as one written with one. The default is 1, which starts no thread at all.
+
+```python
+import medh5
+
+medh5.set_threads(4)              # every call in this process, from now on
+assert medh5.get_threads() == 4
+medh5.set_threads(1)              # the default: no thread is started
+```
+
+The count comes from `medh5.set_threads(n)` (Rust: `medh5::parallel::set_threads`), else the
+`MEDH5_THREADS` environment variable, read once at the first call that needs it, else 1. A value
+that is not a positive integer is refused with an error naming the variable; `0` is refused too,
+since there is no automatic count. The threads are started inside the call and joined before it
+returns: there is no pool, and nothing runs between calls. A `fork` waits for a call's threads to
+finish, so a child never inherits a lock held by a thread it does not have.
+
+Training loaders keep one thread per call. `medh5.torch.worker_init_fn` sets one in each
+`DataLoader` worker, so a parent's count is not multiplied by the number of workers: the workers
+are the parallelism there, and they already fill the cores.
+
+The command line takes `--threads N` before or after any command name, and passes the count to
+every process it starts. It sits beside `--workers`: `--workers M` runs files in *M* processes, and
+`--threads N` lets each call in each of them use *N* threads, so `--workers 4 --threads 2` can keep
+eight threads busy. A command whose work has no threaded path runs as it did. The count is the
+command's own: a process it starts is told it, but a child forked from it, such as a `DataLoader`
+worker of `medh5 bench`, is outside the command and takes its count as any process does, so
+`worker_init_fn`'s one thread holds there too.
+
+```bash
+medh5 resample case.medh5 --image CT --spacing 1,1,1 --grid-id iso -o iso.medh5 --threads 4
+medh5 verify --workers 2 --threads 2 case.medh5 case2.medh5
+```
+
 ## Free-threaded CPython 3.14
 
 CPython 3.14's free-threaded build (`python3.14t`) installs its own medh5 wheel (`cp314t`), and
