@@ -182,6 +182,23 @@ command's own: a process it starts is told it, but a child forked from it, such 
 worker of `medh5 bench`, is outside the command and takes its count as any process does, so
 `worker_init_fn`'s one thread holds there too.
 
+### Which calls use them
+
+`recompress` and `resample` compress the chunks they write on the threads. A worker is handed one
+whole chunk of the dataset being written, compresses it with the Blosc2 filter's own code, and
+hands it back; the calling thread stores each with `H5Dwrite_chunk`, in chunk order, so the file
+holds the bytes HDF5's own write stores. `resample` also maps and interpolates each chunk on the
+worker that compresses it. That covers images and label maps written under `training`, `balanced`
+and `archive`. Everything the writer cannot store exactly as HDF5 would goes through HDF5's write
+on the calling thread, as before: `portable` (gzip), a dataset under the compression threshold
+(stored without chunks), boolean masks, and a chunk only partly covered by a write.
+
+Blosc2's own `BLOSC_NTHREADS` is separate. A worker compresses with one Blosc2 thread, whatever
+it says, so four threads never become thirty-two. Where HDF5's write runs the filter, the variable
+still spreads a large chunk's blocks over that many threads, as in 2.2.2; those threads store the
+blocks in the order they finish, so the stored bytes can differ from run to run, while the values
+and every digest do not.
+
 ```bash
 medh5 resample case.medh5 --image CT --spacing 1,1,1 --grid-id iso -o iso.medh5 --threads 4
 medh5 verify --workers 2 --threads 2 case.medh5 case2.medh5

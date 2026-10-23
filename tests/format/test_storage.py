@@ -34,6 +34,25 @@ from tests.helpers import write_sample
 from tests.kits import Framed
 
 
+def _stored_chunks(path: Path) -> dict[str, list[tuple[tuple[int, ...], int, bytes]]]:
+    """Every chunked dataset of a file, by name: each stored chunk's offset,
+    filter mask and bytes."""
+    found: dict[str, list[tuple[tuple[int, ...], int, bytes]]] = {}
+
+    def visit(name: str, item: Any) -> None:
+        if isinstance(item, h5py.Dataset) and item.chunks is not None:
+            chunks = []
+            for k in range(item.id.get_num_chunks()):
+                info = item.id.get_chunk_info(k)
+                mask, data = item.id.read_direct_chunk(info.chunk_offset)
+                chunks.append((info.chunk_offset, mask, bytes(data)))
+            found[name] = chunks
+
+    with h5py.File(path, "r") as f:
+        f.visititems(visit)
+    return found
+
+
 class TestChunking:
     def test_S14_1_chunk_starts_from_the_patch_hint(self):
         chunk = spatial_chunk_for((256, 256, 256), (96, 96, 96), itemsize=2)
@@ -802,6 +821,90 @@ class TestRecompress:
             assert np.array_equal(sample.images["CT"].read(), values)
             assert np.array_equal(sample.annotations["organs"].dense([1])[0], mask)
             assert sample.verify().ok
+
+    @pytest.mark.parametrize("rechunk", [False, True])
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "big-endian",
+            "sparse",
+            "filter-skipped",
+            "smaller",
+            "larger",
+            "crossing",
+            "contiguous",
+        ],
+    )
+    def test_S14_2_a_recompression_at_four_threads_stores_what_one_stores(
+        self, tmp_path: Path, source: str, rechunk: bool
+    ):
+        """Four threads compress the chunks a recompression writes, and the
+        file stores the bytes one thread stores, from a source HDF5 reads by
+        converting (big-endian), one with chunks never written, one with a
+        chunk stored with the filter skipped, chunks smaller or larger than
+        the new ones or crossing their boundaries, and no chunks at all."""
+        from medh5.storage import recompress
+
+        shape = (40, 72, 72)
+        values = np.zeros(shape, np.int16)
+        rng = np.random.default_rng(23)
+        values[:16, :40, :40] = rng.integers(-1000, 1500, (16, 40, 40))
+        path = tmp_path / "source.medh5"
+        with medh5.create(path, codec="portable") as w:
+            w.add_grid("g", shape=shape, spacing=(1.0, 1.0, 1.0))
+            w.add_image("CT", values, grid="g", modality="CT")
+        layout: dict[str, Any] = {
+            "big-endian": {"chunks": (8, 32, 32), "dtype": ">i2"},
+            "sparse": {"chunks": (8, 32, 32)},
+            "filter-skipped": {"chunks": (8, 32, 32)},
+            "smaller": {"chunks": (4, 16, 16)},
+            "larger": {"chunks": (20, 72, 72)},
+            "crossing": {"chunks": (7, 30, 50)},
+            "contiguous": {"chunks": None},
+        }[source]
+        with h5py.File(path, "r+") as f:
+            attrs = dict(f["images/CT"].attrs)
+            del f["images/CT"]
+            chunked = layout["chunks"] is not None
+            ds = f.create_dataset(
+                "images/CT",
+                shape=shape,
+                dtype=layout.get("dtype", "<i2"),
+                chunks=layout["chunks"],
+                compression="gzip" if chunked else None,
+                fillvalue=0 if chunked else None,
+            )
+            if source == "sparse":
+                ds[:16, :40, :40] = values[:16, :40, :40]
+                assert ds.id.get_num_chunks() < np.prod(
+                    [-(-n // c) for n, c in zip(shape, layout["chunks"], strict=True)]
+                )
+            else:
+                ds[...] = values
+            if source == "filter-skipped":
+                raw = np.ascontiguousarray(values[:8, :32, :32]).tobytes()
+                ds.id.write_direct_chunk((0, 0, 0), raw, filter_mask=1)
+                assert ds.id.get_chunk_info(0).filter_mask == 1
+            ds.attrs.update(attrs)
+        with medh5.open(path) as s:
+            before = s.content_id
+            np.testing.assert_array_equal(s.images["CT"].read(), values)
+        stored = {}
+        threads = medh5.get_threads()
+        try:
+            for n in (1, 4):
+                medh5.set_threads(n)
+                out = tmp_path / f"t{n}.medh5"
+                result = recompress(path, "training", out=out, rechunk=rechunk)
+                assert result.ok and result.content_id == before
+                with medh5.open(out) as s:
+                    np.testing.assert_array_equal(s.images["CT"].read(), values)
+                    assert s.verify().ok
+                stored[n] = _stored_chunks(out)
+        finally:
+            medh5.set_threads(threads)
+        assert stored[4] == stored[1]
+        assert stored[1]["images/CT"], "the image is stored in chunks"
 
     def test_out_writes_beside_the_source(self, tmp_path, indexed_cohort):
         from medh5.storage import recompress

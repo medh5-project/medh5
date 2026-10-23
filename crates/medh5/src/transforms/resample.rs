@@ -1497,7 +1497,7 @@ impl Compute<'_> {
     /// Compute and compress every chunk of `batch` on up to `threads`
     /// workers, and store each in order; `batch` is emptied.
     fn write(&self, writer: &Chunks, batch: &mut Vec<Ready>, threads: usize) -> Result<()> {
-        let items: Vec<(&Ready, &(Vec<(usize, usize)>, Source))> =
+        let items: Vec<_> =
             batch.iter().flat_map(|ready| ready.sources.iter().map(move |source| (ready, source))).collect();
         #[cfg(test)]
         DIRECT.with(|n| n.set(n.get() + items.len()));

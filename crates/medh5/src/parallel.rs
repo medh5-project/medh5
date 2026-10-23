@@ -232,7 +232,6 @@ static STARTED: AtomicUsize = AtomicUsize::new(0);
 /// is where they go.  The first `Err` from `sink` stops the workers and is
 /// returned.  The caller must not hold HDF5's lock: a `fork` waiting for the
 /// parallel sections waits for this call, which may wait for HDF5's lock.
-#[cfg_attr(not(test), allow(dead_code))] // no path uses threads yet
 pub(crate) fn ordered<T, R, E>(
     threads: usize,
     items: impl Iterator<Item = T> + Send,

@@ -42,9 +42,32 @@ chunk would go on to be decompressed into the wrong buffer.
 6. **Uninitialised locals.** The plain branch's exit path frees `chunk` when
    `needs_free` says so, and a super-chunk of no chunks failed before either
    was set. Both start initialised.
+7. **Compression as an entry point.** The compress branch is now
+   `medh5_blosc2_compress`, which the filter calls and the engine's chunk
+   writer (`crates/medh5/src/h5/chunks.rs`) calls on its workers, outside
+   HDF5's lock, before storing the result with `H5Dwrite_chunk`. It checks the
+   filter values as the filter did and returns a negative code where the
+   filter pushed an error; the filter maps each code back to upstream's
+   message. With `one_thread`, the super-chunk's own compression and
+   decompression contexts are set to one thread, whatever `BLOSC_NTHREADS`
+   says, so a worker never starts threads of its own. The B2ND path is
+   `b2nd_from_cbuffer` written out (`b2nd_empty`, then
+   `b2nd_set_slice_cbuffer`) so the contexts can be set between the two. The
+   bytes it stores are upstream's: a test pins the stored chunks of every
+   profile and type against the filter before this patch. Upstream's
+   `compute_blosc2_blocksize` kept its scratch array in a `static`, which two
+   workers would share; it is on the stack.
 
 Patches 4 to 6 are held by tests in `src/lib.rs` that call the filter as HDF5
-does.
+does, and patch 7 by the chunk writer's tests in
+`crates/medh5/src/h5/chunks.rs`.
+
+C-Blosc2 itself is unchanged. `src/lib.rs` hands it a threads callback
+(`blosc2_set_threads_callback`) before `blosc2_init`, so a context of more
+than one thread starts threads only when it has work to share out, and joins
+them before it returns. Without it, the frame around every chunk compressed
+its index with a context of four threads, started and stopped with every
+chunk for an index of a few bytes.
 
 The window reads that skip HDF5's pipeline (`src/b2nd_slice.c`) are this
 crate's own code, not upstream's, and check the same conditions.

@@ -1256,6 +1256,55 @@ class TestShared:
             assert self._runs_in_children_forked_during(image.read, read)
 
     @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX: fork")
+    def test_a_fork_during_a_threaded_recompression_leaves_the_child_hdf5(
+        self, tmp_path: Path
+    ):
+        """A child forked while another thread recompresses at four threads
+        recompresses and reads at two and one: the fork waits until the
+        call's workers have joined, as it waits for HDF5's lock."""
+        from medh5.storage import recompress
+
+        shape = (40, 72, 72)
+        values = np.random.default_rng(29).integers(-1000, 1500, shape)
+        for name in ("busy", "child"):
+            with medh5.create(tmp_path / f"{name}.medh5", codec="balanced") as w:
+                w.add_grid("g", shape=shape, spacing=(1.0, 1.0, 1.0))
+                w.add_image("CT", values.astype(np.int16), grid="g", modality="CT")
+        runs = itertools.count()
+        finished: list[int] = []
+        failed: list[BaseException] = []
+
+        def busy() -> None:
+            n = next(runs)
+            out = tmp_path / f"busy-{n}.medh5"
+            try:
+                medh5.set_threads(4)
+                recompress(tmp_path / "busy.medh5", "training", out=out)
+                finished.append(n)
+            except medh5.MEDH5Error as error:
+                # A child holds an inherited descriptor of the file this
+                # thread had open, and with it the file's lock, until it
+                # exits: reopening that file here is refused meanwhile.
+                if "unable to lock file" not in str(error):
+                    failed.append(error)
+            out.unlink(missing_ok=True)
+
+        def child() -> None:
+            for n in (2, 1):
+                medh5.set_threads(n)
+                out = tmp_path / f"child-{os.getpid()}-{n}.medh5"
+                assert recompress(tmp_path / "child.medh5", "training", out=out).ok
+                with medh5.open(out) as s:
+                    np.testing.assert_array_equal(s.images["CT"].read(), values)
+
+        threads = medh5.get_threads()
+        try:
+            assert self._runs_in_children_forked_during(busy, child)
+        finally:
+            medh5.set_threads(threads)
+        assert not failed and finished
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX: fork")
     def test_a_fork_during_another_threads_loads_leaves_the_child_a_registry(self):
         """A child forked while another thread loads a registered vocabulary
         loads one: the fork waits for the engine's registry lock too, which

@@ -342,13 +342,15 @@ pub(crate) mod tests {
     use crate::rng::Rng;
     use crate::storage::codecs::{resolve_profile, Role};
 
+    /// Each stored chunk of each chunked dataset, by the dataset's path:
+    /// the chunk's offset, filter mask and bytes.
+    pub(crate) type Stored = std::collections::BTreeMap<String, Vec<(Vec<u64>, u32, Vec<u8>)>>;
+
     /// Every chunked dataset of a file, by path: each stored chunk's offset,
     /// filter mask and bytes, in the order HDF5 indexes them.
-    pub(crate) fn stored_chunks(
-        path: &std::path::Path,
-    ) -> std::collections::BTreeMap<String, Vec<(Vec<u64>, u32, Vec<u8>)>> {
+    pub(crate) fn stored_chunks(path: &std::path::Path) -> Stored {
         use crate::h5sys::{h5d, h5s};
-        fn walk(group: &hdf5::Group, out: &mut std::collections::BTreeMap<String, Vec<(Vec<u64>, u32, Vec<u8>)>>) {
+        fn walk(group: &hdf5::Group, out: &mut Stored) {
             for name in group.member_names().unwrap() {
                 if let Ok(ds) = group.dataset(&name) {
                     if ds.chunk().is_none() {
