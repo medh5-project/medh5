@@ -11,6 +11,7 @@ package reads the file.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,14 @@ from medh5.labels import LabelSet
 
 ROOT = Path(__file__).resolve().parents[1]
 """The repository root."""
+
+
+def unrooted(text: str, root: Path) -> str:
+    """*text* with *root* written ``OUT``, as printed and as a JSON string
+    spells it: two runs into two folders then compare.  On Windows the two
+    differ, JSON doubling each backslash."""
+    spelled = json.dumps(str(root))[1:-1]
+    return text.replace(spelled, "OUT").replace(str(root), "OUT")
 
 
 def _next_minor(version: str) -> str:

@@ -25,6 +25,7 @@ from tests.helpers import (
     LATER_MINOR,
     block,
     encode_attr,
+    unrooted,
     write_legacy_sample,
     write_raters,
     write_sample,
@@ -3385,6 +3386,232 @@ class TestWorkers:
         )
         code, printed = run(capsys, "verify", *paths, "--workers", "-1")
         assert code == EXIT_USAGE
+
+
+def _content_ids(where: Path) -> dict[str, str]:
+    """Each sample a run wrote, by name, as its content: a run writes its
+    own ``created``, so two runs never write the same bytes."""
+    ids = {}
+    for path in sorted(where.glob("*.medh5")):
+        with medh5.open(path) as sample:
+            ids[path.name] = sample.content_id
+    return ids
+
+
+class TestWorkersBeyondFiles:
+    """``--workers N`` on the commands whose unit is not one file --- a
+    subject's 0.x files, a conformance case --- prints and writes what one
+    process does."""
+
+    @staticmethod
+    def legacy(where: Path) -> list[str]:
+        """Six 0.x files of four subjects, two of them seen twice, and two
+        (``P1``, ``p1``) whose ids name one file on a case-insensitive file
+        system: the parent names each output before any worker starts."""
+        where.mkdir()
+        shape = (6, 8, 10)
+        mask = np.zeros(shape, bool)
+        mask[1:4, 2:6, 3:8] = True
+        visits = [
+            ("a", "P1", "20200101"),
+            ("b", "P2", "20200101"),
+            ("c", "P1", "20210101"),
+            ("d", "P3", "20200101"),
+            ("e", "P2", "20210101"),
+            ("f", "p1", "20200101"),
+        ]
+        paths = []
+        for name, subject, date in visits:
+            path = where / f"{name}.medh5"
+            write_legacy_sample(
+                path,
+                images={"CT": np.full(shape, ord(name), np.int16)},
+                seg={"liver": mask},
+                spacing=[1.0, 1.0, 1.0],
+                extra={"patient_id": subject, "study_date": date},
+            )
+            paths.append(str(path))
+        return paths
+
+    def migrations(self, capsys, tmp_path, *extra: str) -> set[Any]:
+        paths = self.legacy(tmp_path / "old")
+        seen = set()
+        for workers in (None, 1, 3):
+            out = tmp_path / f"m{workers}"
+            flags = [] if workers is None else ["--workers", str(workers)]
+            argv = ["migrate", *paths, "-o", str(out), "--group-by", "subject"]
+            argv += ["--subject-key"]
+            code, printed = run(capsys, *argv, "extra.patient_id", *extra, *flags)
+            text = unrooted(printed.out, out)
+            seen.add((code, text, printed.err, tuple(_content_ids(out).items())))
+        return seen
+
+    @pytest.mark.parametrize("extra", [[], ["--json"]])
+    def test_migrate_does_not_depend_on_the_worker_count(
+        self, capsys, tmp_path, monkeypatch, extra
+    ):
+        # A console script's workers answer through Python's stdout, which
+        # on Windows writes the ANSI code page: a `§` in a note answered as
+        # one byte no UTF-8 reader takes, and every worker seemed to die.
+        monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
+        seen = self.migrations(capsys, tmp_path, *extra)
+        assert len(seen) == 1, sorted(seen)
+        ((code, _, _, written),) = seen
+        assert code == EXIT_OK
+        assert len(written) == 4
+        assert len({name.casefold() for name, _ in written}) == 4
+        with medh5.open(tmp_path / "m3" / written[0][0]) as sample:
+            assert len(sample.timepoints) == 2
+
+    def test_a_dying_migrate_worker_fails_only_its_subject(
+        self, capsys, tmp_path, monkeypatch
+    ):
+        paths = self.legacy(tmp_path / "old")
+        argv = ["migrate", *paths, "-o", str(tmp_path / "m")]
+        argv += ["--group-by", "subject", "--subject-key", "extra.patient_id"]
+        argv += ["--json"]
+        code, printed = run(capsys, *argv)
+        assert code == EXIT_OK
+        names = sorted(path.name for path in (tmp_path / "m").glob("*.medh5"))
+        dying = names[1]
+        monkeypatch.setenv("MEDH5_TEST_WORKERS", f"exit:{Path(dying).stem}")
+        argv[argv.index(str(tmp_path / "m"))] = str(tmp_path / "n")
+        code, printed = run(capsys, *argv, "--workers", "2")
+        assert code == EXIT_ERROR
+        report = json.loads(printed.out)
+        assert sorted(Path(p).name for p in report["outputs"]) == [
+            name for name in names if name != dying
+        ]
+        (stopped,) = [n for n in report["notes"] if n["kind"] == "failed"]
+        assert "the worker writing it stopped" in stopped["message"]
+        assert not (tmp_path / "n" / dying).exists()
+
+    def test_no_more_workers_start_than_there_are_units(self, monkeypatch):
+        """``--workers 8`` over two cases or subjects started eight
+        interpreters, and over none, eight for nothing."""
+        from medh5 import _workers
+
+        started = []
+
+        class Counted(_workers._Worker):
+            def __init__(self, *args: Any) -> None:
+                started.append(self)
+                super().__init__(*args)
+
+        monkeypatch.setattr(_workers, "_Worker", Counted)
+        died = lambda label, task, status: None  # noqa: E731
+        assert list(_workers.run(str, [], 8, died)) == []
+        assert started == []
+        units = [("a", 1, []), ("b", 2, [])]
+        assert list(_workers.run(str, units, 8, died)) == ["1", "2"]
+        assert 1 <= len(started) <= 2
+
+    def test_units_sharing_a_file_never_run_at_once(self, monkeypatch, tmp_path):
+        """Two cases of one source, or two subjects writing one output, went
+        to two workers at once; the second now waits for the first, by any
+        name of the file, and the results keep their order."""
+        from medh5 import _workers
+
+        started: list[Any] = []
+        overlaps = []
+
+        class Watched(_workers._Worker):
+            def __init__(self, *args: Any) -> None:
+                super().__init__(*args)
+                started.append(self)
+
+            def give(self, index: int, label: str, task: Any, keys: Any) -> None:
+                overlaps.extend(
+                    label for w in started if w.held is not None and keys & w.keys
+                )
+                super().give(index, label, task, keys)
+
+        monkeypatch.setattr(_workers, "_Worker", Watched)
+        (tmp_path / "x.medh5").write_bytes(b"")
+        units = [
+            ("a", 1, [tmp_path / "x.medh5"]),
+            ("b", 2, [tmp_path / "." / "x.medh5"]),
+            ("c", 3, [tmp_path / "y.medh5"]),
+            ("d", 4, [str(tmp_path / "y.medh5")]),
+        ]
+        died = lambda label, task, status: None  # noqa: E731
+        assert list(_workers.run(str, units, 4, died)) == ["1", "2", "3", "4"]
+        assert overlaps == []
+
+    def test_a_worker_is_given_the_runs_thread_count(self, monkeypatch):
+        """A Python worker read ``MEDH5_THREADS`` from the environment it
+        was started in, not the count ``--threads`` set for the run."""
+        from medh5 import _workers
+
+        monkeypatch.setenv("MEDH5_THREADS", "7")
+        monkeypatch.setenv("MEDH5_TEST_WORKERS", "threads:b")
+        died = lambda label, task, status: None  # noqa: E731
+        units = [("a", 1, []), ("b", 2, []), ("c", 3, [])]
+        before = medh5.get_threads()
+        medh5.set_threads(4)
+        try:
+            with pytest.raises(RuntimeError, match="^b: 4 threads, as"):
+                list(_workers.run(str, units, 2, died))
+        finally:
+            medh5.set_threads(before)
+
+    @pytest.mark.parametrize("refused", [1, 2])
+    def test_a_worker_the_system_refuses_leaves_the_rest_to_the_others(
+        self, capsys, monkeypatch, refused
+    ):
+        """A process start refused (a limit on processes or memory) ended
+        the command; the workers started go on, and with none, this process
+        runs every unit, as the native pool does."""
+        from medh5 import _workers
+
+        started = []
+
+        class Limited(_workers._Worker):
+            def __init__(self, *args: Any) -> None:
+                if len(started) + 1 >= refused:
+                    raise BlockingIOError("Resource temporarily unavailable")
+                started.append(self)
+                super().__init__(*args)
+
+        monkeypatch.setattr(_workers, "_Worker", Limited)
+        died = lambda label, task, status: None  # noqa: E731
+        units = [(str(i), i, []) for i in range(5)]
+        assert list(_workers.run(str, units, 3, died)) == list("01234")
+        assert len(started) == refused - 1
+        err = capsys.readouterr().err
+        assert ("cannot start workers" in err) == (refused == 1)
+
+    def conformance(self, capsys, tmp_path, cases, *flags) -> tuple[Any, ...]:
+        out = tmp_path / f"corpus{len(list(tmp_path.iterdir()))}"
+        selected = [arg for case in cases for arg in ("--case", case)]
+        code, printed = run(capsys, "conformance", "run", str(out), *selected, *flags)
+        expected = (out / "expected.json").read_bytes()
+        return code, unrooted(printed.out, out), printed.err, expected
+
+    @pytest.mark.parametrize("extra", [[], ["--json"]])
+    def test_conformance_run_does_not_depend_on_the_worker_count(
+        self, capsys, tmp_path, extra
+    ):
+        cases = ["core-minimal", "seg-layers", "E001-missing-version"]
+        cases.append("E701-digest-mismatch")
+        seen = {
+            self.conformance(capsys, tmp_path, cases, *extra, *workers)
+            for workers in ([], ["--workers", "1"], ["--workers", "3"])
+        }
+        assert len(seen) == 1, sorted(seen)
+        ((code, out, _, _),) = seen
+        assert code == EXIT_OK
+        assert out
+
+    def test_a_dying_conformance_worker_fails_only_its_case(
+        self, capsys, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("MEDH5_TEST_WORKERS", "exit:seg-layers")
+        cases = ["core-minimal", "seg-layers", "E001-missing-version"]
+        code, out, _, _ = self.conformance(capsys, tmp_path, cases, "--workers", "2")
+        assert code == EXIT_ERROR
+        assert "2/3 cases pass" in out
+        assert "the worker running it stopped" in out
 
 
 # -- the converter command line: one typed flag per parameter -----------------------

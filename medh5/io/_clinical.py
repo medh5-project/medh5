@@ -367,4 +367,14 @@ def import_subject(
     return SubjectImport(subject, os.fspath(sample), result, report)
 
 
+def subject_died(label: str, task: tuple[Any, ...], status: str) -> SubjectImport:
+    """A subject whose worker stopped (``augment-cohort --workers``) is
+    refused, as a subject that cannot be imported is: the others are still
+    written.  Whether its sample was written is not known."""
+    subject, sample = task[0], task[1]
+    return SubjectImport(
+        subject, os.fspath(sample), error=f"the worker importing it stopped ({status})"
+    )
+
+
 __all__: list[str] = []

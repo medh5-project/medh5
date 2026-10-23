@@ -1403,6 +1403,25 @@ fn pins_of(history: &SubjectHistory) -> BTreeSet<String> {
 /// What one subject contributes: its history, its findings, its rows' views.
 type SubjectPart = (SubjectHistory, Vec<Finding>, Vec<(usize, RowView)>);
 
+/// One subject of [`preflight_each_in`], the `index`th of the manifest: its
+/// merged history, its findings, and the views of `wanted`, the indices of
+/// its rows.  Valid only for a manifest without findings, which
+/// [`preflight_each_in`] reads no subject of.  Public for the frontends:
+/// `task preflight --workers` reads the subjects in several processes.
+#[doc(hidden)]
+pub fn preflight_subject_in(
+    manifest: &TaskManifest,
+    task_fingerprint: &str,
+    index: usize,
+    wanted: &[usize],
+    access: &SourceAccess,
+    deep: bool,
+) -> Result<SubjectPart> {
+    let subject =
+        manifest.subjects.get(index).ok_or_else(|| Error::Index(format!("the manifest has no subject {index}")))?;
+    subject_part(manifest, task_fingerprint, subject, index, wanted, access, deep)
+}
+
 /// A row's view before its subject decides it: eligible, with nothing yet.
 fn blank(
     manifest: &TaskManifest,

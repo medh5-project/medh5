@@ -35,7 +35,7 @@ and come from [Tune performance](../guides/performance.md#the-numbers) and the
 
 | Work | One | Four |
 |---|---|---|
-| `medh5 verify` over 32 files | 10.1 s | 2.7 s (processes) |
+| `medh5 verify` over 32 files | 3.4 s | 0.9 s (processes) |
 | A training loader, 64³ patches | about 590 patches/s | 880–980 patches/s (`DataLoader` workers) |
 | A task's preflight | 3.6 s | 6.9 s (threads: slower) |
 
@@ -62,6 +62,29 @@ assert len(means) == 2
 Open a sample in the thread that reads it, as above. The training datasets' handle cache is shared by a process's threads and locked,
 and an item holds its handle until it is done, so a thread-based loader never has a file closed
 under it by another thread's eviction.
+
+**Processes** take a file each. The Python API keeps no worker count of its own: a
+`ProcessPoolExecutor` with one file per task is the whole recipe. Each task opens its file in the
+worker and returns plain values, so no handle crosses between processes, and the pool's `spawn`
+start makes each worker a fresh interpreter rather than a fork of one that may hold files open:
+
+```python
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+
+from medh5.validate import validate_file
+
+paths = ["case.medh5", "case2.medh5"]
+spawn = multiprocessing.get_context("spawn")
+with ProcessPoolExecutor(max_workers=2, mp_context=spawn) as pool:
+    reports = list(pool.map(validate_file, paths))   # in the order of paths
+assert [report.ok for report in reports] == [True, True]
+```
+
+The function a pool runs crosses to the worker by name, so it is one a module defines (here
+`validate_file`; your own goes in a module of yours, not in a notebook cell). A worker costs an
+interpreter start, about 0.1 s, so a pool pays off on work that takes longer than that per file:
+reading data, not only structure.
 
 ## Fork and exec
 
@@ -140,8 +163,13 @@ GPFS; see [On a network filesystem](../guides/performance.md#on-a-network-filesy
 
 The command line follows the same rule. `validate`, `verify`, `fix`, `index build` and
 `recompress` take `--workers N` and run the files in up to *N* processes, printing what one process
-would, byte for byte. `medh5 dataset stats --workers` is the exception: threads in one process,
-because it only reads.
+would, byte for byte. So do the commands whose unit of work is not one file: `migrate` (a subject's
+0.x files, which become one sample), `convert to-nnunet` (a case), `clinical augment-cohort` (a
+mapped subject), `task preflight` (a subject) and `conformance run` (a case). What the whole run
+shares — the cohort's label set, the dataset's case names, the index over a bulk export — is
+worked out once, before any worker starts, and units that touch one file go to one worker, in
+order. `medh5 dataset stats --workers` is the exception: threads in one process, because it only
+reads.
 
 ```bash
 medh5 verify --workers 4 case.medh5 case2.medh5

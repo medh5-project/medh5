@@ -590,9 +590,9 @@ def _from_nnunet(args: Any) -> int:
 
 
 def _to_nnunet(args: Any) -> int:
-    from medh5.io.nnunetv2 import to_nnunetv2
+    from medh5.io.nnunetv2 import _export
 
-    report = to_nnunetv2(
+    report = _export(
         [_sample_file(p) for p in args.paths],
         args.out,
         dataset_name=args.dataset_name,
@@ -602,6 +602,7 @@ def _to_nnunet(args: Any) -> int:
         unlabeled=args.unlabeled,
         split=args.split,
         replace=args.replace,
+        workers=args.workers,
     )
     return _finish(report, args)
 
@@ -679,9 +680,9 @@ def _clinical_augment_cohort(args: Any) -> int:
         "texts": args.with_text,
     }
     if args.from_meds:
-        from medh5.io.meds import augment_cohort_from_meds
+        from medh5.io.meds import _cohort_from_meds
 
-        cohort = augment_cohort_from_meds(
+        cohort = _cohort_from_meds(
             args.from_meds,
             mapping,
             code_systems=_pairs(args.code_system, "code-system"),
@@ -689,12 +690,15 @@ def _clinical_augment_cohort(args: Any) -> int:
             day_precision=args.day_precision or (),
             document_codes=args.document_code or (),
             both_values=args.both_values or "refuse",
+            workers=args.workers,
             **common,
         )
     else:
-        from medh5.io.fhir import augment_cohort_from_fhir
+        from medh5.io.fhir import _cohort_from_fhir
 
-        cohort = augment_cohort_from_fhir(args.from_fhir_bulk, mapping, **common)
+        cohort = _cohort_from_fhir(
+            args.from_fhir_bulk, mapping, workers=args.workers, **common
+        )
     found = cohort.to_json()
     if args.report:
         _write_report(Path(args.report), json.dumps(found, indent=2) + "\n")

@@ -6,7 +6,8 @@
 //! `medh5::companion::validate_cache` --- the same calls the Python package
 //! makes, so the command line, Rust and Python agree by construction.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use clap::ArgMatches;
@@ -18,13 +19,17 @@ use medh5::clinical::ClinicalRecords;
 use medh5::collection::{open_any, AnyFile};
 use medh5::companion::cache::{validate_cache_in, CacheCheck, CacheEntry, FeatureCache};
 use medh5::companion::task::notes_of;
-use medh5::companion::{preflight_each_in, write_preflight_noted, Admitted, Note, RowView, SourceAccess, TaskManifest};
+use medh5::companion::view::preflight_subject_in;
+use medh5::companion::{
+    preflight_each_in, write_preflight_noted, Admitted, Finding, Note, RowView, SourceAccess, TaskManifest,
+};
 use medh5::h5::file::same_file;
-use medh5::json::{pretty, repr_str};
+use medh5::json::{pretty, pretty_at, repr_str};
 use medh5::sample::Sample;
 use medh5::Error;
 
 use crate::common::*;
+use crate::workers;
 
 pub fn dispatch(argv: &[String], name: &str, m: &ArgMatches, ctx: &mut Ctx) -> CmdResult {
     let result = match (name, m.subcommand()) {
@@ -376,10 +381,7 @@ fn source_access(
     base: Option<&Path>,
     ctx: &mut Ctx,
 ) -> medh5::Result<SourceAccess> {
-    if let Some(root) = get_str(m, "source_root") {
-        return SourceAccess::confined(base, Some(Path::new(root)));
-    }
-    if !flag(m, "any_source_path") {
+    if get_str(m, "source_root").is_none() && !flag(m, "any_source_path") {
         // A base that does not exist confines nothing to note: its sources
         // fail to open (T301) whatever 3.0 does.
         if let Ok(confined) = SourceAccess::confined(base, None) {
@@ -395,7 +397,15 @@ fn source_access(
             }
         }
     }
-    Ok(SourceAccess::new(base))
+    access_of(m, base)
+}
+
+/// [`source_access`], without its note.
+fn access_of(m: &ArgMatches, base: Option<&Path>) -> medh5::Result<SourceAccess> {
+    match get_str(m, "source_root") {
+        Some(root) => SourceAccess::confined(base, Some(Path::new(root))),
+        None => Ok(SourceAccess::new(base)),
+    }
 }
 
 fn findings_text(findings: &[medh5::companion::Finding], ctx: &mut Ctx) {
@@ -468,6 +478,10 @@ fn task_preflight(m: &ArgMatches, ctx: &mut Ctx) -> CmdResult {
     let (manifest, base, notes) = load_task(m)?;
     let access = source_access(m, &manifest, base.as_deref(), ctx)?;
     let deep = flag(m, "deep");
+    // A manifest with findings reads no subject: nothing to share out.
+    if workers::wanted(m) > 1 && manifest.subjects.len() > 1 && manifest.validate().is_empty() {
+        return preflight_in_units(m, &manifest, &notes, ctx);
+    }
     if flag(m, "json") {
         let ok = write_preflight_noted(&manifest, &access, deep, &notes, &mut Stdout(ctx))?;
         ctx.print("");
@@ -504,6 +518,181 @@ fn task_preflight(m: &ArgMatches, ctx: &mut Ctx) -> CmdResult {
     ctx.print(String::new());
     ctx.print(table(&rows, &["row", "partition", "cutoff_us", "status", "events", "slots", "target", "why"]));
     Ok(if ok { EXIT_OK } else { EXIT_ERROR })
+}
+
+/// `task preflight` on `--workers` processes, a subject to a unit: the same
+/// text, or the same bytes of `--json`, as one process writes.  Each
+/// subject's history is written as soon as its turn comes; its rows, as
+/// text, wait in a temporary file for the subjects before them.
+fn preflight_in_units(m: &ArgMatches, manifest: &TaskManifest, notes: &[Note], ctx: &mut Ctx) -> CmdResult {
+    let as_json = flag(m, "json");
+    let units: Vec<workers::Unit> = manifest
+        .subjects
+        .iter()
+        .enumerate()
+        .map(|(i, s)| workers::Unit { task: json!(i), files: Vec::new(), label: s.subject_id.clone() })
+        .collect();
+    let mut findings: Vec<Finding> = Vec::new();
+    let mut statuses: Vec<Option<String>> = vec![None; manifest.rows.len()];
+    // Text: each row's cells.  `--json`: where each row's text is in `spill`.
+    let mut cells: Vec<Vec<String>> = vec![Vec::new(); manifest.rows.len()];
+    let mut spans: Vec<(u64, usize)> = vec![(0, 0); manifest.rows.len()];
+    let mut spill = tempfile::tempfile()?;
+    let mut end = 0u64;
+    let mut subjects = 0usize;
+    if as_json {
+        let mut out = Stdout(ctx);
+        write!(out, "{{\n  \"task_fingerprint\": {}", pretty_at(&json!(manifest.task_fingerprint()), 1))?;
+        write!(
+            out,
+            ",\n  \"manifest_fingerprint\": {},\n  \"subjects\": ",
+            pretty_at(&json!(manifest.manifest_fingerprint()), 1)
+        )?;
+    }
+    workers::run_units("task preflight", m, ctx, &units, &mut |ctx, outcome| {
+        let part = &outcome.data;
+        if as_json {
+            let mut out = Stdout(ctx);
+            out.write_all(if subjects > 0 { b",\n    " } else { b"[\n    " })?;
+            out.write_all(part["history"].as_str().unwrap_or_default().as_bytes())?;
+        }
+        subjects += 1;
+        for row in part["rows"].as_array().into_iter().flatten() {
+            let r = row["index"].as_u64().unwrap_or_default() as usize;
+            let slot = statuses.get_mut(r).ok_or_else(|| Error::Index(format!("the manifest has no row {r}")))?;
+            *slot = Some(row["status"].as_str().unwrap_or_default().to_string());
+            if as_json {
+                let text = row["json"].as_str().unwrap_or_default();
+                spill.write_all(text.as_bytes())?;
+                spans[r] = (end, text.len());
+                end += text.len() as u64;
+            } else {
+                cells[r] = row["cells"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|c| c.as_str().unwrap_or_default().to_string())
+                    .collect();
+            }
+        }
+        findings.extend(part["findings"].as_array().into_iter().flatten().map(|f| {
+            let text = |key: &str| f[key].as_str().unwrap_or_default().to_string();
+            Finding { code: text("code"), location: text("location"), message: text("message") }
+        }));
+        Ok(())
+    })?;
+    // A valid manifest's every row names a declared subject (T201).
+    let statuses: Vec<String> = statuses
+        .into_iter()
+        .enumerate()
+        .map(|(r, s)| {
+            s.ok_or_else(|| Error::Runtime(format!("row {} was read by no subject", manifest.rows[r].row_id)))
+        })
+        .collect::<medh5::Result<_>>()?;
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for status in &statuses {
+        *counts.entry(status).or_default() += 1;
+    }
+    let ok = findings.is_empty();
+    if as_json {
+        let mut out = Stdout(ctx);
+        out.write_all(if subjects > 0 { b"\n  ]" } else { b"[]" })?;
+        out.write_all(b",\n  \"rows\": ")?;
+        spill.seek(SeekFrom::Start(0))?;
+        let mut text = Vec::new();
+        for (r, (at, len)) in spans.iter().enumerate() {
+            text.resize(*len, 0);
+            spill.seek(SeekFrom::Start(*at))?;
+            spill.read_exact(&mut text)?;
+            out.write_all(if r > 0 { b",\n    " } else { b"[\n    " })?;
+            out.write_all(&text)?;
+        }
+        out.write_all(if spans.is_empty() { b"[]" } else { b"\n  ]" })?;
+        let findings: Vec<Value> = findings.iter().map(Finding::to_json).collect();
+        let notes: Vec<Value> = notes.iter().map(Note::to_json).collect();
+        write!(out, ",\n  \"ok\": {ok},\n  \"counts\": {}", pretty_at(&json!(counts), 1))?;
+        write!(out, ",\n  \"findings\": {}", pretty_at(&json!(findings), 1))?;
+        write!(out, ",\n  \"notes\": {}", pretty_at(&json!(notes), 1))?;
+        out.write_all(b"\n}")?;
+        ctx.print("");
+        return Ok(if ok { EXIT_OK } else { EXIT_ERROR });
+    }
+    let counts: Vec<String> = counts.iter().map(|(k, v)| format!("{v} {k}")).collect();
+    ctx.print(format!(
+        "{}: {} ({} rows: {})",
+        req_str(m, "manifest"),
+        if ok { "OK" } else { "FAILED" },
+        statuses.len(),
+        if counts.is_empty() { "none".into() } else { counts.join(", ") }
+    ));
+    findings_text(&findings, ctx);
+    notes_text(notes, ctx);
+    ctx.print(String::new());
+    ctx.print(table(&cells, &["row", "partition", "cutoff_us", "status", "events", "slots", "target", "why"]));
+    Ok(if ok { EXIT_OK } else { EXIT_ERROR })
+}
+
+/// `task preflight --workers`: a unit is a subject, by its index in the
+/// manifest.  A subject that cannot be read stops a preflight, so one whose
+/// worker stopped does.
+pub(crate) const PREFLIGHT: workers::Kind = workers::Kind {
+    runner: |m| {
+        let (manifest, base, _) = load_task(m)?;
+        let access = access_of(m, base.as_deref())?;
+        let mut rows_of: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, row) in manifest.rows.iter().enumerate() {
+            rows_of.entry(row.subject_id.clone()).or_default().push(i);
+        }
+        let task_fingerprint = manifest.task_fingerprint();
+        Ok(Box::new(SubjectReader {
+            manifest,
+            task_fingerprint,
+            rows_of,
+            access,
+            deep: flag(m, "deep"),
+            json: flag(m, "json"),
+        }))
+    },
+    died: |unit, status| {
+        Err(Error::Runtime(format!("subject {}: the worker reading it stopped ({status})", repr_str(&unit.label))))
+    },
+    writes: false,
+};
+
+struct SubjectReader {
+    manifest: TaskManifest,
+    task_fingerprint: String,
+    rows_of: HashMap<String, Vec<usize>>,
+    access: SourceAccess,
+    deep: bool,
+    json: bool,
+}
+
+impl workers::Runner for SubjectReader {
+    fn run(&mut self, task: &Value) -> medh5::Result<workers::FileOutcome> {
+        let index = task.as_u64().ok_or_else(|| Error::Value("a preflight task names no subject".into()))? as usize;
+        let subject = self.manifest.subjects.get(index).ok_or_else(|| Error::Index(format!("no subject {index}")))?;
+        let wanted = self.rows_of.get(&subject.subject_id).map(Vec::as_slice).unwrap_or(&[]);
+        let (history, findings, rows) =
+            preflight_subject_in(&self.manifest, &self.task_fingerprint, index, wanted, &self.access, self.deep)?;
+        let rows: Vec<Value> = rows
+            .iter()
+            .map(|(r, view)| {
+                if self.json {
+                    json!({"index": r, "status": view.status, "json": pretty_at(&view.to_json(Some(&history)), 2)})
+                } else {
+                    json!({"index": r, "status": view.status, "cells": row_line(view).1})
+                }
+            })
+            .collect();
+        let mut outcome = workers::FileOutcome::new();
+        outcome.data = json!({
+            "history": if self.json { Value::String(pretty_at(&history.to_json(), 2)) } else { Value::Null },
+            "rows": rows,
+            "findings": findings.iter().map(Finding::to_json).collect::<Vec<_>>(),
+        });
+        Ok(outcome)
+    }
 }
 
 /// A row's status and its line of the summary table.

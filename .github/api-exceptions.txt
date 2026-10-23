@@ -15,3 +15,8 @@ rust	medh5::parallel::threads	D6
 python	medh5.set_threads	D6
 python	medh5.get_threads	D6
 cli	medh5 --threads	D6
+cli	medh5 migrate --workers	D7
+cli	medh5 convert to-nnunet --workers	D7
+cli	medh5 conformance run --workers	D7
+cli	medh5 task preflight --workers	D7
+cli	medh5 clinical augment-cohort --workers	D7

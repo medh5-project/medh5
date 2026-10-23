@@ -522,6 +522,52 @@ pub fn migrate_paths(
     label_set: Option<&LabelSet>,
     codec: &str,
 ) -> Result<ConversionReport> {
+    let MigrationPlan { mut log, labels, groups } = plan_migration(paths, outdir, group_by, subject_key, label_set)?;
+    for group in &groups {
+        let written = migrate_group(group, &labels, codec);
+        log.outputs.extend(written.outputs);
+        log.notes.extend(written.notes);
+    }
+    Ok(log)
+}
+
+/// What [`migrate_paths`] decides before it writes a sample: the report so
+/// far (the label set it minted, the files it could not read, the grouping),
+/// the label set, and each sample to write, in the order it writes them.
+/// Public for the frontends: `medh5 migrate --workers` writes the samples
+/// in several processes, each with [`migrate_group`].
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct MigrationPlan {
+    pub log: ConversionReport,
+    pub labels: LabelSet,
+    pub groups: Vec<MigrationGroup>,
+}
+
+/// One sample of a [`MigrationPlan`]: its subject's files, as grouped, and
+/// where it goes.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct MigrationGroup {
+    /// The occasions in timepoint order; each `payload` indexes `sources`.
+    pub group: SubjectGroup,
+    pub sources: Vec<PathBuf>,
+    /// The sample's id, unique in the run, and its file's stem.
+    pub name: String,
+    pub target: PathBuf,
+    /// The input `target` is, when it is one (`-o .`): nothing is written.
+    pub clash: Option<PathBuf>,
+}
+
+/// [`migrate_paths`] up to its first write.
+#[doc(hidden)]
+pub fn plan_migration(
+    paths: &[&Path],
+    outdir: &Path,
+    group_by: &str,
+    subject_key: Option<&str>,
+    label_set: Option<&LabelSet>,
+) -> Result<MigrationPlan> {
     std::fs::create_dir_all(outdir)?;
     let mut log = ConversionReport::new("migrate", &format!("{} file(s)", paths.len()));
     let labels = match label_set {
@@ -563,9 +609,9 @@ pub fn migrate_paths(
             json!({}),
         );
     }
-    let groups = group_by_subject(occasions, group_by, Some(&mut log))?;
+    let mut groups = Vec::new();
     let mut used = BTreeSet::new();
-    for mut group in groups {
+    for mut group in group_by_subject(occasions, group_by, Some(&mut log))? {
         // The output's name is the sample's id, unique in the run: a
         // subject's studies, or keys differing only in case, shared one.
         let name = output_name(&group, &mut used, &|s: &str| sample_key(s));
@@ -576,36 +622,52 @@ pub fn migrate_paths(
             group.subject_id = format!("{FALLBACK_PREFIX}:{name}");
         }
         let target = outdir.join(format!("{name}.medh5"));
-        let inputs: Vec<&str> = group.occasions.iter().map(|o| o.key.as_str()).collect();
         // `-o .` wrote each sample over its 0.x original.
-        if let Some(input) = paths.iter().find(|p| same_file(p, &target)) {
-            log.warn(
-                "failed",
-                format!(
-                    "{}: the output {} is the input {}; nothing was written for it",
-                    inputs.join(", "),
-                    repr_str(&target.to_string_lossy()),
-                    repr_str(&input.to_string_lossy())
-                ),
-                json!({"inputs": inputs, "output": target.to_string_lossy()}),
-            );
-            continue;
+        let clash = paths.iter().find(|p| same_file(p, &target)).map(|p| p.to_path_buf());
+        let mut own = Vec::new();
+        for occasion in &mut group.occasions {
+            own.push(sources[occasion.payload].clone());
+            occasion.payload = own.len() - 1;
         }
-        // A file whose content cannot be migrated is reported, and the rest
-        // of the cohort is: the first such file used to end the migration,
-        // with the files after it never written.  What the group's notes
-        // described was never written either, so they go.
-        let mark = log.notes.len();
-        if let Err(e) = write_group(&group, &name, &sources, &target, &labels, codec, &mut log) {
-            log.notes.truncate(mark);
-            log.warn(
-                "failed",
-                format!("{}: {e}; nothing was written for it", inputs.join(", ")),
-                json!({"inputs": inputs, "output": target.to_string_lossy()}),
-            );
-        }
+        groups.push(MigrationGroup { group, sources: own, name, target, clash });
     }
-    Ok(log)
+    Ok(MigrationPlan { log, labels, groups })
+}
+
+/// Write one sample of a [`MigrationPlan`]: what [`migrate_paths`] adds to
+/// its report for it, its notes and its output.  A sample that cannot be
+/// written is a `failed` note, never an error.
+#[doc(hidden)]
+pub fn migrate_group(planned: &MigrationGroup, labels: &LabelSet, codec: &str) -> ConversionReport {
+    let mut log = ConversionReport::new("migrate", "");
+    let MigrationGroup { group, sources, name, target, clash } = planned;
+    let inputs: Vec<&str> = group.occasions.iter().map(|o| o.key.as_str()).collect();
+    if let Some(input) = clash {
+        log.warn(
+            "failed",
+            format!(
+                "{}: the output {} is the input {}; nothing was written for it",
+                inputs.join(", "),
+                repr_str(&target.to_string_lossy()),
+                repr_str(&input.to_string_lossy())
+            ),
+            json!({"inputs": inputs, "output": target.to_string_lossy()}),
+        );
+        return log;
+    }
+    // A file whose content cannot be migrated is reported, and the rest of
+    // the cohort is: the first such file used to end the migration, with the
+    // files after it never written.  What the group's notes described was
+    // never written either, so they go.
+    if let Err(e) = write_group(group, name, sources, target, labels, codec, &mut log) {
+        log.notes.clear();
+        log.warn(
+            "failed",
+            format!("{}: {e}; nothing was written for it", inputs.join(", ")),
+            json!({"inputs": inputs, "output": target.to_string_lossy()}),
+        );
+    }
+    log
 }
 
 fn write_group(
