@@ -12,6 +12,7 @@ pub mod file;
 pub mod fork;
 pub mod graph;
 pub mod ops;
+pub(crate) mod chunks;
 mod window;
 
 pub use attrs::AttrValue;
