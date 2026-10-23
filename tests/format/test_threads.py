@@ -1287,7 +1287,9 @@ class TestShared:
                 # exits: reopening that file here is refused meanwhile.
                 if "unable to lock file" not in str(error):
                     failed.append(error)
-            out.unlink(missing_ok=True)
+            # Kept, not unlinked: a child's HDF5 still lists the file open at
+            # the fork, and a file of the child's given the inode of one
+            # deleted since would be refused as already open.
 
         def child() -> None:
             for n in (2, 1):

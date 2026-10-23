@@ -416,7 +416,10 @@ mod tests {
         let stop = AtomicBool::new(false);
         // A child holds the files the busy thread has open, and their locks,
         // until it closes them, so the busy thread writes a new file each
-        // time and never opens one again.
+        // time and never opens one again.  And it keeps each: the child's
+        // HDF5 still lists the file open at the fork, and a file of the
+        // child's given the inode of one deleted since would be refused as
+        // already open.
         let busy = dir.path();
         let failed = std::thread::scope(|scope| {
             scope.spawn(|| {
@@ -426,7 +429,6 @@ mod tests {
                     }
                     let path = busy.join(format!("busy-{n}.h5"));
                     write(&path, 4).unwrap();
-                    std::fs::remove_file(path).unwrap();
                 }
             });
             let mut failed = Vec::new();
