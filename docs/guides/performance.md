@@ -412,6 +412,32 @@ only with its `asm` feature, which medh5 does not enable, so every aarch64
 build hashes in software. On a CPU that hashes several times faster the
 digests' share, and so what threads give them, is smaller.
 
+### Threads in the digests
+
+With `--threads N`, every command that commits a sample, `verify` and
+`validate --level integrity` decompress and hash on *N* threads, several
+datasets at once, while the calling thread reads the stored chunks
+([Threads inside one call](../explanation/concurrency.md#threads-inside-one-call)).
+The same sample on another Linux x86_64 container with four vCPUs, this one
+*with* SHA extensions (`digest_bytes`: SHA-256 1,266 MiB/s), an ordinary
+release build, seconds, median of three; one thread runs the digests as
+2.2.2 does:
+
+| Command | 1 thread | 2 threads | 4 threads |
+|---|---|---|---|
+| `resample`, nearest, no annotation | 9.7 | 6.8 | 6.5 |
+| `convert from-nifti` | 12.3 | 10.4 | 10.3 |
+| an amendment (`dataset split --write-claims`) | 6.6 | 2.9 | 2.1 |
+| `recompress --profile training` | 5.9 | 4.2 | 4.1 |
+| `verify` | 2.9 | 1.2 | 0.8 |
+| `validate --level integrity` | 2.8 | 1.1 | 0.8 |
+
+Two threads gain more than twice on the checks because the calling thread
+keeps reading while both hash. A command that writes gains less: its
+digests run after it writes, and what it writes, compresses and, for a
+conversion, inflates is outside them. Every digest is the one a single
+thread computes.
+
 ## Related
 
 - **[Storage](../reference/storage.md)** — codec profiles, chunking and the index in full.

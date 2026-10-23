@@ -9,6 +9,7 @@ use super::digest::{
     collect_digests, compute_content_id, dataset_digest, dataset_digest_inspected, digestible, group_digest, root_algo,
     AttrNameMap, Inspect, STREAM_BYTES,
 };
+use super::workers::{Inspector, Job};
 use crate::array::NdArray;
 use crate::digest::parse_canonical_digest;
 use crate::h5::attrs::{self, AttrValue};
@@ -238,19 +239,43 @@ pub fn verify_object(root: &hdf5::Group, path: &str) -> Result<bool> {
 /// as malformed or mismatched.  A path naming no dataset, or one carrying no
 /// digest, is not among them.
 pub fn failing_digests(root: &hdf5::Group, paths: &[String]) -> Result<Vec<String>> {
-    let mut out = Vec::new();
+    // Each path with its stored digest, and whether it is hashed: one that
+    // does not parse fails as it is.
+    // An attribute that cannot be read stops the pass where it is reached.
+    let mut found = Vec::new();
+    let mut jobs = Vec::new();
+    let mut stopped = None;
     for path in paths {
         let Some(ds) = ops::resolve_dataset(root, path) else { continue };
-        let Some(stored) = attrs::get_str(&ds, "digest")? else { continue };
-        let holds = match parse_canonical_digest(&stored) {
-            Ok((algo, _)) => dataset_digest(&ds, path, &algo)? == stored,
+        let stored = match attrs::get_str(&ds, "digest") {
+            Ok(Some(stored)) => stored,
+            Ok(None) => continue,
+            Err(e) => {
+                stopped = Some(e);
+                break;
+            }
+        };
+        let hashed = match parse_canonical_digest(&stored) {
+            Ok((algo, _)) => {
+                jobs.push(Job::new(ds, path, &algo));
+                true
+            }
             Err(_) => false,
         };
+        found.push((path, stored, hashed));
+    }
+    let mut digests = super::workers::digests(jobs)?.into_iter();
+    let mut out = Vec::new();
+    for (path, stored, hashed) in found {
+        let holds = hashed && digests.next().expect("a digest for every path hashed")? == stored;
         if !holds {
             out.push(path.clone());
         }
     }
-    Ok(out)
+    match stopped {
+        Some(e) => Err(e),
+        None => Ok(out),
+    }
 }
 
 /// Index entries whose `source_digest` no longer matches their source (§13.3).
@@ -309,7 +334,7 @@ pub fn verify_root(
     partial: Option<&[String]>,
     check_content_id: bool,
 ) -> Result<VerifyResult> {
-    verify(root, attr_names, partial, check_content_id, None, None)
+    verify(root, attr_names, partial, check_content_id, Inspection::None, None)
 }
 
 /// [`verify_root`], handing every block of every digested dataset it reads to
@@ -324,7 +349,17 @@ pub fn verify_root_inspecting(
     check_content_id: bool,
     inspect: &mut dyn FnMut(&str, &NdArray) -> Result<()>,
 ) -> Result<VerifyResult> {
-    verify(root, attr_names, partial, check_content_id, Some(inspect), None)
+    verify(root, attr_names, partial, check_content_id, Inspection::Shared(inspect), None)
+}
+
+/// What a target of a verification is, before the digests are compared.
+enum Step {
+    /// Its type has no digest.
+    Undigestible,
+    /// Hashed here, or failed before hashing.
+    Digest(Result<String>),
+    /// Hashed on the workers: the next of their digests.
+    Hashed,
 }
 
 /// What [`verify_root_inspecting`] hands each block it reads to, with the
@@ -341,15 +376,29 @@ pub(crate) type Unread = Vec<(String, Error)>;
 /// with what stopped it, and the pass goes on to the next.  Stopping at the
 /// first unreadable chunk hid every other E701 and E702 in the file, and the
 /// name of the dataset that stopped it.
-pub(crate) fn verify_root_reporting(
+///
+/// `inspectors` holds a check per dataset path, each handed that dataset's
+/// blocks on whichever worker hashes it; the one a dataset read here used is
+/// taken out.
+pub(crate) fn verify_root_reporting<'a>(
     root: &hdf5::Group,
     attr_names: Option<&AttrNameMap>,
     check_content_id: bool,
-    inspect: &mut dyn FnMut(&str, &NdArray) -> Result<()>,
+    inspectors: &mut HashMap<String, Inspector<'a>>,
 ) -> Result<(VerifyResult, Unread)> {
     let mut unread = Vec::new();
-    let result = verify(root, attr_names, None, check_content_id, Some(inspect), Some(&mut unread))?;
+    let result = verify(root, attr_names, None, check_content_id, Inspection::PerPath(inspectors), Some(&mut unread))?;
     Ok((result, unread))
+}
+
+/// How a verification hands the blocks it reads to a check.
+enum Inspection<'i, 'a> {
+    None,
+    /// One check for every dataset, called on this thread in dataset order:
+    /// the datasets are hashed one after another.
+    Shared(InspectPath<'i>),
+    /// A check per path, on the workers.
+    PerPath(&'i mut HashMap<String, Inspector<'a>>),
 }
 
 /// `step`, or --- when `unread` collects failures --- its value, a failure
@@ -370,7 +419,7 @@ fn verify(
     attr_names: Option<&AttrNameMap>,
     partial: Option<&[String]>,
     check_content_id: bool,
-    mut inspect: Option<InspectPath<'_>>,
+    mut inspection: Inspection<'_, '_>,
     mut unread: Option<&mut Unread>,
 ) -> Result<VerifyResult> {
     stage!("verify");
@@ -384,32 +433,57 @@ fn verify(
         }
     };
     let mut result = VerifyResult::default();
+    // Each target's stored digest and the dataset to hash, or why there is
+    // none; then the digests, on the workers but with a shared check.
+    let mut found = Vec::new();
+    let mut jobs = Vec::new();
     for path in targets {
         let Some(value) = stored.get(&path) else {
-            result.malformed.push(path);
+            found.push((path, None));
             continue;
         };
         let Ok((algo, _)) = parse_canonical_digest(value) else {
+            found.push((path, None));
+            continue;
+        };
+        let ds = (|| -> Result<Option<hdf5::Dataset>> {
+            let ds = root.dataset(&path)?;
+            Ok(digestible(&ds)?.then_some(ds))
+        })();
+        let step = match ds {
+            Ok(Some(ds)) => match &mut inspection {
+                Inspection::Shared(inspect) => {
+                    let mut each = |block: &NdArray| inspect(&path, block);
+                    let each: Inspect<'_> = &mut each;
+                    Step::Digest(dataset_digest_inspected(&ds, &path, &algo, STREAM_BYTES, Some(each)))
+                }
+                other => {
+                    let mut job = Job::new(ds, &path, &algo);
+                    if let Inspection::PerPath(inspectors) = other {
+                        job.inspect = inspectors.remove(&path);
+                    }
+                    jobs.push(job);
+                    Step::Hashed
+                }
+            },
+            Ok(None) => Step::Undigestible,
+            Err(e) => Step::Digest(Err(e)),
+        };
+        found.push((path, Some((value, step))));
+    }
+    let mut hashed = super::workers::digests(jobs)?.into_iter();
+    for (path, step) in found {
+        let Some((value, step)) = step else {
             result.malformed.push(path);
             continue;
         };
         // One dataset that cannot be read is that dataset's failure, not the
         // pass's, where the caller collects them.
-        let digest = (|| -> Result<Option<String>> {
-            let ds = root.dataset(&path)?;
-            if !digestible(&ds)? {
-                return Ok(None);
-            }
-            let computed = match inspect.as_mut() {
-                Some(inspect) => {
-                    let mut each = |block: &NdArray| inspect(&path, block);
-                    let each: Inspect<'_> = &mut each;
-                    dataset_digest_inspected(&ds, &path, &algo, STREAM_BYTES, Some(each))?
-                }
-                None => dataset_digest_inspected(&ds, &path, &algo, STREAM_BYTES, None)?,
-            };
-            Ok(Some(computed))
-        })();
+        let digest = match step {
+            Step::Undigestible => Ok(None),
+            Step::Digest(digest) => digest.map(Some),
+            Step::Hashed => hashed.next().expect("a digest for every dataset hashed").map(Some),
+        };
         // Named, where nothing collects it: HDF5's message does not say which
         // dataset's chunk failed to decode.
         let digest = match (digest, unread.is_some()) {
@@ -430,6 +504,7 @@ fn verify(
             }
         }
     }
+    drop(hashed);
     let mut undigested = Vec::new();
     ops::visit(root, &mut |name, node| {
         if let Node::Dataset(ds) = node {

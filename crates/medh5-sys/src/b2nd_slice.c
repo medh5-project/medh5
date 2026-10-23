@@ -73,3 +73,29 @@ done:
   b2nd_free(array); /* and the super-chunk with it */
   return rc;
 }
+
+/* 0 when `frame` is a B2ND frame of rank `ndim`, shape `chunk_shape` and item
+ * size `typesize`, which `medh5_b2nd_read_slice` reads unless its blocks do
+ * not decompress; 1 otherwise.  Parses the frame's metadata and decompresses
+ * nothing.  `frame` is read in place and not modified. */
+int medh5_b2nd_frame_fits(const uint8_t *frame, int64_t frame_len, int8_t ndim,
+                          const int64_t *chunk_shape, int32_t typesize) {
+  if (ndim < 1 || ndim > B2ND_MAX_DIM || typesize < 1) {
+    return 1;
+  }
+  blosc2_schunk *schunk = blosc2_schunk_from_buffer((uint8_t *) frame, frame_len, false);
+  if (schunk == NULL) {
+    return 1;
+  }
+  b2nd_array_t *array = NULL;
+  if (b2nd_from_schunk(schunk, &array) < 0) {
+    blosc2_schunk_free(schunk);
+    return 1;
+  }
+  int rc = array->ndim != ndim || array->sc->typesize != typesize;
+  for (int i = 0; rc == 0 && i < ndim; i++) {
+    rc = array->shape[i] != chunk_shape[i];
+  }
+  b2nd_free(array); /* and the super-chunk with it */
+  return rc;
+}

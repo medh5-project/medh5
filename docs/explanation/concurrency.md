@@ -183,6 +183,14 @@ compressing chunks before HDF5 stores them, hashing bytes it has already read. H
 on the calling thread, one at a time, in a fixed order, so a file written with four threads holds
 the same bytes as one written with one. The default is 1, which starts no thread at all.
 
+The digests (§13.1) are the threaded work every command shares. A commit, `verify` and
+`validate --level integrity` read each dataset's stored chunks on the calling thread, a slab at a
+time, and decompress and hash them on the others, several datasets at once; each dataset's
+digest is still one hash over its bytes in order, so it is the one a single thread computes, and
+every report, finding and refusal comes out in the same order with the same words. A chunk that is
+not Blosc2, or that the workers cannot decode, is read by HDF5 on the calling thread, as it is at
+one thread. Each thread holds up to two slabs of 32 MiB in flight.
+
 ```python
 import medh5
 

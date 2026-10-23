@@ -455,6 +455,56 @@ pub fn read_region(ds: &hdf5::Dataset, index: &[Index]) -> Result<NdArray> {
     read_hyperslab(ds, dtype, &axes, &out_shape)
 }
 
+/// A region as [`read_region_stored`] reads it.
+pub(crate) enum Region {
+    /// Its values, read as [`read_region`] reads them.
+    Values(NdArray),
+    /// The stored chunks [`read_region`] would decompress itself, for a
+    /// worker to ([`super::window::Frames::decode`]); the axes read it
+    /// through HDF5 ([`read_hyperslab`]) where that cannot.
+    Stored(super::window::Frames, Vec<(usize, usize, usize, bool)>),
+}
+
+/// [`read_region`], but for a region it would read through the Blosc2 blocks
+/// it covers: that one's stored chunks are returned as they are, so that the
+/// blocks can be decompressed on another thread.
+pub(crate) fn read_region_stored(ds: &hdf5::Dataset, index: &[Index]) -> Result<Region> {
+    super::alive(ds)?;
+    let dtype = dtype(ds)?;
+    let shape = ds.shape();
+    let axes = resolve(&shape, index)?;
+    let out_shape: Vec<usize> = axes.iter().filter(|a| a.3).map(|a| a.1).collect();
+    ensure_allocatable(ds, &axes.iter().map(|a| a.1).collect::<Vec<_>>(), dtype.itemsize())?;
+    let enumeration = is_plain_enum(ds);
+    if !enumeration && axes.iter().all(|a| a.1 > 0) {
+        if let Some(frames) = super::window::read_frames(ds, dtype, &axes, &out_shape) {
+            counted(Read::Window);
+            return Ok(Region::Stored(frames, axes));
+        }
+    }
+    // Where the blocks are not to be had, as `read_region` reads it.
+    if axes.iter().all(|(start, _count, step, kept)| *kept && *start == 0 && *step == 1)
+        && axes.iter().zip(&shape).all(|(a, n)| a.1 == *n)
+    {
+        return Ok(Region::Values(read(ds)?));
+    }
+    if axes.iter().any(|a| a.1 == 0) {
+        return Ok(Region::Values(NdArray::zeros(dtype, &out_shape)));
+    }
+    if enumeration {
+        counted(Read::Hyperslab);
+        return Ok(Region::Values(read_enum_region(ds, dtype, &axes, &out_shape)?));
+    }
+    counted(Read::Hyperslab);
+    Ok(Region::Values(read_hyperslab(ds, dtype, &axes, &out_shape)?))
+}
+
+/// The values of a [`Region::Stored`]'s axes, read through HDF5.
+pub(crate) fn read_axes(ds: &hdf5::Dataset, axes: &[(usize, usize, usize, bool)]) -> Result<NdArray> {
+    let out_shape: Vec<usize> = axes.iter().filter(|a| a.3).map(|a| a.1).collect();
+    read_hyperslab(ds, dtype(ds)?, axes, &out_shape)
+}
+
 /// [`read_region`] through HDF5's filter pipeline: whole chunks, decompressed
 /// under HDF5's lock.
 pub(crate) fn read_hyperslab(

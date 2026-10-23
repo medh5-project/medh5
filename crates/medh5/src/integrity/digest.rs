@@ -32,9 +32,9 @@ use crate::{Error, Result};
 pub const STREAM_BYTES: usize = 32 * 1024 * 1024;
 
 /// The little-endian bytes a block is hashed in, a piece at a time.
-const LE_PIECE_BYTES: usize = 1 << 20;
+pub(super) const LE_PIECE_BYTES: usize = 1 << 20;
 
-fn feed_header(hasher: &mut Hasher, path: &str, dtype_str: &str, shape: &[usize]) {
+pub(super) fn feed_header(hasher: &mut Hasher, path: &str, dtype_str: &str, shape: &[usize]) {
     hasher.update(path.as_bytes());
     hasher.update(b"\x00");
     hasher.update(dtype_str.as_bytes());
@@ -185,7 +185,7 @@ pub fn dataset_digest_inspected(
 }
 
 /// The bytes of one index along `axis` of an array of `shape`.
-fn row_bytes(shape: &[usize], axis: usize, itemsize: usize) -> usize {
+pub(super) fn row_bytes(shape: &[usize], axis: usize, itemsize: usize) -> usize {
     shape[axis + 1..].iter().try_fold(itemsize, |n, e| n.checked_mul(*e)).unwrap_or(usize::MAX).max(1)
 }
 
@@ -199,7 +199,7 @@ fn row_bytes(shape: &[usize], axis: usize, itemsize: usize) -> usize {
 /// that straddled bands had every chunk of a band decompressed for each
 /// slab touching it --- 2 to 4 times over, as HDF5's chunk cache holds far
 /// less than a band.
-struct Slabs {
+pub(super) struct Slabs {
     step: usize,
     /// The band no slab crosses, where a band is cut into several.
     band: Option<usize>,
@@ -208,7 +208,7 @@ struct Slabs {
 impl Slabs {
     /// `step` rows of `row` bytes fit the budget; `chunk` is the chunk extent
     /// along the axis, `None` for a dataset that is not chunked.
-    fn new(step: usize, chunk: Option<usize>, row: usize, budget: usize) -> Slabs {
+    pub(super) fn new(step: usize, chunk: Option<usize>, row: usize, budget: usize) -> Slabs {
         match chunk {
             Some(c) if c > 1 && step >= c => Slabs { step: step / c * c, band: None },
             Some(c) if c > 1 && c.saturating_mul(row) <= budget.saturating_mul(2) => Slabs { step: c, band: None },
@@ -218,7 +218,7 @@ impl Slabs {
     }
 
     /// Where the slab starting at row `start` of `n` ends.
-    fn end(&self, start: usize, n: usize) -> usize {
+    pub(super) fn end(&self, start: usize, n: usize) -> usize {
         let stop = start.saturating_add(self.step).min(n);
         match self.band {
             Some(c) => stop.min((start / c).saturating_add(1).saturating_mul(c)),
@@ -319,31 +319,63 @@ fn top_level(path: &str) -> &str {
 /// a dataset whose type has no digest ([`digestible`]).  `only_missing`
 /// digests just the datasets that carry none and returns the stored value
 /// for the rest.
+///
+/// The datasets are hashed on the thread setting's workers
+/// ([`crate::parallel::threads`]), and the attributes written here, in the
+/// order of the walk: the file is the one a sequential pass writes.
 pub fn stamp_digests(
     root: &hdf5::Group,
     algo: &str,
     skip: &[&str],
     only_missing: bool,
 ) -> Result<IndexMap<String, String>> {
-    let mut digests = IndexMap::new();
+    // Each dataset, with the digest it keeps, or `None` for one to hash; and
+    // what stopped the walk, which stops the pass where the walk reached it.
+    let mut walk: Vec<(String, hdf5::Dataset, Option<String>)> = Vec::new();
+    let mut stopped = None;
     for (name, ds) in ops::datasets(root)? {
         if name == "meta" || skip.contains(&top_level(&name)) {
             continue;
         }
-        if only_missing {
-            if let Some(stored) = attrs::get_str(&ds, "digest")? {
-                digests.insert(name, stored);
-                continue;
+        let step = (|| -> Result<Option<Option<String>>> {
+            if only_missing {
+                if let Some(stored) = attrs::get_str(&ds, "digest")? {
+                    return Ok(Some(Some(stored)));
+                }
+            }
+            Ok(digestible(&ds)?.then_some(None))
+        })();
+        match step {
+            Ok(Some(kept)) => walk.push((name, ds, kept)),
+            Ok(None) => {}
+            Err(e) => {
+                stopped = Some(e);
+                break;
             }
         }
-        if !digestible(&ds)? {
-            continue;
-        }
-        let value = dataset_digest(&ds, &name, algo)?;
-        attrs::write(&ds, "digest", &AttrValue::Str(value.clone()))?;
+    }
+    let jobs = walk
+        .iter()
+        .filter(|(_, _, kept)| kept.is_none())
+        .map(|(name, ds, _)| super::workers::Job::new(ds.clone(), name, algo))
+        .collect();
+    let mut hashed = super::workers::digests(jobs)?.into_iter();
+    let mut digests = IndexMap::new();
+    for (name, ds, kept) in walk {
+        let value = match kept {
+            Some(stored) => stored,
+            None => {
+                let value = hashed.next().expect("a digest for every dataset hashed")?;
+                attrs::write(&ds, "digest", &AttrValue::Str(value.clone()))?;
+                value
+            }
+        };
         digests.insert(name, value);
     }
-    Ok(digests)
+    match stopped {
+        Some(e) => Err(e),
+        None => Ok(digests),
+    }
 }
 
 /// The `digest` attribute of every dataset that carries one.
