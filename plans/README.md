@@ -10,7 +10,7 @@ is to put there.
 |---|---|---|---|
 | 2.1.0 | minor: features, errata, deprecations | [2.1.0/README.md](2.1.0/README.md) | released 2026-10-15 |
 | 2.2.0 | minor: format 1.2, native converters, platforms, resampling | [2.2.0/README.md](2.2.0/README.md) | released 2026-10-20 |
-| 2.2.x | patch releases on `main`: fixes, performance, hardening | [2.2.x/README.md](2.2.x/README.md) | planned |
+| 2.2.x | patch releases on `main`: fixes, performance, hardening; parallelism in 2.2.3 | [2.2.x/README.md](2.2.x/README.md), [2.2.x/parallelism.md](2.2.x/parallelism.md) | 2.2.2 released; 2.2.3 proposed |
 | 2.0.x | patch line, cut on demand | this file, [the 2.0.x line](#the-20x-line) | 2.0.3 released; closed 2026-10-21 |
 
 ## How to use a plan
