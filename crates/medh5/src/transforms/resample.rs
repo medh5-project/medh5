@@ -33,6 +33,7 @@ use super::model::{Body, Transform};
 use crate::array::{DType, NdArray, Slice};
 use crate::geometry::grid::{mm_per_unit, Grid};
 use crate::geometry::linalg::inv;
+use crate::h5::chunks::{native_bytes, Chunks, Compressed};
 use crate::h5::data;
 use crate::ids::validate_id;
 use crate::json::{float_repr, repr_list, repr_str};
@@ -1266,9 +1267,18 @@ fn resample_image(
         &chunk,
     );
     let mut filled = 0u64;
+    // Blosc2 targets are written a whole chunk at a time: what a chunk is
+    // computed from is read here, and the computing and compressing of up to
+    // twice `threads` chunks at once run on workers, outside HDF5's lock.  A
+    // chunk split for its source's size, and any other target, is computed
+    // and written here, through HDF5.
+    let threads = crate::parallel::threads()?;
+    let direct = chunks.as_ref().and_then(|_| Chunks::of(&dataset, job.dtype)).filter(|_| !through_hdf5());
+    let compute = Compute { plan, job, cubic: cubic.as_ref() };
+    let mut batch: Vec<Ready> = Vec::new();
     let mut pending: Vec<Vec<(usize, usize)>> = Vec::new();
     for chunk_block in blocks(&target_spatial, &chunk) {
-        pending.push(chunk_block);
+        pending.push(chunk_block.clone());
         while let Some(block) = pending.pop() {
             let dims: Vec<usize> = block.iter().map(|(a, b)| b - a).collect();
             let n: usize = dims.iter().product();
@@ -1323,6 +1333,9 @@ fn resample_image(
                 // Linear samples the crop, so its points are taken into it.
                 points.shift(crop);
             }
+            // The whole chunk, unsplit: computed and compressed on workers.
+            let whole = direct.is_some() && block == chunk_block;
+            let mut sources = Vec::new();
             // Each chunk of the leading (time, channel) axes in turn, so a block
             // holds one chunk of the image and no more, however many frames.
             for lead in blocks(&leading_shape, &leading_chunk) {
@@ -1335,43 +1348,14 @@ fn resample_image(
                     full.extend(spatial.iter().cloned());
                     full
                 });
-                let values: NdArray = match plan.interpolation.as_str() {
-                    "nearest" => match (&rows, &roi) {
-                        (Some(rows), Some(roi)) => {
-                            let stored = image.read(Some(roi), false, None)?;
-                            gather(&stored, group, rows, &inside, plan.fill, job.dtype)?
-                        }
-                        _ => constant(job.dtype, group, n, plan.fill)?,
-                    },
-                    interpolation => {
-                        let mut out = Array2::<f64>::from_elem((n, group), plan.fill);
-                        if let (Some(crop), Some(roi)) = (&crop, &roi) {
-                            let computed = if interpolation == "cubic" {
-                                let lanes = lane_indices(&leading_shape, &lead);
-                                let cubic = cubic.as_ref().expect("prefiltered above");
-                                match &points {
-                                    Points::Rows(rows) => cubic.sample_components(rows, &lanes)?,
-                                    Points::Axes { coords, .. } => cubic.sample_components_axes(coords, &lanes)?,
-                                }
-                            } else {
-                                let stored = image.read(Some(roi), false, Some(DType::F64))?.to_f64();
-                                let mut field_shape = vec![group];
-                                field_shape.extend(crop.iter().map(|(a, b)| b - a));
-                                let field = stored.into_shape_with_order(IxDyn(&field_shape))?;
-                                match &points {
-                                    Points::Rows(rows) => linear_sample(&field, rows, "nearest")?,
-                                    Points::Axes { coords, .. } => linear_sample_axes(&field, coords)?,
-                                }
-                            };
-                            for (row, ok) in inside.iter().enumerate() {
-                                if *ok {
-                                    out.row_mut(row).assign(&computed.row(row));
-                                }
-                            }
-                        }
-                        convert(&out, job.dtype, &job.source)?
-                    }
-                };
+                let source = Source::read(&image, plan, rows.is_some(), crop.as_deref(), roi.as_deref(), group, || {
+                    lane_indices(&leading_shape, &lead)
+                })?;
+                if whole {
+                    sources.push((lead, source));
+                    continue;
+                }
+                let values = compute.values(&source, &points, &inside, rows.as_deref(), group, n)?;
                 let mut shape = lead_dims;
                 shape.extend(&dims);
                 let mut starts: Vec<usize> = lead.iter().map(|(a, _)| *a).collect();
@@ -1379,10 +1363,168 @@ fn resample_image(
                 data::write_region(&dataset, &values.reshape(&shape)?, &starts)?;
             }
             valid.block(writer, &block, invalid)?;
+            if let (true, Some(direct)) = (whole, &direct) {
+                batch.push(Ready { block, points, inside, rows, sources });
+                if batch.iter().map(|r| r.sources.len()).sum::<usize>() >= 2 * threads {
+                    compute.write(direct, &mut batch, threads)?;
+                }
+            }
         }
         valid.chunk_done();
     }
+    if let Some(direct) = &direct {
+        compute.write(direct, &mut batch, threads)?;
+    }
     Ok((filled, valid.written()))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Every target written through HDF5, for the tests that a direct write
+    /// stores what HDF5's would.
+    static THROUGH_HDF5: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The chunks written directly.
+    static DIRECT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn through_hdf5() -> bool {
+    #[cfg(test)]
+    return THROUGH_HDF5.get();
+    #[cfg(not(test))]
+    false
+}
+
+/// What one block's values for one chunk of the leading axes are computed
+/// from: read before the computing, which then needs no HDF5 call.
+enum Source {
+    /// `nearest`: the stored crop.
+    Stored(NdArray),
+    /// `linear`: the crop as `f64`, `(lanes, crop…)`.
+    Field(ArrayD<f64>),
+    /// `cubic`: the lanes the prefiltered image is sampled at.
+    Cubic(Vec<usize>),
+    /// No point of the block is inside the source.
+    Outside,
+}
+
+impl Source {
+    fn read(
+        image: &crate::sample::Image,
+        plan: &ResamplePlan,
+        nearest: bool,
+        crop: Option<&[(usize, usize)]>,
+        roi: Option<&[Slice]>,
+        group: usize,
+        lanes: impl FnOnce() -> Vec<usize>,
+    ) -> Result<Source> {
+        let (Some(crop), Some(roi)) = (crop, roi) else { return Ok(Source::Outside) };
+        Ok(match plan.interpolation.as_str() {
+            "nearest" if nearest => Source::Stored(image.read(Some(roi), false, None)?),
+            "nearest" => Source::Outside,
+            "cubic" => Source::Cubic(lanes()),
+            _ => {
+                let stored = image.read(Some(roi), false, Some(DType::F64))?.to_f64();
+                let mut field_shape = vec![group];
+                field_shape.extend(crop.iter().map(|(a, b)| b - a));
+                Source::Field(stored.into_shape_with_order(IxDyn(&field_shape))?)
+            }
+        })
+    }
+}
+
+/// A whole target chunk, its source read, waiting for the workers.
+struct Ready {
+    block: Vec<(usize, usize)>,
+    points: Points,
+    inside: Vec<bool>,
+    rows: Option<Vec<usize>>,
+    /// Each chunk of the leading axes, and what it is computed from.
+    sources: Vec<(Vec<(usize, usize)>, Source)>,
+}
+
+/// How an image's values are computed from what was read: no HDF5 call, so
+/// it runs on workers.
+struct Compute<'a> {
+    plan: &'a ResamplePlan,
+    job: &'a Job,
+    cubic: Option<&'a CubicCoefficients>,
+}
+
+impl Compute<'_> {
+    /// One block's `(lanes, n)` values of the job's dtype.
+    fn values(
+        &self,
+        source: &Source,
+        points: &Points,
+        inside: &[bool],
+        rows: Option<&[usize]>,
+        group: usize,
+        n: usize,
+    ) -> Result<NdArray> {
+        let (plan, job) = (self.plan, self.job);
+        if plan.interpolation == "nearest" {
+            return match (source, rows) {
+                (Source::Stored(stored), Some(rows)) => gather(stored, group, rows, inside, plan.fill, job.dtype),
+                _ => constant(job.dtype, group, n, plan.fill),
+            };
+        }
+        let mut out = Array2::<f64>::from_elem((n, group), plan.fill);
+        let computed = match source {
+            Source::Cubic(lanes) => {
+                let cubic = self.cubic.expect("prefiltered above");
+                Some(match points {
+                    Points::Rows(rows) => cubic.sample_components(rows, lanes)?,
+                    Points::Axes { coords, .. } => cubic.sample_components_axes(coords, lanes)?,
+                })
+            }
+            Source::Field(field) => Some(match points {
+                Points::Rows(rows) => linear_sample(field, rows, "nearest")?,
+                Points::Axes { coords, .. } => linear_sample_axes(field, coords)?,
+            }),
+            Source::Stored(_) | Source::Outside => None,
+        };
+        if let Some(computed) = computed {
+            for (row, ok) in inside.iter().enumerate() {
+                if *ok {
+                    out.row_mut(row).assign(&computed.row(row));
+                }
+            }
+        }
+        convert(&out, job.dtype, &job.source)
+    }
+
+    /// Compute and compress every chunk of `batch` on up to `threads`
+    /// workers, and store each in order; `batch` is emptied.
+    fn write(&self, writer: &Chunks, batch: &mut Vec<Ready>, threads: usize) -> Result<()> {
+        let items: Vec<(&Ready, &(Vec<(usize, usize)>, Source))> =
+            batch.iter().flat_map(|ready| ready.sources.iter().map(move |source| (ready, source))).collect();
+        #[cfg(test)]
+        DIRECT.with(|n| n.set(n.get() + items.len()));
+        let codec = writer.codec();
+        crate::parallel::ordered(
+            threads,
+            items.into_iter(),
+            |(ready, (lead, source))| -> Result<(Vec<usize>, Compressed)> {
+                let dims: Vec<usize> = ready.block.iter().map(|(a, b)| b - a).collect();
+                let mut shape: Vec<usize> = lead.iter().map(|(a, b)| b - a).collect();
+                let group: usize = shape.iter().product();
+                let values =
+                    self.values(source, &ready.points, &ready.inside, ready.rows.as_deref(), group, dims.iter().product())?;
+                shape.extend(&dims);
+                let mut origin: Vec<usize> = lead.iter().map(|(a, _)| *a).collect();
+                origin.extend(ready.block.iter().map(|(a, _)| *a));
+                let values = values.reshape(&shape)?;
+                let bytes = native_bytes(&values);
+                Ok((origin.clone(), codec.compress(codec.cut(&bytes, &shape, &origin, &origin))))
+            },
+            |done| {
+                let (origin, chunk) = done?;
+                writer.store(&origin, chunk)
+            },
+        )?;
+        batch.clear();
+        Ok(())
+    }
 }
 
 /// A resampled image's `valid_mask` (§4.4), written a block at a time as the
@@ -1724,6 +1866,76 @@ mod tests {
             let centre = |i: usize, n: usize| ((i as f64) * 0.5 - 0.25).clamp(0.0, n as f64 - 1.0);
             let want = ramp(centre(z, 8), centre(y, 32), centre(x, 32));
             assert!((values[[z, y, x]] - want).abs() < 1e-3, "{z} {y} {x}: {} vs {want}", values[[z, y, x]]);
+        }
+    }
+
+    /// A resample onto a Blosc2 grid stores, at one thread and at four,
+    /// exactly the chunks HDF5's own write of the same values stores ---
+    /// every chunk's bytes and filter mask --- and the same `content_id`:
+    /// each interpolation, a time series, a target past the source's edge (a
+    /// valid mask), points a row a voxel, and chunks split to a small crop
+    /// budget, which are written through HDF5 beside the direct ones.
+    #[test]
+    fn s14_2_a_resample_stores_hdf5s_chunks_at_any_thread_count() {
+        let _serial = crate::parallel::tests::serial();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.medh5");
+        let mut w = create(&path, Some("s"), Some("s"), "training", &[]).unwrap();
+        let options = |origin: f64, time: bool, chunk_hint: Option<Vec<i64>>| GridOptions {
+            frame_uid: Some("F0".into()),
+            axis_kinds: time.then(|| vec!["time".into(), "spatial".into(), "spatial".into(), "spatial".into()]),
+            time_values: time.then(|| vec![0.0, 1.0, 2.0]),
+            origin: Some(vec![origin; 3]),
+            chunk_hint,
+            ..Default::default()
+        };
+        // Each past the size below which nothing is compressed, so the
+        // amendment keeps the source's codec profile.
+        w.add_grid("g", &[25, 37, 41], &[1.0, 1.0, 1.0], options(0.0, false, None)).unwrap();
+        let n = 25 * 37 * 41;
+        let ct: Vec<f64> = (0..n).map(|i| ((i * 7919) % 2000) as f64 - 1000.0).collect();
+        let ct = NdArray::from_vec(&[25, 37, 41], ct).unwrap().astype(DType::I16);
+        w.add_image("ct", &ct, "g", "CT", ImageOptions::default()).unwrap();
+        w.add_grid("t", &[3, 11, 21, 23], &[1.0, 1.0, 1.0], options(0.0, true, None)).unwrap();
+        let frames: Vec<f32> = (0..3 * 11 * 21 * 23).map(|i| ((i * 31) % 997) as f32 / 3.0).collect();
+        w.add_image("mr", &NdArray::from_vec(&[3, 11, 21, 23], frames).unwrap(), "t", "MR", ImageOptions::default())
+            .unwrap();
+        // Half the spacing, a little past the source's far edge.
+        w.add_grid("fine", &[52, 76, 84], &[0.5, 0.5, 0.5], options(-0.25, false, Some(vec![16, 32, 32]))).unwrap();
+        w.add_grid("tfine", &[3, 22, 42, 46], &[0.5, 0.5, 0.5], options(-0.25, true, Some(vec![1, 8, 16, 16])))
+            .unwrap();
+        w.commit(true).unwrap();
+        for (image, grid) in [("ct", "fine"), ("mr", "tfine")] {
+            for interpolation in ["nearest", "linear", "cubic"] {
+                for (budget, rows_only) in [(CROP_BUDGET, false), (CROP_BUDGET, true), (2000, false)] {
+                    let mut outputs = Vec::new();
+                    for (threads, hdf5) in [(1, true), (1, false), (4, false)] {
+                        let out = dir.path().join(format!("{image}-{interpolation}-{budget}-{rows_only}-{threads}-{hdf5}.medh5"));
+                        let mut plan = ResamplePlan::onto([image], grid);
+                        plan.interpolation = interpolation.into();
+                        plan.out = Some(out.clone());
+                        let _threads = crate::parallel::for_this_run(threads).unwrap();
+                        TEST_CROP_BUDGET.with(|b| b.set(budget));
+                        ROWS_ONLY.with(|r| r.set(rows_only));
+                        THROUGH_HDF5.set(hdf5);
+                        DIRECT.set(0);
+                        let result = resample(&path, &plan);
+                        THROUGH_HDF5.set(false);
+                        ROWS_ONLY.with(|r| r.set(false));
+                        TEST_CROP_BUDGET.with(|b| b.set(CROP_BUDGET));
+                        let result = result.unwrap();
+                        assert_eq!(DIRECT.get() > 0, !hdf5, "{image} {interpolation} {budget}");
+                        outputs.push((result.content_id.clone(), crate::h5::chunks::tests::stored_chunks(&out)));
+                    }
+                    let (reference, rest) = outputs.split_first().unwrap();
+                    let case = format!("{image} {interpolation}, budget {budget}, rows {rows_only}");
+                    assert!(reference.1.keys().any(|k| k.contains("_on_")), "{case}: {:?}", reference.1.keys());
+                    for other in rest {
+                        assert_eq!(other.0, reference.0, "{case}");
+                        assert_eq!(other.1, reference.1, "{case}");
+                    }
+                }
+            }
         }
     }
 

@@ -210,6 +210,11 @@ impl Chunks {
         &self.codec.chunk
     }
 
+    /// How its chunks are compressed, for workers to share.
+    pub(crate) fn codec(&self) -> &Codec {
+        &self.codec
+    }
+
     /// The origins of the chunks whose first coordinate lies in `rows`, in C
     /// order: the chunks a slab of those rows covers.
     pub(crate) fn origins(&self, rows: std::ops::Range<usize>) -> Vec<Vec<usize>> {
@@ -322,12 +327,56 @@ pub(crate) fn native_bytes(array: &NdArray) -> std::borrow::Cow<'_, [u8]> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::array::{Index, Slice};
     use crate::h5::data::{self, Layout};
     use crate::rng::Rng;
     use crate::storage::codecs::{resolve_profile, Role};
+
+    /// Every chunked dataset of a file, by path: each stored chunk's offset,
+    /// filter mask and bytes, in the order HDF5 indexes them.
+    pub(crate) fn stored_chunks(path: &std::path::Path) -> std::collections::BTreeMap<String, Vec<(Vec<u64>, u32, Vec<u8>)>> {
+        use crate::h5sys::{h5d, h5s};
+        fn walk(group: &hdf5::Group, out: &mut std::collections::BTreeMap<String, Vec<(Vec<u64>, u32, Vec<u8>)>>) {
+            for name in group.member_names().unwrap() {
+                if let Ok(ds) = group.dataset(&name) {
+                    if ds.chunk().is_none() {
+                        continue;
+                    }
+                    let rank = ds.ndim();
+                    let chunks = crate::h5::locked(|| unsafe {
+                        let space = h5d::H5Dget_space(ds.id());
+                        let mut n = 0u64;
+                        h5d::H5Dget_num_chunks(ds.id(), space, &mut n);
+                        let mut found = Vec::new();
+                        for k in 0..n {
+                            let mut offset = vec![0u64; rank];
+                            let (mut mask, mut addr, mut size) = (0u32, 0u64, 0u64);
+                            h5d::H5Dget_chunk_info(ds.id(), space, k, offset.as_mut_ptr(), &mut mask, &mut addr, &mut size);
+                            found.push(offset);
+                        }
+                        h5s::H5Sclose(space);
+                        found
+                    });
+                    let read = chunks
+                        .into_iter()
+                        .map(|offset| {
+                            let (mask, bytes) = crate::h5::ops::read_raw_chunk(&ds, &offset).unwrap();
+                            (offset, mask, bytes)
+                        })
+                        .collect();
+                    out.insert(ds.name(), read);
+                } else if let Ok(child) = group.group(&name) {
+                    walk(&child, out);
+                }
+            }
+        }
+        let file = crate::h5::file::open_read(path).unwrap();
+        let mut out = std::collections::BTreeMap::new();
+        walk(&file.as_group().unwrap(), &mut out);
+        out
+    }
 
     /// Runs and noise, so blocks compress unevenly.
     fn volume(shape: &[usize], dtype: DType, rng: &mut Rng) -> NdArray {

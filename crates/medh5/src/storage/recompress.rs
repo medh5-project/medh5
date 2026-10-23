@@ -498,50 +498,6 @@ mod tests {
     use crate::array::{DType, NdArray};
     use crate::sample::{create, GridOptions, ImageOptions};
 
-    /// Every chunked dataset of a file, by path: each stored chunk's offset,
-    /// filter mask and bytes, in the order HDF5 indexes them.
-    fn stored_chunks(path: &Path) -> std::collections::BTreeMap<String, Vec<(Vec<u64>, u32, Vec<u8>)>> {
-        use crate::h5sys::{h5d, h5s};
-        fn walk(group: &hdf5::Group, out: &mut std::collections::BTreeMap<String, Vec<(Vec<u64>, u32, Vec<u8>)>>) {
-            for name in group.member_names().unwrap() {
-                if let Ok(ds) = group.dataset(&name) {
-                    if ds.chunk().is_none() {
-                        continue;
-                    }
-                    let rank = ds.ndim();
-                    let chunks = crate::h5::locked(|| unsafe {
-                        let space = h5d::H5Dget_space(ds.id());
-                        let mut n = 0u64;
-                        h5d::H5Dget_num_chunks(ds.id(), space, &mut n);
-                        let mut found = Vec::new();
-                        for k in 0..n {
-                            let mut offset = vec![0u64; rank];
-                            let (mut mask, mut addr, mut size) = (0u32, 0u64, 0u64);
-                            h5d::H5Dget_chunk_info(ds.id(), space, k, offset.as_mut_ptr(), &mut mask, &mut addr, &mut size);
-                            found.push(offset);
-                        }
-                        h5s::H5Sclose(space);
-                        found
-                    });
-                    let read = chunks
-                        .into_iter()
-                        .map(|offset| {
-                            let (mask, bytes) = crate::h5::ops::read_raw_chunk(&ds, &offset).unwrap();
-                            (offset, mask, bytes)
-                        })
-                        .collect();
-                    out.insert(ds.name(), read);
-                } else if let Ok(child) = group.group(&name) {
-                    walk(&child, out);
-                }
-            }
-        }
-        let file = crate::h5::file::open_read(path).unwrap();
-        let mut out = std::collections::BTreeMap::new();
-        walk(&file.as_group().unwrap(), &mut out);
-        out
-    }
-
     /// A sample of two images, one of noise, and a mask, under
     /// `profile`, with edge chunks on every axis.
     fn sample(path: &Path, profile: &str) {
@@ -586,7 +542,7 @@ mod tests {
                         // is a `bool`, an enumeration HDF5 maps.
                         let direct = if hdf5 || profile == "portable" { 0 } else { 2 };
                         assert_eq!(DIRECT.get(), direct, "{from} to {profile}");
-                        outputs.push((result.content_id.clone(), stored_chunks(&out)));
+                        outputs.push((result.content_id.clone(), crate::h5::chunks::tests::stored_chunks(&out)));
                     }
                     let (reference, rest) = outputs.split_first().unwrap();
                     assert!(!reference.1.is_empty());
