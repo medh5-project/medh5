@@ -385,6 +385,77 @@ mod tests {
         assert_eq!(statuses, [0, 0], "a child was in a run of its parent's");
     }
 
+    /// A fork from another thread during threaded chunk writes waits until
+    /// each write's workers have joined, and leaves a child that opens,
+    /// writes and reads files, with threads and without.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_forked_during_threaded_writes_opens_writes_and_reads() {
+        use crate::array::{DType, NdArray};
+        use crate::h5::chunks::Chunks;
+        use crate::h5::data::{self, Layout};
+        use crate::storage::codecs::{resolve_profile, Role};
+        let _serial = crate::parallel::tests::serial();
+        install();
+        crate::h5::init();
+        let dir = tempfile::tempdir().unwrap();
+        let shape = [48usize, 64, 64];
+        let values = NdArray::from_vec(&shape, (0..48 * 64 * 64).map(|i| (i % 1000) as f64).collect())
+            .unwrap()
+            .astype(DType::I16);
+        let layout = Layout {
+            chunks: Some(vec![8, 32, 32]),
+            filters: resolve_profile(Some("archive")).unwrap().codec(Role::Image).filters(),
+        };
+        let write = |path: &std::path::Path, threads: usize| -> crate::Result<()> {
+            let file = crate::h5::file::create_truncate(path)?;
+            let ds = data::create_empty(&file, "d", DType::I16, &shape, &layout)?;
+            Chunks::of(&ds, DType::I16).expect("a Blosc2 dataset").write_rows(&values, 0, threads)
+        };
+        let read = |path: &std::path::Path| data::read(&crate::h5::file::open_read(path)?.dataset("d")?);
+        let stop = AtomicBool::new(false);
+        // A child holds the files the busy thread has open, and their locks,
+        // until it closes them, so the busy thread writes a new file each
+        // time and never opens one again.
+        let busy = dir.path();
+        let failed = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for n in 0.. {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let path = busy.join(format!("busy-{n}.h5"));
+                    write(&path, 4).unwrap();
+                    std::fs::remove_file(path).unwrap();
+                }
+            });
+            let mut failed = Vec::new();
+            for k in 0..20 {
+                std::thread::sleep(std::time::Duration::from_millis(3));
+                let path = dir.path().join(format!("child-{k}.h5"));
+                // SAFETY: the child writes and reads files of its own and exits.
+                let pid = unsafe { fork() };
+                if pid == 0 {
+                    // SAFETY: an alarm ends a child that waits forever.
+                    unsafe { libc::alarm(10) };
+                    let ok = [2, 1].into_iter().all(|threads| {
+                        write(&path, threads).and_then(|()| read(&path)).is_ok_and(|read| read == values)
+                    });
+                    // SAFETY: the child ends without running the parent's exit handlers.
+                    unsafe { libc::_exit(if ok { 0 } else { 1 }) };
+                }
+                match exit_status(pid) {
+                    0 => {}
+                    status if libc::WIFSIGNALED(status) => failed.push(format!("signal {}", libc::WTERMSIG(status))),
+                    status => failed.push(format!("exit {}", libc::WEXITSTATUS(status))),
+                }
+            }
+            stop.store(true, Ordering::SeqCst);
+            failed
+        });
+        assert_eq!(failed, Vec::<String>::new(), "a child could not write and read");
+    }
+
     /// A fork made while a call holds the parallel sections and waits for
     /// HDF5's lock waits for the call to end: every result was sunk first.
     #[cfg(unix)]

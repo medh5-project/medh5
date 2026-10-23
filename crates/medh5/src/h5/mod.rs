@@ -6,13 +6,13 @@
 //! model (atomic create, copy-on-write amend, unknown-object preservation).
 
 pub mod attrs;
+pub(crate) mod chunks;
 pub mod data;
 pub mod file;
 #[doc(hidden)]
 pub mod fork;
 pub mod graph;
 pub mod ops;
-pub(crate) mod chunks;
 mod window;
 
 pub use attrs::AttrValue;

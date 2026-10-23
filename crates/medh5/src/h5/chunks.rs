@@ -91,7 +91,14 @@ impl Codec {
         // SAFETY: the values and the chunk span the lengths passed with
         // them; the frame is the caller's to free, which `Frame` does.
         let len = unsafe {
-            medh5_blosc2_compress(self.values.len(), self.values.as_ptr(), chunk.as_ptr().cast(), chunk.len(), 1, &mut out)
+            medh5_blosc2_compress(
+                self.values.len(),
+                self.values.as_ptr(),
+                chunk.as_ptr().cast(),
+                chunk.len(),
+                1,
+                &mut out,
+            )
         };
         if len <= 0 || out.is_null() {
             return Compressed::Refused(chunk);
@@ -268,7 +275,8 @@ impl Chunks {
     fn write_through_hdf5(&self, origin: &[usize], values: &[u8]) -> Result<()> {
         let (chunk, shape) = (&self.codec.chunk, &self.codec.shape);
         let extent: Vec<usize> = (0..chunk.len()).map(|a| chunk[a].min(shape[a] - origin[a])).collect();
-        let inside = Codec { values: Vec::new(), chunk: extent.clone(), shape: chunk.clone(), itemsize: self.codec.itemsize };
+        let inside =
+            Codec { values: Vec::new(), chunk: extent.clone(), shape: chunk.clone(), itemsize: self.codec.itemsize };
         // The chunk's part inside the extent, as a slab of its own.
         let part = inside.cut(values, chunk, &vec![0; chunk.len()], &vec![0; chunk.len()]);
         let array = with_dtype!(self.dtype, T => {
@@ -336,7 +344,9 @@ pub(crate) mod tests {
 
     /// Every chunked dataset of a file, by path: each stored chunk's offset,
     /// filter mask and bytes, in the order HDF5 indexes them.
-    pub(crate) fn stored_chunks(path: &std::path::Path) -> std::collections::BTreeMap<String, Vec<(Vec<u64>, u32, Vec<u8>)>> {
+    pub(crate) fn stored_chunks(
+        path: &std::path::Path,
+    ) -> std::collections::BTreeMap<String, Vec<(Vec<u64>, u32, Vec<u8>)>> {
         use crate::h5sys::{h5d, h5s};
         fn walk(group: &hdf5::Group, out: &mut std::collections::BTreeMap<String, Vec<(Vec<u64>, u32, Vec<u8>)>>) {
             for name in group.member_names().unwrap() {
@@ -353,7 +363,15 @@ pub(crate) mod tests {
                         for k in 0..n {
                             let mut offset = vec![0u64; rank];
                             let (mut mask, mut addr, mut size) = (0u32, 0u64, 0u64);
-                            h5d::H5Dget_chunk_info(ds.id(), space, k, offset.as_mut_ptr(), &mut mask, &mut addr, &mut size);
+                            h5d::H5Dget_chunk_info(
+                                ds.id(),
+                                space,
+                                k,
+                                offset.as_mut_ptr(),
+                                &mut mask,
+                                &mut addr,
+                                &mut size,
+                            );
                             found.push(offset);
                         }
                         h5s::H5Sclose(space);
@@ -439,7 +457,8 @@ pub(crate) mod tests {
                 let step = 2 * chunks[0];
                 for start in (0..shape[0]).step_by(step) {
                     let stop = (start + step).min(shape[0]);
-                    let slab = data::read_region(&through, &[Index::Slice(Slice::new(start as i64, stop as i64))]).unwrap();
+                    let slab =
+                        data::read_region(&through, &[Index::Slice(Slice::new(start as i64, stop as i64))]).unwrap();
                     writer.write_rows(&slab, start, threads).unwrap();
                 }
                 assert_eq!(stored(&ds, &writer), expected, "{profile} {dtype:?} {shape:?} at {threads} threads");
@@ -541,7 +560,8 @@ pub(crate) mod tests {
         let chunks = Some(vec![8, 16, 16]);
         let blosc2 = resolve_profile(Some("balanced")).unwrap().codec(Role::Image).filters();
         let gzip = resolve_profile(Some("portable")).unwrap().codec(Role::Image).filters();
-        let make = |name: &str, dtype: DType, layout: Layout| data::create_empty(&file, name, dtype, &shape, &layout).unwrap();
+        let make =
+            |name: &str, dtype: DType, layout: Layout| data::create_empty(&file, name, dtype, &shape, &layout).unwrap();
         let portable = make("portable", DType::I16, Layout { chunks: chunks.clone(), filters: gzip });
         assert!(Chunks::of(&portable, DType::I16).is_none(), "another codec");
         let contiguous = make("contiguous", DType::I16, Layout { chunks: None, filters: Vec::new() });

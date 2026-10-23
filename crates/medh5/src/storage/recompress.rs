@@ -510,7 +510,8 @@ mod tests {
         let mut rng = crate::rng::Rng::new(5);
         let pet = NdArray::from_vec(&shape, (0..n).map(|_| 9.0 * rng.random()).collect()).unwrap();
         writer.add_image("PET", &pet.astype(DType::F32), "g", "PT", ImageOptions::default()).unwrap();
-        let mask = ndarray::ArrayD::from_shape_fn(ndarray::IxDyn(&shape), |i| (i[0] / 9 + i[1] / 20 + i[2] / 30) % 3 == 0);
+        let mask =
+            ndarray::ArrayD::from_shape_fn(ndarray::IxDyn(&shape), |i| (i[0] / 9 + i[1] / 20 + i[2] / 30) % 3 == 0);
         writer.add_mask("fov", mask, "g", "other", None, None).unwrap();
         writer.commit(true).unwrap();
     }

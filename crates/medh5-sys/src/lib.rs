@@ -91,8 +91,13 @@ unsafe extern "C" {
 
 /// C-Blosc2's threads callback: `dojob` on each of `numjobs` job records of
 /// `jobdata_elsize` bytes from `jobdata`, returning when every one is done.
-type ThreadsCallback =
-    unsafe extern "C" fn(callback_data: *mut c_void, dojob: unsafe extern "C" fn(*mut c_void), numjobs: c_int, jobdata_elsize: usize, jobdata: *mut c_void);
+type ThreadsCallback = unsafe extern "C" fn(
+    callback_data: *mut c_void,
+    dojob: unsafe extern "C" fn(*mut c_void),
+    numjobs: c_int,
+    jobdata_elsize: usize,
+    jobdata: *mut c_void,
+);
 
 /// Run C-Blosc2's parallel jobs on threads started for them, joined before
 /// it returns.

@@ -1348,9 +1348,10 @@ fn resample_image(
                     full.extend(spatial.iter().cloned());
                     full
                 });
-                let source = Source::read(&image, plan, rows.is_some(), crop.as_deref(), roi.as_deref(), group, || {
-                    lane_indices(&leading_shape, &lead)
-                })?;
+                let source =
+                    Source::read(&image, plan, rows.is_some(), crop.as_deref(), roi.as_deref(), group, || {
+                        lane_indices(&leading_shape, &lead)
+                    })?;
                 if whole {
                     sources.push((lead, source));
                     continue;
@@ -1508,8 +1509,14 @@ impl Compute<'_> {
                 let dims: Vec<usize> = ready.block.iter().map(|(a, b)| b - a).collect();
                 let mut shape: Vec<usize> = lead.iter().map(|(a, b)| b - a).collect();
                 let group: usize = shape.iter().product();
-                let values =
-                    self.values(source, &ready.points, &ready.inside, ready.rows.as_deref(), group, dims.iter().product())?;
+                let values = self.values(
+                    source,
+                    &ready.points,
+                    &ready.inside,
+                    ready.rows.as_deref(),
+                    group,
+                    dims.iter().product(),
+                )?;
                 shape.extend(&dims);
                 let mut origin: Vec<usize> = lead.iter().map(|(a, _)| *a).collect();
                 origin.extend(ready.block.iter().map(|(a, _)| *a));
@@ -1910,7 +1917,9 @@ mod tests {
                 for (budget, rows_only) in [(CROP_BUDGET, false), (CROP_BUDGET, true), (2000, false)] {
                     let mut outputs = Vec::new();
                     for (threads, hdf5) in [(1, true), (1, false), (4, false)] {
-                        let out = dir.path().join(format!("{image}-{interpolation}-{budget}-{rows_only}-{threads}-{hdf5}.medh5"));
+                        let out = dir
+                            .path()
+                            .join(format!("{image}-{interpolation}-{budget}-{rows_only}-{threads}-{hdf5}.medh5"));
                         let mut plan = ResamplePlan::onto([image], grid);
                         plan.interpolation = interpolation.into();
                         plan.out = Some(out.clone());
