@@ -19,6 +19,7 @@ from medh5.errors import MEDH5Error, MEDH5ValidationError
 from medh5.io.meds import augment_from_meds, read_meds
 from medh5.sample import open_sample
 from medh5.validate import validate_file
+from tests.helpers import unrooted
 from tests.kits import Meds
 
 NEW_YORK = "America/New_York"
@@ -742,7 +743,7 @@ def test_clinical_augment_cohort_from_meds(tmp_path, capsys):
 
 def _cohort_as_run(cohort, out):
     """A cohort's report as printed, its output folder named ``OUT``."""
-    return json.dumps(cohort.to_json(), sort_keys=True).replace(str(out), "OUT")
+    return unrooted(json.dumps(cohort.to_json(), sort_keys=True), out)
 
 
 def test_a_cohort_import_does_not_depend_on_the_worker_count(tmp_path, monkeypatch):

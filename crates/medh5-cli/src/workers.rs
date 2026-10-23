@@ -331,11 +331,31 @@ pub fn serve(args: &[String], input: &mut dyn BufRead, output: &mut dyn Write) -
             Ok(outcome) => json!({"index": index, "outcome": outcome.to_wire()}),
             Err(e) => json!({"index": index, "error": error_to_wire(&e)}),
         };
-        if writeln!(output, "{answer}").and_then(|()| output.flush()).is_err() {
+        if writeln!(output, "{}", ascii(&answer.to_string())).and_then(|()| output.flush()).is_err() {
             break;
         }
     }
     EXIT_OK
+}
+
+/// JSON `text` with every character past ASCII written as an escape.  A
+/// worker's answer reaches its parent through whatever its standard output
+/// encodes --- a console script's, on Windows, is the ANSI code page, which
+/// writes a `§` as one byte no UTF-8 reader takes --- and ASCII is the same
+/// bytes in every encoding.  Outside a string, JSON is ASCII already.
+fn ascii(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else {
+            let mut units = [0u16; 2];
+            for unit in c.encode_utf16(&mut units) {
+                out.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    out
 }
 
 /// The grammar with the paths of command `words` optional: a worker is given
@@ -736,6 +756,16 @@ mod tests {
         assert!(!line.contains('\n'));
         let back = FileOutcome::from_wire(&serde_json::from_str(&line).unwrap()).unwrap();
         assert_eq!(back, outcome);
+    }
+
+    #[test]
+    fn an_answer_crosses_as_ascii() {
+        let mut outcome = FileOutcome::new();
+        outcome.print("§11.3: é, 😀");
+        let line = ascii(&json!({"index": 0, "outcome": outcome.to_wire()}).to_string());
+        assert!(line.is_ascii());
+        let (_, back) = parse_answer(&line).unwrap();
+        assert_eq!(back.unwrap(), outcome);
     }
 
     #[test]

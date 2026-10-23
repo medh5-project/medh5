@@ -12,7 +12,7 @@ import pytest
 
 import medh5
 from medh5.errors import MEDH5ValidationError
-from tests.helpers import disk_full_while, group_contents
+from tests.helpers import disk_full_while, group_contents, unrooted
 from tests.kits import Numbered, Organs
 
 nib = pytest.importorskip("nibabel")
@@ -1779,7 +1779,7 @@ class TestWorkers:
 
         code = main(["convert", "to-nnunet", str(out), *paths, *flags])
         printed = capsys.readouterr()
-        return code, printed.out.replace(str(out), "OUT"), printed.err
+        return code, unrooted(printed.out, out), printed.err
 
     @staticmethod
     def volumes(root: Path) -> dict[str, Any]:

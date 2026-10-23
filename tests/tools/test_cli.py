@@ -25,6 +25,7 @@ from tests.helpers import (
     LATER_MINOR,
     block,
     encode_attr,
+    unrooted,
     write_legacy_sample,
     write_raters,
     write_sample,
@@ -3421,12 +3422,18 @@ class TestWorkersBeyondFiles:
             argv = ["migrate", *paths, "-o", str(out), "--group-by", "subject"]
             argv += ["--subject-key"]
             code, printed = run(capsys, *argv, "extra.patient_id", *extra, *flags)
-            text = printed.out.replace(str(out), "OUT")
+            text = unrooted(printed.out, out)
             seen.add((code, text, printed.err, tuple(_content_ids(out).items())))
         return seen
 
     @pytest.mark.parametrize("extra", [[], ["--json"]])
-    def test_migrate_does_not_depend_on_the_worker_count(self, capsys, tmp_path, extra):
+    def test_migrate_does_not_depend_on_the_worker_count(
+        self, capsys, tmp_path, monkeypatch, extra
+    ):
+        # A console script's workers answer through Python's stdout, which
+        # on Windows writes the ANSI code page: a `§` in a note answered as
+        # one byte no UTF-8 reader takes, and every worker seemed to die.
+        monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
         seen = self.migrations(capsys, tmp_path, *extra)
         assert len(seen) == 1, sorted(seen)
         ((code, _, _, written),) = seen
@@ -3483,7 +3490,7 @@ class TestWorkersBeyondFiles:
         selected = [arg for case in cases for arg in ("--case", case)]
         code, printed = run(capsys, "conformance", "run", str(out), *selected, *flags)
         expected = (out / "expected.json").read_bytes()
-        return code, printed.out.replace(str(out), "OUT"), printed.err, expected
+        return code, unrooted(printed.out, out), printed.err, expected
 
     @pytest.mark.parametrize("extra", [[], ["--json"]])
     def test_conformance_run_does_not_depend_on_the_worker_count(

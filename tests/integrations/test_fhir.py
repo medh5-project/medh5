@@ -15,6 +15,7 @@ from medh5.errors import MEDH5Error, MEDH5ValidationError
 from medh5.io.fhir import augment_from_fhir, read_fhir
 from medh5.sample import open_sample
 from medh5.validate import validate_file
+from tests.helpers import unrooted
 from tests.kits import Fhir
 
 UTC = datetime.timezone.utc
@@ -607,7 +608,7 @@ def test_a_bulk_import_does_not_depend_on_the_worker_count(tmp_path, monkeypatch
         cohort = _cohort_from_fhir(
             export, mapping, out_dir=out, workers=workers, **BULK
         )
-        shown = json.dumps(cohort.to_json(), sort_keys=True).replace(str(out), "OUT")
+        shown = unrooted(json.dumps(cohort.to_json(), sort_keys=True), out)
         written = tuple(_content(p)[0] for p in sorted(out.iterdir()))
         seen.add((shown, written))
     assert len(seen) == 1
