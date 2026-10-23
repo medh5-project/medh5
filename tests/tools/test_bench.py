@@ -308,9 +308,12 @@ class TestPhaseBench:
         for row in results["rows"].values():
             assert row["locked"] == pytest.approx(0.14)
             assert row["outside"] == pytest.approx(0.14)
-            # 0.14 s of work outside the lock; a chunk writer's workers would
-            # take 0.08 s of it (compress, map, interpolate, decode).
-            now = row["wall"] / (row["wall"] - 0.75 * 0.14)
+            # 0.14 s of work outside the lock, of a wall that is the stand-in's
+            # own and on a fast machine shorter (a share is at most all of it);
+            # a chunk writer's workers would take 0.08 s of it (compress, map,
+            # interpolate, decode).
+            outside = min(0.14, row["wall"])
+            now = row["wall"] / (row["wall"] - 0.75 * outside)
             assert row["ceiling"]["now"] == pytest.approx(now)
             assert row["writes"] == pytest.approx(0.08)
             assert row["ceiling"]["both"] >= row["ceiling"]["writes"]
