@@ -11,7 +11,8 @@ run theirs with :func:`run`, on the same rules:
 - an exception a unit raises is raised again at its turn and stops the run
   there, as it would in one process;
 - a worker that dies fails only the unit it held, as the command words that
-  (``died``); what no worker is left to take runs here;
+  (``died``); what no worker is left to take runs here, as does everything
+  when the system refuses to start one;
 - a worker is started fresh (``spawn``), never forked: a child must not
   inherit an open HDF5 file.
 
@@ -24,8 +25,10 @@ free for, so no more start than there are units.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import multiprocessing
 import os
+import sys
 from collections.abc import Callable, Iterable, Iterator
 from multiprocessing.connection import Connection, wait
 from pathlib import PurePath
@@ -74,7 +77,21 @@ def run(
                     exhausted = True
                     break
                 if idle is None:
-                    idle = _Worker(context, fn)
+                    try:
+                        idle = _Worker(context, fn)
+                    except OSError as exc:
+                        # The system refuses another process (a limit on
+                        # processes or memory): the ones started go on,
+                        # and with none, the rest runs here.
+                        if not pool:
+                            print(
+                                f"medh5: cannot start workers ({exc}); "
+                                "running in one process",
+                                file=sys.stderr,
+                            )
+                        workers = len(pool)
+                        pending = itertools.chain([unit], pending)
+                        break
                     pool.append(idle)
                 idle.give(given, *unit)
                 given += 1
@@ -124,8 +141,13 @@ class _Worker:
     def __init__(self, context: Any, fn: Callable[[Any], Any]) -> None:
         self.connection, theirs = context.Pipe()
         self.process = context.Process(target=_serve, args=(theirs, fn), daemon=True)
-        self.process.start()
-        theirs.close()
+        try:
+            self.process.start()
+        except BaseException:
+            self.connection.close()
+            raise
+        finally:
+            theirs.close()
         self.alive = True
         self.held: tuple[int, str, Any] | None = None
 

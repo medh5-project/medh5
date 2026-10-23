@@ -3485,6 +3485,32 @@ class TestWorkersBeyondFiles:
         assert list(_workers.run(str, [("a", 1), ("b", 2)], 8, died)) == ["1", "2"]
         assert 1 <= len(started) <= 2
 
+    @pytest.mark.parametrize("refused", [1, 2])
+    def test_a_worker_the_system_refuses_leaves_the_rest_to_the_others(
+        self, capsys, monkeypatch, refused
+    ):
+        """A process start refused (a limit on processes or memory) ended
+        the command; the workers started go on, and with none, this process
+        runs every unit, as the native pool does."""
+        from medh5 import _workers
+
+        started = []
+
+        class Limited(_workers._Worker):
+            def __init__(self, *args: Any) -> None:
+                if len(started) + 1 >= refused:
+                    raise BlockingIOError("Resource temporarily unavailable")
+                started.append(self)
+                super().__init__(*args)
+
+        monkeypatch.setattr(_workers, "_Worker", Limited)
+        died = lambda label, task, status: None  # noqa: E731
+        units = [(str(i), i) for i in range(5)]
+        assert list(_workers.run(str, units, 3, died)) == list("01234")
+        assert len(started) == refused - 1
+        err = capsys.readouterr().err
+        assert ("cannot start workers" in err) == (refused == 1)
+
     def conformance(self, capsys, tmp_path, cases, *flags) -> tuple[Any, ...]:
         out = tmp_path / f"corpus{len(list(tmp_path.iterdir()))}"
         selected = [arg for case in cases for arg in ("--case", case)]
