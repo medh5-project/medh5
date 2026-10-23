@@ -124,18 +124,28 @@ def volumes(shape: tuple[int, int, int], seed: int) -> dict[str, np.ndarray]:
     }
 
 
+def shape_tag(shape: tuple[int, ...]) -> str:
+    """What names the inputs of one shape: each cached file carries it, so a
+    run with another ``--shape`` in the same ``--out`` builds its own."""
+    return "x".join(map(str, shape))
+
+
 def write_inputs(out: Path, shape: tuple[int, int, int]) -> dict[str, Path]:
-    """The four ``.nii.gz`` inputs, written once and reused."""
+    """The four ``.nii.gz`` inputs, written once and reused.  Each is written
+    beside its name and renamed into place, so a run stopped halfway leaves
+    no file that looks finished."""
     import nibabel as nib
 
-    paths = {name: out / f"{name}-{'x'.join(map(str, shape))}.nii.gz" for name in
-             ("ct", "ct2", "pet", "mask")}
+    paths = {name: out / f"{name}-{shape_tag(shape)}.nii.gz" for name in
+             ("ct", "ct2", "pet", "mask")}  # fmt: skip
     if all(p.exists() for p in paths.values()):
         return paths
     affine = np.diag([0.8, 0.8, 1.5, 1.0])
     for name, values in volumes(shape, 20261023).items():
         # NIfTI's first axis is x; the sample's grid is z, y, x.
-        nib.save(nib.Nifti1Image(np.ascontiguousarray(values.T), affine), paths[name])
+        partial = paths[name].with_name(f"partial-{paths[name].name}")
+        nib.save(nib.Nifti1Image(np.ascontiguousarray(values.T), affine), partial)
+        os.replace(partial, paths[name])
     return paths
 
 
@@ -322,7 +332,9 @@ def measure_in(out: Path, args: argparse.Namespace) -> dict[str, Any]:
     shape = tuple(args.shape)
     medh5 = Path(args.medh5).resolve()
     inputs = write_inputs(out, shape)  # type: ignore[arg-type]
-    sample = out / "sample.medh5"
+    # `convert from-nifti` replaces its output whole, so a sample that
+    # exists is finished.
+    sample = out / f"sample-{shape_tag(shape)}.medh5"
     if not sample.exists():
         argv = ["convert", "from-nifti"]
         for name in ("ct", "ct2", "pet"):

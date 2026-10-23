@@ -319,6 +319,22 @@ class TestPhaseBench:
         assert set(results["digest_mib_s"]) == {"sha256", "sha512", "blake2b"}
         assert "| resample nearest |" in module.table(results)
 
+    def test_another_shape_in_the_same_out_builds_its_own_sample(self, tmp_path):
+        """The inputs and the sample are cached by shape: a run with another
+        ``--shape`` in the same ``--out`` measured the sample of the first."""
+        pytest.importorskip("nibabel")
+        module = _load_script("bench_phases.py", "bench_phases_shapes")
+        work = tmp_path / "w"
+        for shape in (["8", "16", "16"], ["8", "16", "24"]):
+            module.main(
+                ["--medh5", str(self.stand_in(tmp_path)), "--shape", *shape]
+                + ["--repeats", "1", "--digest-mib", "1", "--out", str(work)]
+            )
+        for z, y, x in ((8, 16, 16), (8, 16, 24)):
+            with medh5.open(work / f"sample-{z}x{y}x{x}.medh5") as sample:
+                assert sample.images["CT"].shape == (z, y, x)
+        assert not list(work.glob("partial-*"))
+
     def test_a_cli_without_timings_is_refused(self, tmp_path):
         pytest.importorskip("nibabel")
         module = _load_script("bench_phases.py", "bench_phases_plain")
