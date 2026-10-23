@@ -784,6 +784,39 @@ def augment_cohort_from_fhir(
     profile does not read, are counted in ``info`` notes.  A subject that
     refuses is reported in the result, and the others are still written.
     """
+    return _cohort_from_fhir(
+        export_dir,
+        mapping,
+        out_dir=out_dir,
+        clock=clock,
+        timezone=timezone,
+        origin=origin,
+        texts=texts,
+        prefer_systems=prefer_systems,
+        image_studies=image_studies,
+    )
+
+
+def _cohort_from_fhir(
+    export_dir: str | os.PathLike[str],
+    mapping: Mapping[str, str | os.PathLike[str]],
+    *,
+    out_dir: str | os.PathLike[str] | None = None,
+    clock: Clock | None = None,
+    timezone: str | datetime.tzinfo | None = None,
+    origin: str | datetime.datetime | None = None,
+    texts: bool = False,
+    prefer_systems: Iterable[str] = (),
+    image_studies: Mapping[str, str] | None = None,
+    workers: int = 1,
+) -> CohortImport:
+    """:func:`augment_cohort_from_fhir`, its subjects imported on *workers*
+    processes: what ``medh5 clinical augment-cohort --workers`` runs.  The
+    export is indexed here, once, and each subject's resources read here as
+    a worker is free for them; a worker reads the subject's sample and
+    writes its result."""
+    from medh5 import _workers
+
     root = Path(os.fspath(export_dir))
     files = _bulk_files(root)
     targets = _clinical.cohort_targets(mapping, out_dir, root)
@@ -795,33 +828,49 @@ def augment_cohort_from_fhir(
         converter="from-fhir",
         report=ConversionReport(source=source, converter="from-fhir"),
     )
+    options = (timezone, origin, texts, prefer, image_studies, source)
     with _BulkIndex(mapping) as index:
         for n, path in enumerate(files):
             index.scan(n, path)
         index.notes(cohort.report)
-        for subject, sample, out in targets:
 
-            def read(
-                on: Clock, subject: str = subject
-            ) -> tuple[ClinicalRecords, ConversionReport]:
-                resources = list(_bulk_read(files, index.lines(subject)))
-                records, report = read_fhir(
-                    resources,
-                    subject=subject,
-                    clock=on,
-                    timezone=timezone,
-                    origin=origin,
-                    texts=texts,
-                    prefer_systems=prefer,
-                    image_studies=image_studies,
-                )
-                report.source = source
-                return records, report
+        def units() -> Iterator[tuple[str, tuple[Any, ...], list[Path]]]:
+            for subject, sample, out in targets:
+                try:
+                    found: Any = list(_bulk_read(files, index.lines(subject)))
+                except Exception as exc:  # raised in the subject's read
+                    found = exc
+                task = (subject, sample, out, clock, found, options)
+                yield str(subject), task, [sample, *([out] if out else [])]
 
-            cohort.subjects.append(
-                _clinical.import_subject(subject, sample, out, clock, read)
-            )
+        cohort.subjects.extend(
+            _workers.run(_import_subject, units(), workers, _clinical.subject_died)
+        )
     return cohort
+
+
+def _import_subject(task: tuple[Any, ...]) -> Any:
+    """One subject of :func:`_cohort_from_fhir`, its resources as read."""
+    subject, sample, out, clock, found, options = task
+    timezone, origin, texts, prefer, image_studies, source = options
+
+    def read(on: Clock) -> tuple[ClinicalRecords, ConversionReport]:
+        if isinstance(found, BaseException):
+            raise found
+        records, report = read_fhir(
+            found,
+            subject=subject,
+            clock=on,
+            timezone=timezone,
+            origin=origin,
+            texts=texts,
+            prefer_systems=prefer,
+            image_studies=image_studies,
+        )
+        report.source = source
+        return records, report
+
+    return _clinical.import_subject(subject, sample, out, clock, read)
 
 
 class _BulkIndex:

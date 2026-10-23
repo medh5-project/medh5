@@ -12,7 +12,7 @@ import pytest
 
 import medh5
 from medh5.errors import MEDH5ValidationError
-from tests.helpers import disk_full_while, group_contents
+from tests.helpers import disk_full_while, group_contents, unrooted
 from tests.kits import Numbered, Organs
 
 nib = pytest.importorskip("nibabel")
@@ -1752,3 +1752,100 @@ class TestReplace:
         assert not (root / "imagesTr" / "b_0000.nii.gz").exists()
         (note,) = report.of_kind("replace")
         assert note.detail["removed"] == ["imagesTr/b_0000.nii.gz", "labelsTr/b.nii.gz"]
+
+
+class TestWorkers:
+    """``medh5 convert to-nnunet --workers N`` writes each case in one of up
+    to N processes, and the dataset and the report one process writes."""
+
+    @staticmethod
+    def cases(where: Path) -> list[str]:
+        paths = []
+        for name in ("a", "b", "c", "d"):
+            path = where / f"{name}.medh5"
+            with medh5.create(path, sample_id=name, codec="portable") as w:
+                w.add_grid("g", shape=Organs.SHAPE, spacing=(1.0, 1.0, 1.0))
+                image = np.full(Organs.SHAPE, ord(name), np.int16)
+                w.add_image("CT", image, grid="g", modality="CT")
+                mask = np.zeros(Organs.SHAPE, bool)
+                mask[1:3, 1 : 2 + "abcd".index(name), 1:3] = True
+                w.add_segmentation("seg", grid="g", masks={1: mask})
+            paths.append(str(path))
+        return paths
+
+    @staticmethod
+    def export(capsys: Any, out: Path, paths: list[str], *flags: str) -> Any:
+        from medh5.cli import main
+
+        code = main(["convert", "to-nnunet", str(out), *paths, *flags])
+        printed = capsys.readouterr()
+        return code, unrooted(printed.out, out), printed.err
+
+    @staticmethod
+    def volumes(root: Path) -> dict[str, Any]:
+        """Each NIfTI file's header and voxels: gzip stamps its own time."""
+        found = {}
+        for path in sorted(root.rglob("*.nii.gz")):
+            image = nib.load(str(path))
+            data = np.asarray(image.dataobj)
+            found[path.relative_to(root).as_posix()] = (
+                image.header.binaryblock,
+                data.dtype.str,
+                data.tobytes(),
+            )
+        return found
+
+    @pytest.mark.parametrize("extra", [[], ["--json"]])
+    def test_the_export_does_not_depend_on_the_worker_count(
+        self, capsys, tmp_path, extra
+    ):
+        sources = tmp_path / "s"
+        sources.mkdir()
+        paths = self.cases(sources)
+        seen = []
+        for workers in ([], ["--workers", "1"], ["--workers", "3"]):
+            out = tmp_path / f"nn{len(seen)}"
+            printed = self.export(capsys, out, paths, *extra, *workers)
+            root = out / "Dataset001_medh5"
+            document = (root / "dataset.json").read_bytes()
+            seen.append((printed, document, self.volumes(root)))
+        assert seen[0][0][0] == 0
+        assert len(seen[0][2]) == 8
+        assert seen[1] == seen[0]
+        assert seen[2] == seen[0]
+
+    def test_a_dying_worker_stops_the_export(self, capsys, tmp_path, monkeypatch):
+        """A case whose worker stopped is a case that could not be written:
+        the export stops, and ``dataset.json`` is not written."""
+        sources = tmp_path / "s"
+        sources.mkdir()
+        paths = self.cases(sources)
+        monkeypatch.setenv("MEDH5_TEST_WORKERS", "exit:c")
+        code, _, err = self.export(capsys, tmp_path / "nn", paths, "--workers", "2")
+        assert code != 0
+        assert "case c (" in err and "the worker writing it stopped" in err
+        assert not (tmp_path / "nn" / "Dataset001_medh5" / "dataset.json").exists()
+
+    def test_two_cases_of_one_name_are_refused_before_any_worker(
+        self, capsys, tmp_path
+    ):
+        """Case names are fixed by the parent, the whole dataset first: two
+        samples that derive one case's files are refused as in one process,
+        and nothing is written."""
+        sources = tmp_path / "s"
+        sources.mkdir()
+        paths = self.cases(sources)
+        twin = sources / "twin.medh5"
+        with medh5.create(twin, sample_id="A", codec="portable") as w:
+            w.add_grid("g", shape=Organs.SHAPE, spacing=(1.0, 1.0, 1.0))
+            w.add_image("CT", np.zeros(Organs.SHAPE, np.int16), grid="g", modality="CT")
+            w.add_segmentation("seg", grid="g", masks={1: np.ones(Organs.SHAPE, bool)})
+        paths.append(str(twin))
+        seen = set()
+        for workers in ([], ["--workers", "3"]):
+            out = tmp_path / f"nn{len(seen)}"
+            seen.add(self.export(capsys, out, paths, *workers))
+            assert not out.exists() or not any(out.rglob("*.nii.gz"))
+        assert len(seen) == 1
+        ((code, _, err),) = seen
+        assert code != 0 and "names the same files" in err

@@ -6,14 +6,15 @@ use clap::ArgMatches;
 use serde_json::{json, Value};
 
 use medh5::conformance::{
-    build_corpus, case_by_name, cases, check_checksums, load_manifest, publish, run_corpus, score_with, summarize,
-    CaseResult, ScoreOptions,
+    build_corpus, case_by_name, cases, check_checksums, load_manifest, publish, run_case, run_corpus, score_with,
+    summarize, write_expected, CaseResult, ScoreOptions,
 };
 use medh5::json::repr_str;
 use medh5::pyval::py_path;
 use medh5::Error;
 
 use crate::common::*;
+use crate::workers;
 
 pub fn dispatch(m: &ArgMatches, ctx: &mut Ctx) -> CmdResult {
     let names = m.subcommand().and_then(|(_, sub)| sub.try_get_many::<String>("names").ok().flatten());
@@ -37,7 +38,11 @@ pub fn dispatch(m: &ArgMatches, ctx: &mut Ctx) -> CmdResult {
             Ok(EXIT_OK)
         }
         Some(("run", sub)) => {
-            let results = run_corpus(outdir(sub)?, names)?;
+            let results = if workers::wanted(sub) > 1 {
+                run_in_units(sub, names, ctx)?
+            } else {
+                run_corpus(outdir(sub)?, names)?
+            };
             Ok(report(&results, None, None, flag(sub, "json"), ctx))
         }
         Some(("publish", sub)) => {
@@ -48,6 +53,88 @@ pub fn dispatch(m: &ArgMatches, ctx: &mut Ctx) -> CmdResult {
         Some(("score", sub)) => score_cmd(sub, ctx),
         _ => Ok(ctx.usage("usage: medh5 conformance {list|build|run|publish|score}")),
     }
+}
+
+/// `run_corpus`, a case to a unit on `--workers` processes: each builds and
+/// checks its case, and the manifest is written once every case is built.
+fn run_in_units(m: &ArgMatches, names: Option<&[String]>, ctx: &mut Ctx) -> medh5::Result<Vec<CaseResult>> {
+    let dir = outdir(m)?;
+    let units: Vec<workers::Unit> = cases()
+        .iter()
+        .filter(|c| names.is_none_or(|n| n.contains(&c.name)))
+        .map(|c| {
+            let path = dir.join(format!("{}{}", c.name, c.suffix));
+            workers::Unit {
+                task: json!({"name": c.name, "path": py_path(&path)}),
+                files: vec![path.to_string_lossy().into_owned()],
+                label: c.name.clone(),
+            }
+        })
+        .collect();
+    let mut results = Vec::with_capacity(units.len());
+    workers::run_units("conformance run", m, ctx, &units, &mut |_, outcome| {
+        results.push(result_from_json(&outcome.data)?);
+        Ok(())
+    })?;
+    write_expected(dir, names)?;
+    Ok(results)
+}
+
+/// `conformance run --workers`: a unit is a case.  A case whose worker
+/// stopped could not be run, as a case whose file the validator cannot
+/// read could not.
+pub(crate) const RUN: workers::Kind = workers::Kind {
+    runner: |m| Ok(Box::new(CaseRunner { dir: outdir(m)?.to_path_buf() })),
+    died: |unit, status| {
+        let case = case_by_name(unit.task["name"].as_str().unwrap_or_default())?;
+        let mut result = CaseResult::new(case.clone(), unit.task["path"].as_str().unwrap_or_default().to_string());
+        result.error = Some(format!("the worker running it stopped ({status})"));
+        let mut outcome = workers::FileOutcome::new();
+        outcome.data = result_to_json(&result);
+        Ok(outcome)
+    },
+    writes: true,
+};
+
+struct CaseRunner {
+    dir: std::path::PathBuf,
+}
+
+impl workers::Runner for CaseRunner {
+    fn run(&mut self, task: &Value) -> medh5::Result<workers::FileOutcome> {
+        let result = run_case(&self.dir, case_by_name(task["name"].as_str().unwrap_or_default())?)?;
+        let mut outcome = workers::FileOutcome::new();
+        outcome.data = result_to_json(&result);
+        Ok(outcome)
+    }
+}
+
+fn result_to_json(r: &CaseResult) -> Value {
+    json!({
+        "name": r.case.name,
+        "path": r.path,
+        "got_errors": r.got_errors,
+        "got_warnings": r.got_warnings,
+        "missing": r.missing,
+        "unexpected": r.unexpected,
+        "error": r.error,
+        "details": r.details,
+    })
+}
+
+fn result_from_json(v: &Value) -> medh5::Result<CaseResult> {
+    let strings = |key: &str| -> Vec<String> {
+        v[key].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
+    };
+    let case = case_by_name(v["name"].as_str().unwrap_or_default())?;
+    let mut result = CaseResult::new(case.clone(), v["path"].as_str().unwrap_or_default().to_string());
+    result.got_errors = strings("got_errors");
+    result.got_warnings = strings("got_warnings");
+    result.missing = strings("missing");
+    result.unexpected = strings("unexpected");
+    result.error = v["error"].as_str().map(str::to_string);
+    result.details = strings("details");
+    Ok(result)
 }
 
 /// `OUTDIR`, made if it is not there; a file in the way is named.

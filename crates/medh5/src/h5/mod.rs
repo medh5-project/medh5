@@ -13,7 +13,7 @@ pub mod file;
 pub mod fork;
 pub mod graph;
 pub mod ops;
-mod window;
+pub(crate) mod window;
 
 pub use attrs::AttrValue;
 pub use hdf5::{Dataset, File, Group, Location};

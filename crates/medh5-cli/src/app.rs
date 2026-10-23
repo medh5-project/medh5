@@ -70,6 +70,12 @@ fn workers() -> Arg {
     count("workers", "workers", "processes to run files in; 0 and 1 run them in this one", 0).default_value("1")
 }
 
+/// `--workers N` for a command whose units are not its files: `units`
+/// says what they are.
+fn workers_of(units: &'static str) -> Arg {
+    count("workers", "workers", units, 0).default_value("1")
+}
+
 fn json() -> Arg {
     flag("json", "json", "machine-readable output on stdout")
 }
@@ -949,7 +955,8 @@ fn convert() -> Vec<Command> {
                     "replace",
                     "replace an existing dataset in place, file by file and dataset.json last, then remove the \
                      NIfTI files it no longer writes; every other file is left where it is",
-                )),
+                ))
+                .arg(workers_of("processes to write the cases in; 0 and 1 run them in this one")),
         ));
     let migrate = report_args(
         Command::new("migrate")
@@ -967,7 +974,8 @@ fn convert() -> Vec<Command> {
                 opt("write_labels", "write-labels", "mint the cohort's label set, write it for review, and stop")
                     .value_name("FILE"),
             )
-            .arg(codec()),
+            .arg(codec())
+            .arg(workers_of("processes to write the samples in, a subject's files each; 0 and 1 run them in this one")),
     );
     vec![convert, migrate]
 }
@@ -1091,6 +1099,7 @@ fn conformance() -> Command {
                 .about("build the corpus and check this validator")
                 .arg(positional("outdir", "directory to build the corpus in"))
                 .arg(append("names", "case", "only run these cases; repeatable").value_name("CASE"))
+                .arg(workers_of("processes to build and check the cases in; 0 and 1 run them in this one"))
                 .arg(json()),
         )
         .subcommand(
@@ -1268,7 +1277,8 @@ fn cohort_importer() -> Command {
             "out_dir",
             "out-dir",
             "write each result here, under its sample's name, and leave the samples as they are",
-        ));
+        ))
+        .arg(workers_of("processes to import the subjects in; 0 and 1 run them in this one"));
     import_options(cmd, |arg| arg)
         .arg(json())
         .after_help("It runs in the Python package (MEDS needs pip install 'medh5[meds]').")
@@ -1356,6 +1366,7 @@ fn task() -> Command {
                 .arg(manifest())
                 .arg(opt("base", "base", "resolve relative source URIs here (default: the manifest's directory)"))
                 .arg(flag("deep", "deep", "re-verify every dataset of every source, not only the clinical ones"))
+                .arg(workers_of("processes to read the subjects in; 0 and 1 run them in this one"))
                 .arg(json()),
         ))
         .subcommand(confinement(

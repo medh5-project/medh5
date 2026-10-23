@@ -477,8 +477,8 @@ mod tests {
         assert_eq!(failed, Vec::<String>::new(), "a child could not write and read");
     }
 
-    /// A child forked by a thread that had parked runs a threaded call to
-    /// the end, on that thread alone on macOS.
+    /// A child forked by a thread that had parked runs threaded calls to
+    /// the end, ordered and streamed, on that thread alone on macOS.
     ///
     /// There a thread parks on a libdispatch semaphore, a Mach port made the
     /// first time it parks, which the child does not inherit: waiting for
@@ -508,9 +508,21 @@ mod tests {
                 sum.fetch_add(i, Ordering::SeqCst);
                 Ok::<_, ()>(())
             });
-            let workers = if cfg!(target_vendor = "apple") { 0 } else { 4 };
-            let ok =
-                ran.is_ok() && sum.load(Ordering::SeqCst) == 28 && STARTED.load(Ordering::SeqCst) == before + workers;
+            let streamed = crate::parallel::streams(
+                4,
+                vec![0usize; 2],
+                |feed| (0..8).for_each(|i| feed.push(i % 2, i)),
+                |i| Ok::<_, ()>(slow(i)),
+                |total, i| {
+                    *total += i;
+                    Ok(())
+                },
+            );
+            let workers = if cfg!(target_vendor = "apple") { 0 } else { 8 };
+            let ok = ran.is_ok()
+                && sum.load(Ordering::SeqCst) == 28
+                && streamed == [(12, None), (16, None)]
+                && STARTED.load(Ordering::SeqCst) == before + workers;
             // SAFETY: the child ends without running the parent's exit handlers.
             unsafe { libc::_exit(if ok { 0 } else { 1 }) };
         }

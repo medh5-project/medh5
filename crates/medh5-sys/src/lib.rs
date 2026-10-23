@@ -87,6 +87,20 @@ unsafe extern "C" {
         out: *mut c_void,
         out_len: i64,
     ) -> c_int;
+
+    /// 0 when `frame` is a B2ND frame of rank `ndim`, shape `chunk_shape` and
+    /// item size `typesize` --- one [`medh5_b2nd_read_slice`] reads, unless
+    /// its blocks do not decompress --- and 1 otherwise.  Parses the frame's
+    /// metadata only, decompressing nothing; touches no HDF5 state.  Not
+    /// API: the engine's digest pass checks a frame before a worker reads it.
+    #[doc(hidden)]
+    pub fn medh5_b2nd_frame_fits(
+        frame: *const u8,
+        frame_len: i64,
+        ndim: i8,
+        chunk_shape: *const i64,
+        typesize: i32,
+    ) -> c_int;
 }
 
 /// C-Blosc2's threads callback: `dojob` on each of `numjobs` job records of

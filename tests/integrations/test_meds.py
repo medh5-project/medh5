@@ -4,6 +4,7 @@ nothing invented --- no zone, no origin, no unit, no availability, no code."""
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import sys
 import zoneinfo
@@ -18,6 +19,7 @@ from medh5.errors import MEDH5Error, MEDH5ValidationError
 from medh5.io.meds import augment_from_meds, read_meds
 from medh5.sample import open_sample
 from medh5.validate import validate_file
+from tests.helpers import unrooted
 from tests.kits import Meds
 
 NEW_YORK = "America/New_York"
@@ -737,3 +739,38 @@ def test_clinical_augment_cohort_from_meds(tmp_path, capsys):
     # One source, and a mapping.
     assert main(argv[:4]) == EXIT_USAGE
     capsys.readouterr()
+
+
+def _cohort_as_run(cohort, out):
+    """A cohort's report as printed, its output folder named ``OUT``."""
+    return unrooted(json.dumps(cohort.to_json(), sort_keys=True), out)
+
+
+def test_a_cohort_import_does_not_depend_on_the_worker_count(tmp_path, monkeypatch):
+    """``clinical augment-cohort --workers N`` imports each subject in one of
+    up to N processes, and writes and reports what one process does: the
+    refused in their place among the imported, over shards splitting
+    subjects.  A subject whose worker dies is that subject's refusal."""
+    from medh5.io.meds import _cohort_from_meds
+
+    dataset = Meds.write(tmp_path / "meds", _cohort_rows((1, 2, 4, 6)), shards=2)
+    samples = {s: Meds.sample(tmp_path / f"s{s}.medh5") for s in (1, 2, 4, 5, 6)}
+    seen = set()
+    for workers in (1, 3):
+        out = tmp_path / f"out{workers}"
+        cohort = _cohort_from_meds(
+            dataset, samples, out_dir=out, workers=workers, **COHORT
+        )
+        written = tuple(_content(p)[0] for p in sorted(out.iterdir()))
+        seen.add((_cohort_as_run(cohort, out), written))
+    assert len(seen) == 1
+    ((_, written),) = seen
+    assert len(written) == 4
+
+    monkeypatch.setenv("MEDH5_TEST_WORKERS", "exit:2")
+    cohort = _cohort_from_meds(
+        dataset, samples, out_dir=tmp_path / "died", workers=2, **COHORT
+    )
+    assert [s.subject for s in cohort.imported] == [1, 4, 6]
+    assert [s.subject for s in cohort.refused] == [2, 5]
+    assert "the worker importing it stopped" in cohort.refused[0].error

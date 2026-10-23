@@ -470,6 +470,12 @@ def test_the_exceptions_are_the_thread_setting_and_the_workers_flags(
         (ROOT / "tests" / "project" / "python_api.txt").read_text(encoding="utf-8")
     )
     assert set(allowed["python"]) <= set(snapshot)
+    workers = ("migrate", "convert to-nnunet", "conformance run", "task preflight")
+    assert allowed["cli"] == {
+        "medh5 --threads": "D6",
+        **{f"medh5 {words} --workers": "D7" for words in workers},
+        "medh5 clinical augment-cohort --workers": "D7",
+    }
     tree = cli_command_tree()
     for flag, decision in allowed["cli"].items():
         assert decision in ("D6", "D7"), flag

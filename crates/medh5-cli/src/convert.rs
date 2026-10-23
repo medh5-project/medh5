@@ -9,20 +9,25 @@
 use std::path::{Component, Path, PathBuf};
 
 use clap::{ArgAction, ArgMatches};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
-use medh5::convert::legacy::{build_label_set, load_sidecar, migrate_paths, write_sidecar};
+use medh5::convert::legacy::{
+    build_label_set, load_sidecar, migrate_group, migrate_paths, plan_migration, write_sidecar, MigrationGroup,
+    MigrationPlan,
+};
 use medh5::convert::nifti::{self, ExportOptions, ImportOptions, SegOptions};
-use medh5::convert::report::ConversionReport;
+use medh5::convert::report::{ConversionReport, Note};
+use medh5::convert::{Occasion, SubjectGroup};
 use medh5::h5::file::same_file;
 use medh5::json::{pretty, repr_str};
 use medh5::labels::registry::load_file;
-use medh5::labels::ClassKey;
+use medh5::labels::{ClassKey, LabelSet};
 use medh5::sample::writer::Annotated;
 use medh5::Error;
 
 use crate::app;
 use crate::common::*;
+use crate::workers;
 
 /// What `--help` cannot say for a converter the standalone binary cannot run.
 const NO_PYTHON: &str = "the format converters (DICOM, DICOM SEG, RTSTRUCT, ITK, nnU-Net) are part of the Python \
@@ -156,40 +161,176 @@ pub fn migrate(m: &ArgMatches, ctx: &mut Ctx) -> CmdResult {
     if let Err(message) = check_writes(m, &sources) {
         return Ok(ctx.fail(message));
     }
-    let result = (|| -> medh5::Result<Option<ConversionReport>> {
-        if let Some(target) = get_str(m, "write_labels") {
-            let mut report = ConversionReport::new("migrate", "");
-            let label_set = build_label_set(&sources, Some(&mut report))?;
-            let written = write_sidecar(&label_set, Path::new(target))?;
-            let note = format!("{}: {} classes --- review before migrating", written.display(), label_set.len());
-            // With `--json`, stdout is the report alone.
-            if flag(m, "json") {
-                ctx.eprint(note);
-            } else {
-                ctx.print(note);
-            }
-            return Ok(Some(report));
-        }
-        let reviewed = match get_str(m, "label_set") {
-            Some(p) => Some(load_sidecar(Path::new(p))?),
-            None => None,
-        };
-        let report = migrate_paths(
-            &sources,
-            Path::new(req_str(m, "out")),
-            req_str(m, "group_by"),
-            get_str(m, "subject_key"),
-            reviewed.as_ref(),
-            req_str(m, "codec"),
-        )?;
-        Ok(Some(report))
-    })();
-    match result {
-        Ok(Some(report)) => finish(&report, m, ctx),
-        Ok(None) => Ok(EXIT_OK),
+    match migrated(m, &sources, ctx) {
+        Ok(report) => finish(&report, m, ctx),
         Err(e) if e.is_medh5() || matches!(e, medh5::Error::Io(_)) => Ok(ctx.fail(e.to_string())),
         Err(e) => Err(e),
     }
+}
+
+/// What `migrate` reports: the minted label set's review, or the cohort's
+/// migration, its samples written in `--workers` processes.
+fn migrated(m: &ArgMatches, sources: &[&Path], ctx: &mut Ctx) -> medh5::Result<ConversionReport> {
+    if let Some(target) = get_str(m, "write_labels") {
+        let mut report = ConversionReport::new("migrate", "");
+        let label_set = build_label_set(sources, Some(&mut report))?;
+        let written = write_sidecar(&label_set, Path::new(target))?;
+        let note = format!("{}: {} classes --- review before migrating", written.display(), label_set.len());
+        // With `--json`, stdout is the report alone.
+        if flag(m, "json") {
+            ctx.eprint(note);
+        } else {
+            ctx.print(note);
+        }
+        return Ok(report);
+    }
+    let reviewed = match get_str(m, "label_set") {
+        Some(p) => Some(load_sidecar(Path::new(p))?),
+        None => None,
+    };
+    let (out, group_by, subject_key, codec) =
+        (Path::new(req_str(m, "out")), req_str(m, "group_by"), get_str(m, "subject_key"), req_str(m, "codec"));
+    if workers::wanted(m) == 1 {
+        return migrate_paths(sources, out, group_by, subject_key, reviewed.as_ref(), codec);
+    }
+    // The plan is the cohort's: its label set, its grouping and the samples'
+    // names.  Each sample is a unit, its inputs and output its files.
+    let MigrationPlan { mut log, labels, groups } =
+        plan_migration(sources, out, group_by, subject_key, reviewed.as_ref())?;
+    let labels = labels.to_json(None);
+    let units: Vec<workers::Unit> = groups
+        .iter()
+        .map(|g| workers::Unit {
+            task: json!({"group": group_to_json(g), "labels": labels}),
+            files: g.sources.iter().chain([&g.target]).map(|p| p.to_string_lossy().into_owned()).collect(),
+            label: g.name.clone(),
+        })
+        .collect();
+    workers::run_units("migrate", m, ctx, &units, &mut |_, outcome| {
+        let part = &outcome.data;
+        log.outputs
+            .extend(part["outputs"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from));
+        log.notes.extend(part["notes"].as_array().into_iter().flatten().map(note_from_json));
+        Ok(())
+    })?;
+    Ok(log)
+}
+
+/// `migrate --workers`: a unit is one sample of the plan, a subject's files.
+pub(crate) const MIGRATE: workers::Kind = workers::Kind {
+    runner: |m| Ok(Box::new(Migrator { codec: req_str(m, "codec").to_string() })),
+    died: |unit, status| {
+        let inputs: Vec<&str> = unit.task["group"]["occasions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|o| o["key"].as_str())
+            .collect();
+        let mut part = ConversionReport::new("migrate", "");
+        part.warn(
+            "failed",
+            format!("{}: the worker writing it stopped ({status})", inputs.join(", ")),
+            json!({"inputs": inputs, "output": unit.task["group"]["target"]}),
+        );
+        Ok(migrated_part(&part))
+    },
+    writes: true,
+};
+
+struct Migrator {
+    codec: String,
+}
+
+impl workers::Runner for Migrator {
+    fn run(&mut self, task: &Value) -> medh5::Result<workers::FileOutcome> {
+        let group = group_from_json(&task["group"])?;
+        let labels = LabelSet::from_json(Some(&task["labels"]))?
+            .ok_or_else(|| Error::Value("a migrate task holds no label set".into()))?;
+        Ok(migrated_part(&migrate_group(&group, &labels, &self.codec)))
+    }
+}
+
+/// What one sample adds to the cohort's report, as a worker answers it.
+fn migrated_part(part: &ConversionReport) -> workers::FileOutcome {
+    let mut outcome = workers::FileOutcome::new();
+    outcome.data = json!({"outputs": part.outputs, "notes": part.notes.iter().map(Note::to_json).collect::<Vec<_>>()});
+    outcome
+}
+
+fn note_from_json(note: &Value) -> Note {
+    let text = |key: &str| note[key].as_str().unwrap_or_default().to_string();
+    Note {
+        kind: text("kind"),
+        message: text("message"),
+        severity: text("severity"),
+        detail: note["detail"].as_object().cloned().unwrap_or_default(),
+    }
+}
+
+fn group_to_json(g: &MigrationGroup) -> Value {
+    let occasions: Vec<Value> = g
+        .group
+        .occasions
+        .iter()
+        .map(|o| {
+            json!({
+                "key": o.key,
+                "subject_id": o.subject_id,
+                "date": o.date,
+                "order_hint": o.order_hint,
+                "demographics": o.demographics.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
+                "payload": o.payload,
+            })
+        })
+        .collect();
+    json!({
+        "subject_id": g.group.subject_id,
+        "ordered_by": g.group.ordered_by,
+        "occasions": occasions,
+        "sources": g.sources.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
+        "name": g.name,
+        "target": g.target.to_string_lossy(),
+        "clash": g.clash.as_ref().map(|p| p.to_string_lossy()),
+    })
+}
+
+fn group_from_json(v: &Value) -> medh5::Result<MigrationGroup> {
+    let bad = || Error::Value("a malformed migrate task".into());
+    let text = |v: &Value| v.as_str().map(str::to_string);
+    let occasions = v["occasions"]
+        .as_array()
+        .ok_or_else(bad)?
+        .iter()
+        .map(|o| {
+            Ok(Occasion {
+                key: text(&o["key"]).ok_or_else(bad)?,
+                subject_id: text(&o["subject_id"]),
+                date: text(&o["date"]),
+                order_hint: o["order_hint"].as_f64(),
+                demographics: o["demographics"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|pair| Some((text(&pair[0])?, text(&pair[1])?)))
+                    .collect(),
+                payload: o["payload"].as_u64().ok_or_else(bad)? as usize,
+            })
+        })
+        .collect::<medh5::Result<Vec<_>>>()?;
+    let paths = |v: &Value| -> Vec<PathBuf> {
+        v.as_array().into_iter().flatten().filter_map(Value::as_str).map(PathBuf::from).collect()
+    };
+    Ok(MigrationGroup {
+        group: SubjectGroup {
+            subject_id: text(&v["subject_id"]).ok_or_else(bad)?,
+            occasions,
+            ordered_by: text(&v["ordered_by"]).ok_or_else(bad)?,
+        },
+        sources: paths(&v["sources"]),
+        name: text(&v["name"]).ok_or_else(bad)?,
+        target: PathBuf::from(text(&v["target"]).ok_or_else(bad)?),
+        clash: text(&v["clash"]).map(PathBuf::from),
+    })
 }
 
 // -- NIfTI, in the engine -----------------------------------------------------

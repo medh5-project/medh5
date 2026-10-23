@@ -94,6 +94,7 @@ _TEMPORARY = {"tmp_path", "tmpdir", "tmp_path_factory", "tmpdir_factory"}
 
 _ONE_THREAD = {
     "test_threads.py": "starts threads of its own, and times them",
+    "test_parallel_digests.py": "sets the process's thread count",
     "test_conformance.py": "builds the whole corpus in each test",
     "test_storage.py::TestOneReplace": "patches nibabel.save, a module global",
     "test_labels.py::TestRegistry::test_register_and_unregister": (

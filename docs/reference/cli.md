@@ -38,13 +38,16 @@ that cannot be written (a full disk) fails the command too.
 `validate`, `verify`, `fix`, `index build` and `recompress` take
 `--workers N`: up to *N* processes run the files, each its own, and what is
 printed — the text, the `--json` document, the exit code — is what one
-process prints, byte for byte, in the order the files were given. `0` and `1`
+process prints, byte for byte, in the order the files were given. `migrate`,
+`convert to-nnunet`, `clinical augment-cohort`, `task preflight` and
+`conformance run` take it too, their unit a subject or a case rather than a
+file; each section below says which. `0` and `1`
 (the default) run them in this process. Processes, not threads: one lock
 covers the HDF5 library in each process, its filters included, so threads
-would take turns. The paths of a command that writes that name one file —
-the same path twice, or a hard link — go to one process, in order. A process
-that dies fails the file it held, named on stderr; the others take what it had
-not begun. `medh5 dataset stats --workers` is threads in one process, and
+would take turns. The units of a command that writes that touch one file —
+the same path twice, a hard link, one output — go to one process, in order. A
+process that dies fails the unit it held, named on stderr; the others take what
+it had not begun. `medh5 dataset stats --workers` is threads in one process, and
 reads only.
 
 `--threads N`, before or after any command name, is how many threads one call
@@ -564,7 +567,7 @@ medh5 convert from-nnunet ROOT OUT [--case ID ...] [--include-test]
 medh5 convert to-nnunet OUT PATH... [--dataset-name NAME] [--annotation A]
                                     [--class K ...] [--unlabeled refuse|test]
                                     [--file-ending .nii.gz|.nii]
-                                    [--split SET_ID] [--replace]
+                                    [--split SET_ID] [--replace] [--workers N]
 ```
 
 All of them also take `[--report FILE] [--json]`. A report never
@@ -680,11 +683,16 @@ medh5 migrate PATH... -o OUTDIR [options]
 --write-labels FILE        mint the cohort's label set for review, then stop
 --label-set FILE           reuse a reviewed label set
 --codec PROFILE            codec profile to write, balanced by default
+--workers N                processes to write the samples in, a subject's files each
 --report FILE
 --json
 ```
 
 See [Migrate from 0.x](../guides/migrate-0x.md) for the two-pass procedure.
+With `--workers`, the label set, the grouping and every output's name are
+settled first, in this process; a worker writes one subject's sample, and the
+report lists them in the order one process does. A worker that dies is that
+subject's `failed` note.
 
 ## Derivations
 
@@ -857,7 +865,8 @@ medh5 clinical augment-cohort (--from-meds DIR | --from-fhir-bulk DIR) --mapping
                               [--origin ISO] [--timezone TZ] [--code-system PREFIX=URI]...
                               [--kind PREFIX=KIND]... [--day-precision PREFIX]...
                               [--document-code CODE]... [--with-text]
-                              [--both-values {refuse,numeric,text}] [--report FILE] [--json]
+                              [--both-values {refuse,numeric,text}] [--workers N]
+                              [--report FILE] [--json]
 ```
 
 A MEDS dataset or a FHIR Bulk Data export (a directory of NDJSON files) into
@@ -872,7 +881,10 @@ options are `clinical augment`'s, applied to every subject; without
 subject that refuses is listed and the others are written; subjects the
 mapping does not name are counted. `--report` keeps the whole result as JSON,
 `--json` prints it, and the command exits 1 when a subject was refused or a
-report holds a warning.
+report holds a warning. `--workers N` imports the subjects in up to *N*
+processes, one subject each, after this process has made the one pass over
+the source; the result lists them in the mapping's order. A subject whose
+worker dies is refused.
 
 ### `medh5 clinical strip`
 
@@ -934,7 +946,7 @@ too.
 ### `medh5 task preflight`
 
 ```
-medh5 task preflight MANIFEST [--base DIR] [--deep] [--json]
+medh5 task preflight MANIFEST [--base DIR] [--deep] [--json] [--workers N]
                      [--source-root DIR | --any-source-path]
 ```
 
@@ -942,7 +954,8 @@ Open and check every source — pins, identities, clocks, duplicated events
 — and report every row: `eligible`, `uncertifiable`, `excluded` or `error`,
 with the reason, the event count, the image filling each slot and the target
 label. Exits 1 when anything was found. `--deep` re-verifies every dataset of
-every source, not only the clinical ones.
+every source, not only the clinical ones. `--workers N` reads the subjects in
+up to *N* processes, one subject each, and prints in the manifest's order.
 
 `--source-root DIR` confines the sources to `DIR`: a URI naming a path outside
 it, once its `.` and `..` are resolved as text, is `T301`, without the path
@@ -1062,10 +1075,12 @@ cases; a name the corpus does not have is refused as a usage error.
 ### `medh5 conformance run`
 
 ```
-medh5 conformance run OUTDIR [--case NAME] [--json]
+medh5 conformance run OUTDIR [--case NAME] [--json] [--workers N]
 ```
 
-Build the corpus and check *this* validator against it.
+Build the corpus and check *this* validator against it. `--workers N` builds
+and checks the cases in up to *N* processes, one case each; `expected.json` is
+written last, by this process.
 
 ### `medh5 conformance publish`
 

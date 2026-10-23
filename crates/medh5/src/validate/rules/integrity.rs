@@ -1,6 +1,6 @@
 //! §13 --- digests, `content_id` and index currency (E7xx).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::{grid_spatial, loc, str_attr, sub_dataset, Context};
 use crate::annotations::encode::normalization_tolerance;
@@ -9,8 +9,8 @@ use crate::digest::{is_canonical_digest, parse_digest, DEFAULT_ALGO};
 use crate::h5::attrs;
 use crate::h5::data::{self, Kind};
 use crate::h5::ops::{self, Node};
-use crate::integrity::digest::{dataset_digest_inspected, STREAM_BYTES};
 use crate::integrity::verify::{verify_root_reporting, ATTESTED_GROUPS};
+use crate::integrity::workers::{self, Inspector, Job};
 use crate::integrity::{unbound, Binding};
 use crate::json::{py_float, repr_int_tuple, repr_str};
 use crate::validate::Diagnostic;
@@ -42,12 +42,11 @@ pub fn check_integrity(ctx: &mut Context) -> Result<Vec<Diagnostic>> {
     }
     // The stored probabilities are checked as the digest pass reads them.
     let mut probmaps = probmaps(ctx, &mut out)?;
-    let (result, unread) = verify_root_reporting(&root, ctx.attr_names.as_ref(), algo_known, &mut |path, block| {
-        if let Some(check) = probmaps.get_mut(path) {
-            check.feed(block);
-        }
-        Ok(())
-    })?;
+    let (result, unread) = {
+        let mut inspectors: HashMap<String, Inspector<'_>> =
+            probmaps.iter_mut().map(|(path, check)| (path.clone(), feeding(check))).collect();
+        verify_root_reporting(&root, ctx.attr_names.as_ref(), algo_known, &mut inspectors)?
+    };
     for (path, e) in &unread {
         out.push(match (path.is_empty(), e.code()) {
             (true, None) => {
@@ -58,24 +57,32 @@ pub fn check_integrity(ctx: &mut Context) -> Result<Vec<Diagnostic>> {
         });
     }
     let unreadable: Vec<&str> = unread.iter().map(|(path, _)| path.as_str()).collect();
+    // Undigested, so the pass above did not read them: read here, on the
+    // workers, and each failure reported in the order of the maps.
+    let mut failures: Vec<(String, Option<crate::Error>)> = Vec::new();
+    let mut jobs = Vec::new();
     for (path, check) in probmaps.iter_mut().filter(|(p, c)| !c.read && !unreadable.contains(&p.as_str())) {
-        // Undigested, so the pass above did not read it.
-        let read = root.dataset(path).map_err(crate::Error::from).and_then(|ds| {
-            dataset_digest_inspected(
-                &ds,
-                path,
-                DEFAULT_ALGO,
-                STREAM_BYTES,
-                Some(&mut |block| {
-                    check.feed(block);
-                    Ok(())
-                }),
-            )
-        });
-        if let Err(e) = read {
+        match root.dataset(path) {
+            Ok(ds) => {
+                let mut job = Job::new(ds, path, DEFAULT_ALGO);
+                job.inspect = Some(feeding(check));
+                jobs.push(job);
+                failures.push((path.clone(), None));
+            }
+            Err(e) => failures.push((path.clone(), Some(e.into()))),
+        }
+    }
+    let mut read = workers::digests(jobs)?.into_iter();
+    for (path, failed) in failures {
+        let failed = match failed {
+            Some(e) => Some(e),
+            None => read.next().expect("a result for every map read").err(),
+        };
+        if let Some(e) = failed {
             out.push(ctx.failed(format!("/{path}"), &e));
         }
     }
+    drop(read);
     for (path, check) in &probmaps {
         out.extend(check.findings(ctx, path));
     }
@@ -272,6 +279,14 @@ fn probmap(group: &Node, grids: Option<&hdf5::Group>) -> Result<Option<ProbmapCh
         unsummed: None,
         read: false,
     }))
+}
+
+/// A map's check as the digest pass hands it each block.
+fn feeding(check: &mut ProbmapCheck) -> Inspector<'_> {
+    Box::new(move |block| {
+        check.feed(block);
+        Ok(())
+    })
 }
 
 impl ProbmapCheck {

@@ -281,21 +281,37 @@ fn selected(names: Option<&[String]>) -> Vec<&'static Case> {
 /// Write every case and an `expected.json` manifest beside them.
 pub fn build_corpus(outdir: &Path, names: Option<&[String]>) -> Result<PathBuf> {
     std::fs::create_dir_all(outdir)?;
+    for entry in selected(names) {
+        build_case(outdir, entry)?;
+    }
+    write_expected(outdir, names)
+}
+
+/// Write `entry`'s file in `outdir`, over any there; its path.
+fn build_case(outdir: &Path, entry: &Case) -> Result<PathBuf> {
+    let path = outdir.join(format!("{}{}", entry.name, entry.suffix));
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    if let Some(build) = &entry.build {
+        build(&path)?;
+    }
+    Ok(path)
+}
+
+/// The `expected.json` manifest of the cases `names` selects, written in
+/// `outdir` --- what [`build_corpus`] writes once the cases are.  Public for
+/// the frontends: `conformance run --workers` builds the cases in several
+/// processes ([`run_case`]) and writes the manifest after them.
+#[doc(hidden)]
+pub fn write_expected(outdir: &Path, names: Option<&[String]>) -> Result<PathBuf> {
     let mut records = Vec::new();
     for entry in selected(names) {
-        let file = format!("{}{}", entry.name, entry.suffix);
-        let path = outdir.join(&file);
-        if path.exists() {
-            std::fs::remove_file(&path)?;
-        }
-        if let Some(build) = &entry.build {
-            build(&path)?;
-        }
         let mut record = match entry.to_json() {
             Value::Object(m) => m,
             _ => Map::new(),
         };
-        record.insert("file".into(), json!(file));
+        record.insert("file".into(), json!(format!("{}{}", entry.name, entry.suffix)));
         records.push(Value::Object(record));
     }
     let manifest = json!({
@@ -312,25 +328,35 @@ pub fn build_corpus(outdir: &Path, names: Option<&[String]>) -> Result<PathBuf> 
 /// Build every case, validate it, and compare against its expected codes.
 pub fn run_corpus(outdir: &Path, names: Option<&[String]>) -> Result<Vec<CaseResult>> {
     build_corpus(outdir, names)?;
-    let mut results = Vec::new();
-    for entry in selected(names) {
-        let path = outdir.join(format!("{}{}", entry.name, entry.suffix));
-        let mut result = CaseResult::new(entry.clone(), crate::pyval::py_path(&path));
-        match validate_file(&path, &entry.level, None) {
-            Err(e) => result.error = Some(e.python_line()),
-            Ok(report) => {
-                // By the code table's severity, as a submission states it,
-                // whatever the level promotes.
-                let by = |severity: &str| -> BTreeSet<String> {
-                    report.diagnostics.iter().filter(|d| d.severity == severity).map(|d| d.code.clone()).collect()
-                };
-                result.compare(by("error"), by("warning"));
-                result.details = report.diagnostics.iter().map(|d| d.line()).collect();
-            }
+    Ok(selected(names).into_iter().map(|entry| check_case(outdir, entry)).collect())
+}
+
+/// One case of [`run_corpus`]: build it in `outdir` and check it, without
+/// the manifest ([`write_expected`]).  Public for the frontends.
+#[doc(hidden)]
+pub fn run_case(outdir: &Path, entry: &Case) -> Result<CaseResult> {
+    std::fs::create_dir_all(outdir)?;
+    build_case(outdir, entry)?;
+    Ok(check_case(outdir, entry))
+}
+
+/// Validate `entry`'s file in `outdir` against its expected codes.
+fn check_case(outdir: &Path, entry: &Case) -> CaseResult {
+    let path = outdir.join(format!("{}{}", entry.name, entry.suffix));
+    let mut result = CaseResult::new(entry.clone(), crate::pyval::py_path(&path));
+    match validate_file(&path, &entry.level, None) {
+        Err(e) => result.error = Some(e.python_line()),
+        Ok(report) => {
+            // By the code table's severity, as a submission states it,
+            // whatever the level promotes.
+            let by = |severity: &str| -> BTreeSet<String> {
+                report.diagnostics.iter().filter(|d| d.severity == severity).map(|d| d.code.clone()).collect()
+            };
+            result.compare(by("error"), by("warning"));
+            result.details = report.diagnostics.iter().map(|d| d.line()).collect();
         }
-        results.push(result);
     }
-    Ok(results)
+    result
 }
 
 #[cfg(test)]

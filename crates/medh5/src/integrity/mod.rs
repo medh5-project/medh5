@@ -3,6 +3,7 @@
 pub mod digest;
 pub mod repair;
 pub mod verify;
+pub(crate) mod workers;
 
 pub use digest::{
     array_digest, attrs_digest, canonical_attrs, collect_digests, compute_content_id, dataset_digest, group_digest,

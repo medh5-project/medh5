@@ -341,6 +341,287 @@ where
     })
 }
 
+/// Sequential streams worked on in parallel: each stream's items, fed by
+/// the caller, are decoded on any worker, several at once, and consumed by
+/// one worker at a time, in the order they were fed, into the stream's own
+/// state --- a digest's hasher, which must see its dataset's bytes in order.
+///
+/// `feed` runs on the calling thread and makes every HDF5 call: it hands
+/// each item to its stream with [`Feed::push`] (or a failure to read one
+/// with [`Feed::fail`]), and waits while twice `threads` items are in
+/// flight.  `decode` and `consume` run on the workers and make none.  A
+/// stream's first failure, in the order its items were fed, is its result,
+/// and its later items are dropped; the other streams go on.  Returns each
+/// stream's state, with its failure if it has one, in the order of `states`.
+///
+/// With one thread, inside another parallel section, or on the thread that
+/// forked a child on macOS ([`alone`]), everything runs here: each item is
+/// decoded and consumed as it is fed, and no thread is started and no hold
+/// is taken.  The caller must not hold HDF5's lock, as
+/// for [`ordered`].
+pub(crate) fn streams<S, P, D, E>(
+    threads: usize,
+    states: Vec<S>,
+    feed: impl FnOnce(&Feed<'_, S, P, D, E>),
+    decode: impl Fn(P) -> Result<D, E> + Sync,
+    consume: impl Fn(&mut S, D) -> Result<(), E> + Sync,
+) -> Vec<(S, Option<E>)>
+where
+    S: Send,
+    P: Send,
+    D: Send,
+    E: Send,
+{
+    let n = states.len();
+    let board = Board {
+        queues: (0..n).map(|_| std::collections::VecDeque::new()).collect(),
+        states: states.into_iter().map(Some).collect(),
+        failed: (0..n).map(|_| None).collect(),
+        in_flight: 0,
+        next: 0,
+        fed: false,
+        stop: false,
+    };
+    if threads <= 1 || INSIDE.get() || alone() {
+        let here =
+            Feed { board: Mutex::new(board), ready: Condvar::new(), window: 0, inline: Some((&decode, &consume)) };
+        feed(&here);
+        return here.board.into_inner().unwrap_or_else(|e| e.into_inner()).results();
+    }
+    debug_assert!(!crate::h5sys::LOCK.is_owned_by_current_thread(), "a parallel section entered holding HDF5's lock");
+    let _hold = SECTIONS.read();
+    INSIDE.set(true);
+    let _inside = Inside;
+    let shared = Feed { board: Mutex::new(board), ready: Condvar::new(), window: 2 * threads, inline: None };
+    std::thread::scope(|scope| {
+        let mut workers = Joined(Vec::with_capacity(threads));
+        let feed_side = &shared;
+        let _stop = StopBoard(feed_side);
+        for _ in 0..threads {
+            let (decode, consume) = (&decode, &consume);
+            #[cfg(test)]
+            STARTED.fetch_add(1, Ordering::SeqCst);
+            workers.0.push(scope.spawn(move || {
+                let _stop = StopBoard(feed_side);
+                INSIDE.set(true);
+                feed_side.work(decode, consume);
+            }));
+        }
+        feed(feed_side);
+        {
+            let mut board = feed_side.lock();
+            board.fed = true;
+            feed_side.ready.notify_all();
+        }
+        workers.join();
+    });
+    shared.board.into_inner().unwrap_or_else(|e| e.into_inner()).results()
+}
+
+/// What [`streams`]' `feed` hands its items to.
+pub(crate) struct Feed<'f, S, P, D, E> {
+    board: Mutex<Board<S, P, D, E>>,
+    ready: Condvar,
+    /// How many items may be in flight; 0 when everything runs here.
+    window: usize,
+    /// The decode and consume steps, where everything runs here.
+    inline: Option<Steps<'f, S, P, D, E>>,
+}
+
+/// A [`streams`] call's two steps, where everything runs on its caller.
+type Steps<'f, S, P, D, E> = (Decode<'f, P, D, E>, Consume<'f, S, D, E>);
+
+/// A [`streams`] call's first step.
+type Decode<'f, P, D, E> = &'f (dyn Fn(P) -> Result<D, E> + Sync);
+
+/// A [`streams`] call's second step.
+type Consume<'f, S, D, E> = &'f (dyn Fn(&mut S, D) -> Result<(), E> + Sync);
+
+/// A stream's items not yet consumed, each with the number it was fed as.
+type Queue<P, D, E> = std::collections::VecDeque<(usize, Slot<P, D, E>)>;
+
+/// The state [`streams`]' workers and its caller share.
+struct Board<S, P, D, E> {
+    /// Each stream's items not yet consumed, in the order they were fed.
+    queues: Vec<Queue<P, D, E>>,
+    /// Each stream's state; `None` while a worker consumes into it.
+    states: Vec<Option<S>>,
+    /// Each stream's failure, once it has one.
+    failed: Vec<Option<E>>,
+    /// Items fed and not yet consumed or dropped.
+    in_flight: usize,
+    /// The number the next item fed is given.
+    next: usize,
+    /// Whether `feed` has returned.
+    fed: bool,
+    /// Whether a worker or the caller panicked.
+    stop: bool,
+}
+
+/// One item of a stream, as it goes.
+enum Slot<P, D, E> {
+    Fed(P),
+    Decoding,
+    Decoded(D),
+    Failed(E),
+}
+
+impl<S, P, D, E> Board<S, P, D, E> {
+    /// Stream `s` has failed with `e`: what it still holds is dropped, but
+    /// for items being decoded, which their workers drop.
+    fn fail(&mut self, s: usize, e: E) {
+        self.failed[s].get_or_insert(e);
+        let before = self.queues[s].len();
+        self.queues[s].retain(|(_, slot)| matches!(slot, Slot::Decoding));
+        self.in_flight -= before - self.queues[s].len();
+    }
+
+    fn results(self) -> Vec<(S, Option<E>)> {
+        let states =
+            self.states.into_iter().map(|s| s.expect("every stream's state is back once its workers have joined"));
+        states.zip(self.failed).collect()
+    }
+}
+
+impl<S, P, D, E> Feed<'_, S, P, D, E> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Board<S, P, D, E>> {
+        self.board.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Hand `item` to stream `s`, after what was fed to it before; dropped
+    /// when the stream has failed.
+    pub(crate) fn push(&self, s: usize, item: P) {
+        if let Some((decode, consume)) = self.inline {
+            let mut board = self.lock();
+            let board = &mut *board;
+            if board.failed[s].is_some() {
+                return;
+            }
+            let state = board.states[s].as_mut().expect("a stream's state is here while it runs here");
+            if let Err(e) = decode(item).and_then(|d| consume(state, d)) {
+                board.failed[s] = Some(e);
+            }
+            return;
+        }
+        self.enqueue(s, Slot::Fed(item));
+    }
+
+    /// Stream `s` could not be fed its next item: `e` is its failure, unless
+    /// an item fed before fails first.
+    pub(crate) fn fail(&self, s: usize, e: E) {
+        if self.inline.is_some() {
+            self.lock().failed[s].get_or_insert(e);
+            return;
+        }
+        self.enqueue(s, Slot::Failed(e));
+    }
+
+    /// Whether stream `s` has failed, or the call is stopping, so that
+    /// nothing more need be read for it.
+    pub(crate) fn failed(&self, s: usize) -> bool {
+        let board = self.lock();
+        board.stop || board.failed[s].is_some()
+    }
+
+    fn enqueue(&self, s: usize, slot: Slot<P, D, E>) {
+        let mut board = self.lock();
+        while board.in_flight >= self.window && !board.stop {
+            board = self.ready.wait(board).unwrap_or_else(|e| e.into_inner());
+        }
+        if board.stop || board.failed[s].is_some() {
+            return;
+        }
+        let seq = board.next;
+        board.next += 1;
+        board.queues[s].push_back((seq, slot));
+        board.in_flight += 1;
+        self.ready.notify_all();
+    }
+
+    /// A worker's loop: consume what is decoded, in each stream's order,
+    /// else decode what was fed, until everything fed is consumed.
+    fn work(&self, decode: Decode<'_, P, D, E>, consume: Consume<'_, S, D, E>) {
+        let mut board = self.lock();
+        loop {
+            if board.stop {
+                return;
+            }
+            let next = (0..board.queues.len()).find(|&s| {
+                board.states[s].is_some()
+                    && board.failed[s].is_none()
+                    && matches!(board.queues[s].front(), Some((_, Slot::Decoded(_) | Slot::Failed(_))))
+            });
+            if let Some(s) = next {
+                match board.queues[s].pop_front() {
+                    Some((_, Slot::Failed(e))) => {
+                        board.in_flight -= 1;
+                        board.fail(s, e);
+                    }
+                    Some((_, Slot::Decoded(d))) => {
+                        let mut state = board.states[s].take().expect("checked above");
+                        drop(board);
+                        let done = consume(&mut state, d);
+                        board = self.lock();
+                        board.states[s] = Some(state);
+                        board.in_flight -= 1;
+                        if let Err(e) = done {
+                            board.fail(s, e);
+                        }
+                    }
+                    _ => unreachable!("the front was checked above"),
+                }
+                self.ready.notify_all();
+                continue;
+            }
+            let fed =
+                board.queues.iter().enumerate().find_map(|(s, queue)| {
+                    queue.iter().position(|(_, slot)| matches!(slot, Slot::Fed(_))).map(|i| (s, i))
+                });
+            if let Some((s, i)) = fed {
+                let seq = board.queues[s][i].0;
+                let Slot::Fed(item) = std::mem::replace(&mut board.queues[s][i].1, Slot::Decoding) else {
+                    unreachable!("found as fed")
+                };
+                drop(board);
+                let decoded = decode(item);
+                board = self.lock();
+                // Found again by its number: items before it may have been
+                // consumed meanwhile, or the stream failed.
+                if let Some(at) = board.queues[s].iter().position(|(n, _)| *n == seq) {
+                    if board.failed[s].is_some() {
+                        board.queues[s].remove(at);
+                        board.in_flight -= 1;
+                    } else {
+                        board.queues[s][at].1 = match decoded {
+                            Ok(d) => Slot::Decoded(d),
+                            Err(e) => Slot::Failed(e),
+                        };
+                    }
+                }
+                self.ready.notify_all();
+                continue;
+            }
+            if board.fed && board.in_flight == 0 {
+                return;
+            }
+            board = self.ready.wait(board).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+/// Stops every worker of a [`streams`] call, and the caller, when dropped
+/// during a panic.
+struct StopBoard<'a, 'f, S, P, D, E>(&'a Feed<'f, S, P, D, E>);
+
+impl<S, P, D, E> Drop for StopBoard<'_, '_, S, P, D, E> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.lock().stop = true;
+            self.0.ready.notify_all();
+        }
+    }
+}
+
 /// A call's workers, each joined when dropped: its thread has ended, not
 /// only its closure, as the scope alone would wait for.  A thread's last
 /// steps take a lock of the standard library's that every thread's first
@@ -591,5 +872,142 @@ pub(crate) mod tests {
         assert!(message.contains("the seventh item"), "{message:?}");
         assert!(!INSIDE.get(), "the section outlived the call");
         assert!(SECTIONS.try_write().is_some(), "the hold outlived the call");
+    }
+    /// What a stream test feeds: `n` items to each of `streams` streams,
+    /// interleaved, each stream's state the items it consumed, in order;
+    /// and the most items in flight at once, where nothing fails.
+    #[allow(clippy::type_complexity)]
+    fn feed_streams(
+        threads: usize,
+        streams_: usize,
+        n: usize,
+        fail: impl Fn(usize, usize) -> Option<&'static str> + Sync,
+    ) -> (Vec<(Vec<usize>, Option<String>)>, usize) {
+        let in_flight = AtomicUsize::new(0);
+        let most = AtomicUsize::new(0);
+        let out = streams(
+            threads,
+            vec![Vec::new(); streams_],
+            |feed| {
+                for i in 0..n {
+                    for s in 0..streams_ {
+                        let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                        most.fetch_max(now, Ordering::SeqCst);
+                        feed.push(s, (s, i));
+                    }
+                }
+            },
+            |(s, i): (usize, usize)| {
+                // Later items decode first, now and then.
+                std::thread::sleep(Duration::from_micros(((n - i) % 5 * 40) as u64));
+                match fail(s, i) {
+                    Some(why) if why.starts_with("decode") => {
+                        in_flight.fetch_sub(1, Ordering::SeqCst);
+                        Err(format!("{why} {s}:{i}"))
+                    }
+                    _ => Ok((s, i)),
+                }
+            },
+            |state: &mut Vec<usize>, (s, i): (usize, usize)| {
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                match fail(s, i) {
+                    Some(why) if why.starts_with("consume") => Err(format!("{why} {s}:{i}")),
+                    _ => {
+                        state.push(i);
+                        Ok(())
+                    }
+                }
+            },
+        );
+        (out, most.load(Ordering::SeqCst))
+    }
+
+    #[test]
+    fn each_stream_consumes_its_items_in_order_at_every_count() {
+        let _serial = serial();
+        for threads in [1, 2, 4] {
+            let (out, most) = feed_streams(threads, 5, 60, |_, _| None);
+            if threads > 1 {
+                // The caller counts an item before pushing it, so one more.
+                assert!(most <= 2 * threads + 1, "{most} in flight at {threads} threads");
+            }
+            for (state, failed) in out {
+                assert_eq!(state, (0..60).collect::<Vec<_>>(), "{threads} threads");
+                assert!(failed.is_none());
+            }
+        }
+    }
+
+    /// A stream's failure is the first in the order its items were fed,
+    /// whichever worker met which first; its later items are dropped, and
+    /// the other streams go on.
+    #[test]
+    fn a_stream_fails_at_its_first_failure_and_alone() {
+        let _serial = serial();
+        let fail = |s: usize, i: usize| match (s, i) {
+            (1, 20) => Some("consume"),
+            (1, 30) => Some("decode"),
+            (3, 7) => Some("decode"),
+            (3, 50) => Some("consume"),
+            _ => None,
+        };
+        for threads in [1, 4] {
+            let (out, _) = feed_streams(threads, 4, 60, fail);
+            assert_eq!(out[1].1.as_deref(), Some("consume 1:20"), "{threads} threads");
+            assert_eq!(out[1].0, (0..20).collect::<Vec<_>>());
+            assert_eq!(out[3].1.as_deref(), Some("decode 3:7"));
+            assert_eq!(out[3].0, (0..7).collect::<Vec<_>>());
+            for s in [0, 2] {
+                assert_eq!(out[s].0, (0..60).collect::<Vec<_>>());
+                assert!(out[s].1.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn one_thread_streams_on_the_caller() {
+        let _serial = serial();
+        let before = STARTED.load(Ordering::SeqCst);
+        let caller = std::thread::current().id();
+        let out = streams(
+            1,
+            vec![0usize; 2],
+            |feed| (0..10).for_each(|i| feed.push(i % 2, i)),
+            |i: usize| {
+                assert_eq!(std::thread::current().id(), caller);
+                Ok::<_, ()>(i)
+            },
+            |sum: &mut usize, i: usize| {
+                *sum += i;
+                Ok(())
+            },
+        );
+        assert_eq!(out, vec![(20, None), (25, None)]);
+        assert_eq!(STARTED.load(Ordering::SeqCst), before, "one thread started a worker");
+    }
+
+    #[test]
+    fn a_stream_worker_that_panics_ends_the_call_with_its_panic() {
+        let _serial = serial();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let caught = std::panic::catch_unwind(|| {
+                streams(
+                    4,
+                    vec![(); 3],
+                    |feed| (0..1000).for_each(|i| feed.push(i % 3, i)),
+                    |i: usize| {
+                        assert_ne!(i, 77, "the item 77");
+                        Ok::<_, ()>(i)
+                    },
+                    |_: &mut (), _| Ok(()),
+                )
+            });
+            let message = caught.unwrap_err().downcast_ref::<String>().cloned().unwrap_or_default();
+            tx.send((message, INSIDE.get(), SECTIONS.try_write().is_some())).unwrap();
+        });
+        let (message, inside, free) = rx.recv_timeout(Duration::from_secs(20)).expect("the call did not end");
+        assert!(message.contains("the item 77"), "{message:?}");
+        assert!(!inside && free, "the section outlived the call");
     }
 }
