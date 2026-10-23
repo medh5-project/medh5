@@ -64,6 +64,7 @@ impl CopyHooks for Raw {
 /// already in the destination --- so two datasets copied in two calls still
 /// share the one type they shared --- and soft links inside it kept as links.
 pub fn copy_stored(src: &hdf5::Group, name: &str, dst: &hdf5::Group) -> Result<()> {
+    phase!(Copy);
     let cname = CString::new(name).map_err(|_| Error::Value(format!("name {} contains a NUL byte", repr_str(name))))?;
     super::locked(|| unsafe {
         let ocpypl = h5p::H5Pcreate(*crate::h5sys::h5p::H5P_CLS_OBJECT_COPY);
@@ -113,6 +114,7 @@ impl GraphCopy {
         skip: &[&str],
         hooks: &mut dyn CopyHooks,
     ) -> Result<()> {
+        phase!(Copy);
         hooks.enter(src)?;
         let result = self.walk(src, dst, skip, 0, hooks);
         hooks.leave(src);
@@ -239,6 +241,7 @@ impl GraphCopy {
 /// Copy every member of `src` but `skip`, and every attribute of `src`, into
 /// `dst`, datasets as stored: what pack, unpack, extract and repack do.
 pub fn copy_root_raw(src: &hdf5::Group, dst: &hdf5::Group, skip: &[&str]) -> Result<()> {
+    phase!(Copy);
     GraphCopy::new(src, dst).members(src, dst, skip, &mut Raw)?;
     for key in attrs::names(src)? {
         attrs::copy_raw(src, dst, &key)?;

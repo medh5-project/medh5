@@ -137,6 +137,17 @@ pub fn command() -> Command {
                 .action(ArgAction::Version)
                 .help("show program's version number and exit"),
         )
+        .arg(
+            count(
+                "threads",
+                "threads",
+                "threads one call may use for its work outside HDF5, in this process and every one it starts \
+                 (default: MEDH5_THREADS, else 1)",
+                1,
+            )
+            .value_name("N")
+            .global(true),
+        )
         .subcommand_value_name("COMMAND")
         .subcommand_help_heading("Commands")
         .infer_long_args(true)

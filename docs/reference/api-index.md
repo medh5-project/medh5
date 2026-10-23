@@ -30,6 +30,7 @@ compiled extension the modules re-export from, not an API of its own.
 | `Deidentification` | class | The `deidentification` member: how identifiers were removed from the sample (§11.4). | [Curation records › Editing a record](curation.md#editing-a-record) |
 | `FeatureCache` | class | An open cache. | [Python API › Tasks and caches](python-api.md#tasks-and-caches) |
 | `FORMAT_VERSION` | constant (`str`) |  | [medh5 › Versioning](../index.md#versioning) |
+| `get_threads` | function | How many threads one call may use for its work outside HDF5: what `set_threads` set, else `MEDH5_THREADS`, else 1. | [Python API › Threads](python-api.md#threads) |
 | `Grid` | class | The lattice of a stored array: its shape, axes and index-to-world geometry (§3.2). | [Annotation kinds › Boxes](annotations.md#boxes) |
 | `grid_patches` | function | Deterministic sliding-window cover of a volume — the inference path. | [PyTorch and MONAI › GridPatchDataset — deterministic tiling, for inference](torch.md#gridpatchdataset--deterministic-tiling-for-inference) |
 | `Identity` | class | The `identity` member of the sample document: who and what the sample is about (§12.1). | [Python API › Identity and structure](python-api.md#identity-and-structure) |
@@ -61,6 +62,7 @@ compiled extension the modules re-export from, not an API of its own.
 | `Sample` | class | A read-only view of one sample root (a file, or a collection member). | [Python API › Sample](python-api.md#sample) |
 | `SampleDocument` | class | The whole document, typed. | [Python API › Identity and structure](python-api.md#identity-and-structure) |
 | `SampleWriter` | class | Builder for one sample. | [Python API › Writing](python-api.md#writing) |
+| `set_threads` | function | Let one call use up to `n` threads for its work outside HDF5, from now on and in every thread of this process; `0` is refused. | [Python API › Threads](python-api.md#threads) |
 | `SplitAudit` | class | What a cohort's split claims say, and where they disagree. |  |
 | `SplitClaim` | class | One entry of `splits`: a claim that the sample belongs to a partition of a split set (§12.3). | [Build and split a cohort › What the digest covers](../guides/cohorts.md#what-the-digest-covers) |
 | `TaskManifest` | class | A `medh5.task/1` manifest: build it, check it, save it, preflight it. | [Python API › Tasks and caches](python-api.md#tasks-and-caches) |
@@ -625,7 +627,7 @@ compiled extension the modules re-export from, not an API of its own.
 | `diagnose` | function | What is stale, mismatched or missing in one file. |  |
 | `Diagnosis` | class | What is wrong with one file, before anything is done about it. |  |
 | `DIGEST_ALGOS` | constant (`tuple`) |  |  |
-| `digest_bytes` | function | Return the `"<algo>:<hex>"` digest of a byte string. |  |
+| `digest_bytes` | function | Return the `"<algo>:<hex>"` digest of a byte string. | [Tune performance › Where a command's time goes](../guides/performance.md#where-a-commands-time-goes) |
 | `fix` | function | Repair what was asked: rebuild stale indices, rewrite digests (with a *reason*, recorded as a provenance activity). | [Storage › Atomic writes](storage.md#atomic-writes) |
 | `fix_paths` | function | `fix` over many files, every one of them: a file that cannot be repaired stops no other. |  |
 | `group_digest` | function | The digest of an object group: its datasets and canonical attributes. |  |
@@ -1019,7 +1021,7 @@ compiled extension the modules re-export from, not an API of its own.
 | `TimepointPair` | class | One ordered pair of visits, and the change label spanning it, if any. |  |
 | `TimepointPairSampler` | class | Enumerate the visit pairs a longitudinal model trains on (§3.7, §9). | [PyTorch and MONAI › PairedPatchDataset — the same place at two visits](torch.md#pairedpatchdataset--the-same-place-at-two-visits) |
 | `VolumeDataset` | class | One item per file: the whole volume, eagerly read. | [PyTorch and MONAI › VolumeDataset — whole volumes](torch.md#volumedataset--whole-volumes) |
-| `worker_init_fn` | function | `DataLoader(worker_init_fn=...)`: drop handles inherited across `fork` (in a process that opened them, close them; see `HandleCache.clear`). | [PyTorch and MONAI › The DataLoader](torch.md#the-dataloader) |
+| `worker_init_fn` | function | `DataLoader(worker_init_fn=...)`: drop handles inherited across `fork` (in a process that opened them, close them; see `HandleCache.clear`), and set one thread per call (`medh5.set_threads`), so the workers do not each use the parent's count. | [Python API › Threads](python-api.md#threads) |
 
 ## `medh5.torch.clinical` { #medh5-torch-clinical }
 
@@ -1059,7 +1061,7 @@ compiled extension the modules re-export from, not an API of its own.
 | `HandleCache` | class | PID-scoped, thread-safe LRU cache of open samples. | [PyTorch and MONAI › Keeping a file's items together](torch.md#keeping-a-files-items-together) |
 | `open_cached` | function | Open a sample — or a collection member — through the per-worker cache. |  |
 | `set_cache_size` | function | Resize this process's cache: how many files each worker keeps open. | [PyTorch and MONAI › Keeping a file's items together](torch.md#keeping-a-files-items-together) |
-| `worker_init_fn` | function | `DataLoader(worker_init_fn=...)`: drop handles inherited across `fork` (in a process that opened them, close them; see `HandleCache.clear`). | [PyTorch and MONAI › The DataLoader](torch.md#the-dataloader) |
+| `worker_init_fn` | function | `DataLoader(worker_init_fn=...)`: drop handles inherited across `fork` (in a process that opened them, close them; see `HandleCache.clear`), and set one thread per call (`medh5.set_threads`), so the workers do not each use the parent's count. | [Python API › Threads](python-api.md#threads) |
 
 ## `medh5.torch.samplers` { #medh5-torch-samplers }
 

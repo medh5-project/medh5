@@ -1,8 +1,8 @@
 """The public Python API as text, and whether a change to it breaks callers.
 
-    python .github/scripts/public_api.py dump [--output FILE]
+    python .github/scripts/public_api.py dump [--cli] [--output FILE]
     python .github/scripts/public_api.py write
-    python .github/scripts/public_api.py compare OLD NEW --release-type TYPE
+    python .github/scripts/public_api.py compare OLD NEW --release-type TYPE [--cli]
 
 `dump` prints the API of the *installed* `medh5`: the package and every module
 path without a `_`-prefixed part (`medh5._core` is stubtest's), one line per
@@ -25,8 +25,16 @@ caller of OLD: a removed name or member, a change of kind (except to
 `deprecated`), a positional parameter renamed or moved, a keyword, `*args` or
 `**kwargs` removed, a default removed, a new required parameter, a constant's
 type or a class's base changed. It fails on any of them unless TYPE is `major`;
-under `patch` it also lists the additions. Standard library only: CI runs it in
-a virtual environment holding nothing but a released wheel.
+under `patch` it also fails an addition that `.github/api-exceptions.txt` does
+not list, and lists the ones it does. Standard library only: CI runs it in a
+virtual environment holding nothing but a released wheel.
+
+With `--cli`, `dump` prints the command line instead, from the installed
+package's parser: one line per command and per option, `medh5 convert
+from-nifti<TAB>command` and `medh5 convert from-nifti --report<TAB>option`.
+An option every command inherits from `medh5` (`--threads`, `--help`) prints
+once, under `medh5`. `compare --cli` compares two such dumps, a removed
+command or option being a break, against the list's `cli` names.
 """
 
 from __future__ import annotations
@@ -43,7 +51,7 @@ import re
 import sys
 import typing
 import warnings
-from collections.abc import Iterator
+from collections.abc import Container, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +59,8 @@ ROOT = Path(__file__).resolve().parents[2]
 SNAPSHOT = ROOT / "tests" / "project" / "python_api.txt"
 PACKAGE = "medh5"
 RELEASE_TYPES = ("major", "minor", "patch")
+EXCEPTIONS = ROOT / ".github" / "api-exceptions.txt"
+EXCEPTION_KINDS = ("rust", "python", "cli")
 
 UNKNOWN = "(?)"
 """A signature `inspect` cannot read (a PyO3 exception type)."""
@@ -263,6 +273,46 @@ def dump() -> str:
     return "".join(f"{text}\n" for text in sorted(lines))
 
 
+def cli_entries(
+    tree: dict[str, Any], path: str = "medh5"
+) -> Iterator[tuple[str, str, str]]:
+    """The command line in `tree`, `medh5._core.cli_command_tree()`'s shape:
+    each command, and each option a command has that it does not inherit.
+
+    clap copies a global option into every command, and the tree does not
+    say which are global, so an option is taken as inherited when `medh5`
+    and every command under it have it: printed once, under `medh5`.  An
+    option only `medh5` has (`--version`) is not, so a command that takes
+    one of its own by the same spelling still prints it."""
+
+    def everywhere(node: dict[str, Any]) -> set[str]:
+        options = set(node["options"])
+        for child in node["commands"].values():
+            options &= everywhere(child)
+        return options
+
+    inherited = everywhere(tree)
+
+    def walk(
+        node: dict[str, Any], path: str, top: bool
+    ) -> Iterator[tuple[str, str, str]]:
+        yield path, "command", ""
+        for option in node["options"]:
+            if top or option not in inherited:
+                yield f"{path} {option}", "option", ""
+        for name, child in node["commands"].items():
+            yield from walk(child, f"{path} {name}", False)
+
+    yield from walk(tree, path, True)
+
+
+def dump_cli() -> str:
+    from medh5._core import cli_command_tree
+
+    lines = {line(entry) for entry in cli_entries(cli_command_tree())}
+    return "".join(f"{text}\n" for text in sorted(lines))
+
+
 # --- compare ---
 
 
@@ -361,9 +411,11 @@ def _split_class(detail: str) -> tuple[str, set[str]]:
 
 
 def changes(
-    old: dict[str, Entry], new: dict[str, Entry]
+    old: dict[str, Entry], new: dict[str, Entry], allowed: Container[str] = ()
 ) -> tuple[list[str], list[str]]:
-    """What breaks a caller of `old`, and what `new` adds."""
+    """What breaks a caller of `old`, and what `new` adds: a new class's
+    members come with it, unless `allowed` lists the class, when each member
+    must be listed too."""
     breaks: list[str] = []
     gone: list[str] = []
     for path in sorted(old):
@@ -397,29 +449,77 @@ def changes(
         else:
             reasons = []
         breaks.extend(f"{path}: {reason}" for reason in reasons)
-    fresh = sorted(set(new) - set(old))
+    fresh = set(new) - set(old)
     added = [
         f"{path}: new {new[path].kind}"
-        for path in fresh
-        if path.rpartition(".")[0] not in fresh
+        for path in sorted(fresh)
+        if (parent := path.rpartition(".")[0]) not in fresh or parent in allowed
     ]
     return breaks, added
 
 
-def compare(old_text: str, new_text: str, release_type: str) -> tuple[int, str]:
-    """The exit status and a Markdown report."""
-    breaks, added = changes(parse(old_text), parse(new_text))
-    lines = [f"## Python API ({release_type})", ""]
+def exceptions(text: str) -> dict[str, dict[str, str]]:
+    """`.github/api-exceptions.txt`: for each kind, each name a patch may add
+    and the decision that allowed it."""
+    allowed: dict[str, dict[str, str]] = {kind: {} for kind in EXCEPTION_KINDS}
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) != 3 or not all(f.strip() == f and f for f in fields):
+            raise ValueError(f"line {number}: not KIND<TAB>NAME<TAB>DECISION: {line!r}")
+        kind, name, decision = fields
+        if kind not in allowed:
+            raise ValueError(
+                f"line {number}: kind {kind!r} is not one of"
+                f" {', '.join(EXCEPTION_KINDS)}"
+            )
+        if name in allowed[kind]:
+            raise ValueError(f"line {number}: {name} is listed twice")
+        allowed[kind][name] = decision
+    return allowed
+
+
+def compare(
+    old_text: str,
+    new_text: str,
+    release_type: str,
+    allowed: dict[str, str] | None = None,
+    title: str = "Python API",
+) -> tuple[int, str]:
+    """The exit status and a Markdown report.  `allowed` is the names a
+    patch may add, with the decision that allowed each."""
+    allowed = allowed or {}
+    breaks, added = changes(parse(old_text), parse(new_text), allowed)
+    lines = [f"## {title} ({release_type})", ""]
     if breaks:
         verdict = "allowed in a major" if release_type == "major" else "not allowed"
         lines += [f"{len(breaks)} breaking change(s), {verdict}:", ""]
         lines += [f"- `{line}`" for line in breaks]
     else:
         lines.append("No breaking change.")
+    unlisted: list[str] = []
     if added and release_type == "patch":
-        lines += ["", f"{len(added)} addition(s) in a patch release:", ""]
-        lines += [f"- `{line}`" for line in added]
-    status = 1 if breaks and release_type != "major" else 0
+        listed = [line for line in added if line.partition(":")[0] in allowed]
+        unlisted = [line for line in added if line.partition(":")[0] not in allowed]
+        if listed:
+            lines += [
+                "",
+                f"{len(listed)} addition(s) in a patch release, each excepted:",
+                "",
+            ]
+            lines += [
+                f"- `{line}` ({allowed[line.partition(':')[0]]})" for line in listed
+            ]
+        if unlisted:
+            lines += [
+                "",
+                f"{len(unlisted)} addition(s) in a patch release, not allowed"
+                f" ({EXCEPTIONS.relative_to(ROOT).as_posix()} does not list them):",
+                "",
+            ]
+            lines += [f"- `{line}`" for line in unlisted]
+    status = 1 if (breaks and release_type != "major") or unlisted else 0
     return status, "\n".join(lines) + "\n"
 
 
@@ -427,16 +527,24 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
     command = commands.add_parser("dump", help="print the installed package's API")
+    command.add_argument("--cli", action="store_true", help="the command line instead")
     command.add_argument("--output", type=Path)
     commands.add_parser("write", help=f"regenerate {SNAPSHOT.relative_to(ROOT)}")
     command = commands.add_parser("compare", help="fail on a breaking change")
     command.add_argument("old", type=Path)
     command.add_argument("new", type=Path)
     command.add_argument("--release-type", choices=RELEASE_TYPES, required=True)
+    command.add_argument("--cli", action="store_true", help="compare `dump --cli`s")
+    command.add_argument(
+        "--exceptions",
+        type=Path,
+        default=EXCEPTIONS,
+        help="the additions a patch may make (default: %(default)s)",
+    )
     args = parser.parse_args(argv)
 
     if args.command == "dump":
-        text = dump()
+        text = dump_cli() if args.cli else dump()
         if args.output:
             args.output.write_text(text, encoding="utf-8", newline="\n")
         else:
@@ -450,6 +558,10 @@ def main(argv: list[str] | None = None) -> int:
         args.old.read_text(encoding="utf-8"),
         args.new.read_text(encoding="utf-8"),
         args.release_type,
+        exceptions(args.exceptions.read_text(encoding="utf-8"))[
+            "cli" if args.cli else "python"
+        ],
+        "Command line" if args.cli else "Python API",
     )
     sys.stdout.write(report)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")

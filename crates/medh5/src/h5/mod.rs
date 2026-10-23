@@ -34,6 +34,8 @@ pub fn init() {
             medh5_sys::register_blosc2_filter();
             medh5_sys::register_zstd_filter();
         }
+        #[cfg(medh5_phase_timings)]
+        crate::timings::time_filters();
         PLUGINS.call_once(|| {
             let path = std::env::var_os(plugins::SEARCH_PATH);
             let allow = std::env::var_os(plugins::ALLOW);

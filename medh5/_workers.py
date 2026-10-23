@@ -16,7 +16,10 @@ run theirs with :func:`run`, on the same rules:
   (``died``); what no worker is left to take runs here, as does everything
   when the system refuses to start one;
 - a worker is started fresh (``spawn``), never forked: a child must not
-  inherit an open HDF5 file.
+  inherit an open HDF5 file;
+- each worker is given this run's thread count (:func:`medh5.get_threads`,
+  which ``--threads`` sets for the run), as the native pool hands its
+  workers ``MEDH5_THREADS``.
 
 Units are taken from their iterable only when a worker is free for one, so
 a command that reads each unit's input as it hands it out holds as many as
@@ -34,6 +37,8 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from multiprocessing.connection import Connection, wait
 from pathlib import PurePath
 from typing import Any, TypeVar
+
+from medh5._core import get_threads, set_threads
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -64,6 +69,7 @@ def run(
     pending = iter(units)
     context = multiprocessing.get_context("spawn")
     pool: list[_Worker] = []
+    threads: int | None = None
     # A unit taken from *units* and not yet handed out: its files are
     # another running unit's, or no worker could be started for it.
     waiting: tuple[str, T, frozenset[str]] | None = None
@@ -89,8 +95,10 @@ def run(
                 if any(waiting[2] & w.keys for w in pool if w.held is not None):
                     break
                 if idle is None:
+                    if threads is None:
+                        threads = get_threads()
                     try:
-                        idle = _Worker(context, fn)
+                        idle = _Worker(context, fn, threads)
                     except OSError as exc:
                         # The system refuses another process (a limit on
                         # processes or memory): the ones started go on,
@@ -145,16 +153,22 @@ def _file_key(path: str | os.PathLike[str]) -> str:
 
 
 def _unit(fn: Callable[[T], R], label: str, task: T) -> R:
-    """``fn(task)``, but for the test suite's ``MEDH5_TEST_WORKERS=error:``."""
+    """``fn(task)``, but for the test suite's ``MEDH5_TEST_WORKERS=error:``
+    and ``threads:``."""
     if _test_hook("error", label):
         raise RuntimeError(f"{label}: stopped here, as MEDH5_TEST_WORKERS asks")
+    if _test_hook("threads", label):
+        threads = get_threads()
+        raise RuntimeError(f"{label}: {threads} threads, as MEDH5_TEST_WORKERS asks")
     return fn(task)
 
 
 def _test_hook(what: str, label: str) -> bool:
     """For the test suite only, as ``workers.rs`` reads it:
     ``MEDH5_TEST_WORKERS=exit:NAME`` ends the worker handed the unit named
-    ``NAME`` as a crash would; ``error:NAME`` makes that unit raise."""
+    ``NAME`` as a crash would; ``error:NAME`` makes that unit raise;
+    ``threads:NAME`` makes it raise an error that says the thread count the
+    process was given."""
     hook = os.environ.get("MEDH5_TEST_WORKERS", "")
     kind, _, name = hook.partition(":")
     return kind == what and PurePath(label).name == name
@@ -163,9 +177,11 @@ def _test_hook(what: str, label: str) -> bool:
 class _Worker:
     """One worker process and the unit it holds."""
 
-    def __init__(self, context: Any, fn: Callable[[Any], Any]) -> None:
+    def __init__(self, context: Any, fn: Callable[[Any], Any], threads: int) -> None:
         self.connection, theirs = context.Pipe()
-        self.process = context.Process(target=_serve, args=(theirs, fn), daemon=True)
+        self.process = context.Process(
+            target=_serve, args=(theirs, fn, threads), daemon=True
+        )
         try:
             self.process.start()
         except BaseException:
@@ -219,9 +235,11 @@ def _status(code: int | None) -> str:
     return f"exit status: {code}"
 
 
-def _serve(connection: Connection, fn: Callable[[Any], Any]) -> None:
-    """A worker: each unit it is sent, answered with its result or the
-    exception it raised, until it is sent ``None``."""
+def _serve(connection: Connection, fn: Callable[[Any], Any], threads: int) -> None:
+    """A worker, given the run's thread count: each unit it is sent,
+    answered with its result or the exception it raised, until it is sent
+    ``None``."""
+    set_threads(threads)
     while True:
         try:
             unit = connection.recv()

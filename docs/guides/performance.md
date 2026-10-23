@@ -350,6 +350,68 @@ chunked separately, so one layer reads without the others; a multi-class
 packed into four layers is four reads and not two hundred; and a window
 decompresses only the Blosc2 blocks it covers, not every chunk it touches.
 
+### Where a command's time goes
+
+HDF5 runs one call at a time, its filters included, so threads can only
+shorten the part of a command that runs outside an HDF5 call.
+[`bench_phases.py`](../examples/bench_phases.py) times that part through a
+native CLI built with phase timings (a `cfg`, `--cfg medh5_phase_timings`
+in `RUSTFLAGS`, which no release sets). Seconds, median of three, on 2.2.2's
+code: a Linux x86_64 container with four vCPUs and no SHA extensions, a
+256×512×512 sample of two CTs, a PET and an eight-label mask (576 MiB). The
+wall in brackets is an ordinary build's, run beside it.
+
+| Command | Wall | Under the lock | Outside it | Largest phases |
+|---|---|---|---|---|
+| `resample`, nearest, no annotation | 16.7 (14.9) | 3.5 | 9.8 | hash 5.5, window 2.6, compress 2.1, map 1.4 |
+| `resample`, linear, carrying the annotation | 39.9 (40.4) | 10.4 | 24.2 | hash 8.5, interpolate 8.1, compress 6.9, window 4.4, carry 2.6 |
+| `convert from-nifti` | 16.1 (16.0) | 4.7 | 8.1 | hash 3.3, compress 2.9, inflate 2.8, write 1.6 |
+| an amendment (`dataset split --write-claims`) | 12.3 (12.2) | 1.8 | 8.6 | hash 6.3, window 2.3, copy 1.3 |
+| `recompress --profile archive` | 130.2 (129.8) | 122.5 | 5.9 | compress 119.9 |
+| `recompress --profile training` | 10.1 (10.3) | 3.5 | 5.4 | hash 3.3, window 2.1, write 1.4, compress 1.2 |
+| `verify` | 5.7 (5.4) | 0.2 | 4.7 | hash 3.3, window 1.4 |
+| `validate --level integrity` | 5.7 (5.8) | 0.2 | 4.7 | hash 3.4, window 1.3 |
+
+*Under the lock* is opening, metadata, copying, reading and writing, and
+the Blosc2 or Zstandard filter running inside a read or write (`compress`,
+`decompress`). *Outside it* is the Blosc2 blocks a window decompresses itself
+(`window`), hashing, the resampler's mapping and interpolation, carrying an
+annotation, and NIfTI's gzip and decoding. What neither claims (argument
+parsing, validation's rules, allocation) is the rest of the wall.
+
+What that allows, by Amdahl's bound at four threads: with every phase
+outside the lock spread over four threads; with only what a chunk writer's
+workers would do (compressing whole chunks, and the mapping, interpolation
+and decoding that make them); with only what the digests' workers would do
+(decompressing and hashing, inside the stages that hash); and with both.
+
+| Command | Outside, now | Chunk writes | Digests | Both |
+|---|---|---|---|---|
+| `resample`, nearest | 1.79× | 1.21× | 1.51× | 2.04× |
+| `resample`, linear | 1.83× | 1.42× | 1.30× | 2.11× |
+| `convert from-nifti` | 1.61× | 1.20× | 1.27× | 1.61× |
+| an amendment | 2.11× | — | 1.35× | 1.35× |
+| `recompress --profile archive` | 1.04× | 3.23× | 1.03× | 3.54× |
+| `recompress --profile training` | 1.67× | 1.10× | 1.45× | 1.67× |
+| `verify`, `validate --level integrity` | 2.60× | — | 2.60× | 2.60× |
+
+Four things follow. The digests are the largest single cost of every
+command that writes or checks a sample: SHA-256 runs at about 175 MiB/s on
+one core here (`digest_bytes`: SHA-512 435 MiB/s, BLAKE2b 690 MiB/s), and a
+commit hashes every dataset it keeps. Reading for a digest already
+decompresses outside the lock, through the window path. Compression is the
+other: the archive profile's Zstandard compresses this sample at about
+7 MiB/s, all of it inside HDF5's write, so `recompress --profile archive` is
+the one command that only a chunk writer can shorten. And the gzip of a
+NIfTI file is one stream, inflated in order.
+
+The SHA-256 above is software: this machine has no SHA extensions. `sha2`
+0.10 uses them by run-time detection on x86_64 (Linux and Windows wheels and
+binaries, on a CPU that has them), and on aarch64 (Linux and Apple Silicon)
+only with its `asm` feature, which medh5 does not enable, so every aarch64
+build hashes in software. On a CPU that hashes several times faster the
+digests' share, and so what threads give them, is smaller.
+
 ## Related
 
 - **[Storage](../reference/storage.md)** — codec profiles, chunking and the index in full.

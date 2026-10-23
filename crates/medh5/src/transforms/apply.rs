@@ -99,6 +99,7 @@ pub fn check_field(field: &ArrayD<f64>) -> Result<()> {
 /// `coords` is `(N, S)` in the field's continuous index coordinates.  Points
 /// outside follow `extrapolation`: `zero`, `nearest` (clamp) or `error`.
 pub fn linear_sample(field: &ArrayD<f64>, coords: &Array2<f64>, extrapolation: &str) -> Result<Array2<f64>> {
+    phase!(Interpolate);
     check_field(field)?;
     let components = field.shape()[0];
     let spatial: Vec<usize> = field.shape()[1..].to_vec();
@@ -142,6 +143,7 @@ pub fn linear_sample(field: &ArrayD<f64>, coords: &Array2<f64>, extrapolation: &
 /// axis's taps and weights are worked out once a coordinate, not once a
 /// point; every sum is [`linear_sample`]'s, term by term.
 pub(crate) fn linear_sample_axes(field: &ArrayD<f64>, axes: &[Vec<f64>]) -> Result<Array2<f64>> {
+    phase!(Interpolate);
     check_field(field)?;
     let components = field.shape()[0];
     let spatial: Vec<usize> = field.shape()[1..].to_vec();
@@ -529,6 +531,7 @@ impl std::fmt::Debug for CubicCoefficients {
 impl CubicCoefficients {
     /// Prefilter every component of a `(C, *spatial)` field.
     pub(crate) fn new(field: &ArrayD<f64>, extrapolation: &str) -> Result<CubicCoefficients> {
+        phase!(Interpolate);
         check_field(field)?;
         check_extrapolation(extrapolation)?;
         let boundary = if extrapolation == "nearest" { Boundary::Nearest } else { Boundary::Constant };
@@ -558,6 +561,7 @@ impl CubicCoefficients {
 
     /// Interpolate only the listed components, in that order: `(N, len)`.
     pub(crate) fn sample_components(&self, coords: &Array2<f64>, components: &[usize]) -> Result<Array2<f64>> {
+        phase!(Interpolate);
         let spatial = &self.spatial;
         check_points(spatial, coords)?;
         let inside = inside_extent(spatial, coords);
@@ -592,6 +596,7 @@ impl CubicCoefficients {
     /// and weights are worked out once a coordinate, and every sum is
     /// [`spline_interpolate`]'s, term by term.
     pub(crate) fn sample_components_axes(&self, axes: &[Vec<f64>], components: &[usize]) -> Result<Array2<f64>> {
+        phase!(Interpolate);
         let spatial = &self.spatial;
         check_axes(spatial, axes)?;
         let lengths: Vec<usize> = axes.iter().map(Vec::len).collect();

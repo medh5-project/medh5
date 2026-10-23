@@ -421,6 +421,7 @@ __all__ = [
     "frame_graph",
     "frames_of_timepoint",
     "from_keys",
+    "get_threads",
     "greedy_colour",
     "grid_chunks",
     "group_digest",
@@ -531,6 +532,7 @@ __all__ = [
     "scrub_scan",
     "scrub_scan_document",
     "select_encoding",
+    "set_threads",
     "slices_to_box",
     "source_check",
     "source_default_id",
@@ -1545,6 +1547,12 @@ def frames_of_timepoint(grids: Any, timepoint: str) -> tuple[Any, ...]:
 def from_keys(
     keys: Sequence[str], *, id: str, version: str = "1.0.0", start: int = 1
 ) -> LabelSet: ...
+def get_threads() -> int:
+    """How many threads one call may use for its work outside HDF5: what
+    :func:`set_threads` set, else ``MEDH5_THREADS``, else 1.
+    """
+    ...
+
 def greedy_colour(
     class_ids: Sequence[int], edges: frozenset[tuple[int, int]] | set[tuple[int, int]]
 ) -> dict[int, int]: ...
@@ -2071,6 +2079,12 @@ def select_encoding(
     ignore: bool = False,
 ) -> tuple[str, OverlapStats]:
     """Choose an encoding by measurement: `(kind, stats)`."""
+    ...
+
+def set_threads(n: int) -> None:
+    """Let one call use up to ``n`` threads for its work outside HDF5, from now
+    on and in every thread of this process; ``0`` is refused.
+    """
     ...
 
 def slices_to_box(slices: Sequence[slice]) -> npt.NDArray[np.float32]: ...

@@ -1,17 +1,18 @@
 # Runnable examples
 
-Ten scripts. Four are standalone: the benchmarks behind the measured claims
+Eleven scripts. Four are standalone: the benchmarks behind the measured claims
 in the [specification](../spec/medh5-1.0.md) (§7.0, §14.2, §14.3, §14.5) and the
 [design rationale](../explanation/design-rationale.md), and a reference writer
 that builds a complete file from the specification alone. None of those imports
 `medh5` — they measure and exercise the *format*, with h5py and nothing between
 the reader and the bytes.
 
-The other six run through the package's public API, end to end, and the test
+The other seven run through the package's public API, end to end, and the test
 suite runs each of them. Five exercise [format 1.1](../spec/medh5-1.1.md) and
 the [task and cache contract](../spec/task-cache-1.md)
 (`tests/integrations/test_clinical_training.py`); the sixth times reading from
-threads (`tests/tools/test_bench.py`):
+threads, and the seventh where a native command's time goes
+(`tests/tools/test_bench.py`):
 
 | Script | Does |
 |---|---|
@@ -21,6 +22,7 @@ threads (`tests/tools/test_bench.py`):
 | [`bench_clinical.py`](bench_clinical.py) | Write, select, read, batch, cache and amend costs on a synthetic cohort ([results below](#clinical-paths-format-11)) |
 | [`bench_preflight.py`](bench_preflight.py) | A task's preflight, dataset and items on a large multi-site cohort — many events, documents, fragments and cutoffs — each measured in its own interpreter: time, peak memory, bytes read ([results below](#preflight-at-cohort-scale)) |
 | [`bench_threads.py`](bench_threads.py) | Image windows (Blosc2 and gzip), annotation windows and opens, the same work from one, two and four threads with a handle each, and the cost of the smallest engine call ([results](../guides/performance.md#the-numbers)) |
+| [`bench_phases.py`](bench_phases.py) | `resample`, `convert from-nifti`, an amendment, `recompress`, `verify` and `validate` on a 512×512×256 sample, through a native CLI built with phase timings: the seconds inside HDF5's lock and outside it, and the most four threads could give ([results](../guides/performance.md#where-a-commands-time-goes)) |
 
 ```bash
 pip install "medh5[torch,h5py]"   # h5py: clinical_cache.py rots a cache's bytes with it
@@ -30,6 +32,10 @@ python docs/examples/clinical_cache.py out3/         # ~5 s
 python docs/examples/bench_clinical.py --json bench.json   # ~1 min at the defaults
 python docs/examples/bench_preflight.py --json pre.json    # ~1 min at the defaults
 python docs/examples/bench_threads.py --json threads.json  # ~3 min at the defaults
+# A native CLI built with the timings first (a cfg, not a Cargo feature):
+RUSTFLAGS="--cfg medh5_phase_timings" CARGO_TARGET_DIR=target/timings \
+    cargo build --release -p medh5-cli
+python docs/examples/bench_phases.py --medh5 target/timings/release/medh5  # ~15 min
 ```
 
 | Script | Produces |

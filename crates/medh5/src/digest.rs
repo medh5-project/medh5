@@ -43,6 +43,7 @@ impl Hasher {
 
     /// Feed bytes.
     pub fn update(&mut self, bytes: &[u8]) {
+        phase!(Hash, bytes.len());
         match self {
             Hasher::Sha256(h) => h.update(bytes),
             Hasher::Sha512(h) => h.update(bytes),

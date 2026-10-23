@@ -113,6 +113,7 @@ pub fn recompress(path: &Path, profile: &str, out: Option<&Path>, rechunk: bool)
         RecompressResult { path: target.to_string_lossy().into_owned(), profile: profile.into(), ..Default::default() };
     result.bytes_before = std::fs::metadata(path)?.len();
     let before = atomic_rewrite(path, Some(target), |src, dst| {
+        stage!("recompress.rewrite");
         require_major(src, path)?;
         let before = attrs::get_str(src, "content_id")?;
         let src_root = src.as_group()?;
@@ -159,6 +160,7 @@ fn check_profile(profile: &str) -> Result<()> {
 /// every root verifies, and whether every root's `content_id` recomputes.  A
 /// root that cannot be read is recorded in `unverified`.
 fn verify_output(target: &Path, result: &mut RecompressResult) -> Result<(Option<String>, bool, bool)> {
+    stage!("recompress.verify");
     let check = open_read(target)?;
     let after = attrs::get_str(&check, "content_id")?;
     let (mut all_ok, mut ids_ok) = (true, true);

@@ -61,6 +61,13 @@ fn python_running(python: &str, code: &str) -> Command {
     command
 }
 
+/// `command` with this run's thread count as `MEDH5_THREADS`, so a program
+/// it hands work to uses what `--threads` asked for here; `Err` when the
+/// count is `MEDH5_THREADS`'s own, and that is not one.
+pub(crate) fn with_threads(command: &mut Command) -> medh5::Result<&mut Command> {
+    Ok(command.env("MEDH5_THREADS", medh5::parallel::threads()?.to_string()))
+}
+
 impl Host for NativeHost {
     fn convert(
         &self,
@@ -126,11 +133,40 @@ fn hand_over(python: &str, argv: &[String], err: &mut dyn Write) -> Option<i32> 
         let _ = err.flush();
         return None;
     }
-    let status =
-        medh5::h5::spawn(python_running(python, "from medh5.cli import main; raise SystemExit(main())").args(argv))
-            .and_then(|mut child| child.wait())
-            .ok()?;
+    let mut command = python_running(python, "from medh5.cli import main; raise SystemExit(main())");
+    if let Err(e) = with_threads(command.args(without_threads(argv))) {
+        let _ = writeln!(err, "medh5: {}", top_level_message(&e));
+        return Some(EXIT_ERROR);
+    }
+    let status = medh5::h5::spawn(&mut command).and_then(|mut child| child.wait()).ok()?;
     Some(status.code().unwrap_or(EXIT_ERROR))
+}
+
+/// `argv` without its `--threads`, which `MEDH5_THREADS` hands over: a 2.x
+/// package older than the option would refuse the command line.  The option
+/// is the token clap took for it --- `--threads N`, `--threads=N`, or an
+/// abbreviation `infer_long_args` resolves --- found as the one whose
+/// removal leaves a command line that parses without it; `argv` as it is
+/// when there is none.
+fn without_threads(argv: &[String]) -> Vec<String> {
+    let parses_without = |args: &[String]| {
+        let argv = std::iter::once("medh5").chain(args.iter().map(String::as_str));
+        app::command().try_get_matches_from(argv).is_ok_and(|m| !m.contains_id("threads"))
+    };
+    let options = argv.iter().take_while(|arg| *arg != "--").enumerate();
+    for (i, arg) in options {
+        let Some(option) = arg.strip_prefix("--") else { continue };
+        let (name, value) = option.split_once('=').map_or((option, None), |(name, value)| (name, Some(value)));
+        if name.is_empty() || !"threads".starts_with(name) {
+            continue;
+        }
+        let end = (i + if value.is_some() { 1 } else { 2 }).min(argv.len());
+        let rest = [&argv[..i], &argv[end..]].concat();
+        if parses_without(&rest) {
+            return rest;
+        }
+    }
+    argv.to_vec()
 }
 
 /// The dataloader benchmark, run by `python`'s `medh5` package as the console
@@ -150,12 +186,10 @@ fn measure_throughput(
     );
     // A 1.x package would measure its own dataloader under this one's name.
     probe(python, "medh5.bench").map_err(|why| format!("{needs}: {why}"))?;
-    let ran = output(
-        python_running(python, CODE)
-            .args([path, &patch.to_string(), &workers.to_string(), annotation.unwrap_or("")])
-            .stdin(Stdio::null()),
-    )
-    .map_err(|e| format!("{needs}: {e}"))?;
+    let mut command = python_running(python, CODE);
+    command.args([path, &patch.to_string(), &workers.to_string(), annotation.unwrap_or("")]).stdin(Stdio::null());
+    with_threads(&mut command).map_err(|e| top_level_message(&e))?;
+    let ran = output(&mut command).map_err(|e| format!("{needs}: {e}"))?;
     if !ran.status.success() {
         // The last line of a traceback is the exception: `No module named 'torch'`.
         return Err(format!("{needs}: {}", last_line(&ran.stderr).unwrap_or_else(|| ran.status.to_string())));
@@ -225,6 +259,9 @@ pub fn run_with(args: &[String], out: &mut dyn Write, err: &mut dyn Write, host:
             return ctx.finish(code);
         }
     };
+    // `--threads N`, for this run: what was set before is set again after.
+    // The grammar refuses 0, the one count `for_this_run` refuses.
+    let _threads = matches.get_one::<i64>("threads").and_then(|&n| medh5::parallel::for_this_run(n as usize).ok());
     // No command is a usage error, so its help goes where every usage error
     // goes, as a command group's does: stdout is for help asked for.
     let Some((name, sub)) = matches.subcommand() else {
@@ -491,6 +528,36 @@ mod tests {
         (code, String::from_utf8(err).unwrap())
     }
 
+    /// Every command, and every command of a group, takes `--threads N`
+    /// before its name and after it.
+    #[test]
+    fn every_command_takes_threads_before_and_after_its_name() {
+        fn leaves(cmd: &clap::Command, words: Vec<String>, out: &mut Vec<Vec<String>>) {
+            if cmd.get_subcommands().next().is_none() {
+                out.push(words.clone());
+            }
+            for sub in cmd.get_subcommands() {
+                let mut words = words.clone();
+                words.push(sub.get_name().to_string());
+                leaves(sub, words, out);
+            }
+        }
+        let mut commands = Vec::new();
+        leaves(&app::command(), Vec::new(), &mut commands);
+        assert!(commands.len() > 40, "{} commands", commands.len());
+        for words in commands.iter().filter(|w| !w.is_empty()) {
+            let before = ["medh5", "--threads", "3"].into_iter().map(String::from).chain(words.iter().cloned());
+            let after = std::iter::once("medh5".to_string())
+                .chain(words.iter().cloned())
+                .chain(["--threads".into(), "3".into()]);
+            for argv in [before.chain(["--help".into()]).collect::<Vec<_>>(), after.chain(["--help".into()]).collect()]
+            {
+                let parsed = app::command().try_get_matches_from(&argv);
+                assert_eq!(parsed.map(|_| ()).unwrap_err().kind(), ErrorKind::DisplayHelp, "{argv:?}");
+            }
+        }
+    }
+
     #[test]
     fn output_lost_to_a_full_disk_fails_the_command() {
         let mut full = Failing(|| std::io::Error::other("No space left on device"));
@@ -532,8 +599,8 @@ mod tests {
         let fake = |name: &str, on_probe: &str| {
             let path = dir.path().join(name);
             let body = format!(
-                "#!/bin/sh\ncase \"$2\" in\n  *__version__*) {on_probe} ;;\n  *) shift 2; echo \"$@\" > \"{}\"; exit 3 \
-                 ;;\nesac\n",
+                "#!/bin/sh\ncase \"$2\" in\n  *__version__*) {on_probe} ;;\n  *) shift 2; echo \"$MEDH5_THREADS $@\" > \"{}\"; \
+                 exit 3 ;;\nesac\n",
                 dir.path().join("handed").display()
             );
             std::fs::write(&path, body).unwrap();
@@ -570,13 +637,17 @@ mod tests {
         let missing = probe("/nonexistent/python3", modules).unwrap_err();
         assert!(missing.starts_with("/nonexistent/python3 could not be run: "), "{missing}");
 
-        // Handed over: the command line as given, and its exit code.
-        let argv = ["convert".to_string(), "from-dicom".to_string(), "out.medh5".to_string()];
+        // Handed over: the command line as given, less its `--threads`, which
+        // goes as this run's thread count; and its exit code.
+        let argv: Vec<String> =
+            ["convert", "from-dicom", "--threads", "5", "in", "out.medh5"].map(String::from).to_vec();
         let mut err = Vec::new();
+        let threads = medh5::parallel::for_this_run(5).unwrap();
         assert_eq!(hand_over(&current, &argv, &mut err), Some(3));
+        drop(threads);
         assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
         let handed = std::fs::read_to_string(dir.path().join("handed")).unwrap();
-        assert_eq!(handed.trim_end(), "convert from-dicom out.medh5");
+        assert_eq!(handed.trim_end(), "5 convert from-dicom in out.medh5");
         // Refused: nothing run, and why on stderr.
         std::fs::remove_file(dir.path().join("handed")).unwrap();
         assert_eq!(hand_over(&old, &argv, &mut err), None);
@@ -584,5 +655,30 @@ mod tests {
         assert!(!dir.path().join("handed").exists());
         let why = measure_throughput(&old, "case.medh5", 64, 0, None).unwrap_err();
         assert!(why.ends_with(&refused) && why.contains("pip install 'medh5[torch]'"), "{why}");
+    }
+
+    /// A package older than `--threads` refuses it, so it is not handed
+    /// over, in whichever spelling clap took, at whichever level; a value
+    /// that only looks like it is kept.
+    #[test]
+    fn the_command_line_handed_over_has_no_threads_option() {
+        let args = |line: &str| line.split(' ').map(String::from).collect::<Vec<_>>();
+        let handed = "convert from-dicom in out.medh5";
+        for line in [
+            "--threads 4 convert from-dicom in out.medh5",
+            "--threads=4 convert from-dicom in out.medh5",
+            "convert --thr 4 from-dicom in out.medh5",
+            "convert from-dicom in --threads 4 out.medh5",
+            "convert from-dicom in out.medh5 --t=4",
+            "convert from-dicom in out.medh5",
+        ] {
+            assert_eq!(without_threads(&args(line)), args(handed), "{line}");
+        }
+        for kept in ["convert from-dicom in out.medh5 -- --threads", "convert from-dicom --threads"] {
+            assert_eq!(without_threads(&args(kept)), args(kept), "{kept}");
+        }
+        let clinical = "clinical augment s.medh5 --from-meds meds --meds-subject 1001 --kind LOINC=lab";
+        let given = format!("{clinical} --threads 2");
+        assert_eq!(without_threads(&args(&given)), args(clinical));
     }
 }

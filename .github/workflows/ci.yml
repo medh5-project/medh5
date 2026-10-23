@@ -93,6 +93,18 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      # The phase timings compile only under a cfg no profile sets
+      # (crates/medh5/src/timings.rs), so nothing above builds them: their
+      # lints, and their tests run alone (the counts are the process's), with
+      # the engine crate alone rebuilt under the cfg.
+      - name: The phase timings build
+        run: |
+          cargo clippy -p medh5 --lib --tests --locked -- -D warnings --cfg medh5_phase_timings
+          tests=$(cargo rustc -p medh5 --lib --profile test --locked --message-format json \
+            -- --cfg medh5_phase_timings | jq -r 'select(.executable != null) | .executable')
+          out=$("$tests" timings)
+          echo "$out"
+          grep -q "test result: ok. 4 passed" <<<"$out"
       # No zlib gzip-file function is linked (SECURITY.md, CVE-2026-85091):
       # NIfTI's gzip is inflated in Rust, and zlib serves memory buffers only.
       # A debug build, reusing the test build's crates, keeps the symbol
@@ -962,6 +974,17 @@ jobs:
           --release-type "${{ steps.base.outputs.release_type }}"
         env:
           CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+      # cargo-semver-checks has no lint for an added item, so a patch that
+      # adds a public name passed it.  This reads the rustdoc JSON it left
+      # and fails, under `patch`, an addition .github/api-exceptions.txt does
+      # not list.
+      - name: Rust additions
+        run: >
+          python .github/scripts/rust_api.py compare
+          --semver-checks target/semver-checks
+          --baseline "${{ steps.base.outputs.version }}"
+          --crate medh5-sys --crate medh5 --crate medh5-cli
+          --release-type "${{ steps.base.outputs.release_type }}"
 
   python-api:
     # The Python package's public API against the newest release at or below
@@ -969,7 +992,8 @@ jobs:
     # a virtual environment of its own, dumped by public_api.py from outside
     # the checkout (`python -I`, in $RUNNER_TEMP) so that neither reads the
     # checkout's `medh5/`.  The snapshot, tests/project/python_api.txt, shows
-    # a reviewer the change; this fails one that breaks callers.
+    # a reviewer the change; this fails one that breaks callers.  The command
+    # line is compared the same way, from each package's parser.
     needs: build-linux-x86_64
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1000,9 +1024,15 @@ jobs:
           built/bin/pip install --quiet "$wheel"
           released/bin/python -I "$script" dump --output released.txt
           built/bin/python -I "$script" dump --output built.txt
+          released/bin/python -I "$script" dump --cli --output released-cli.txt
+          built/bin/python -I "$script" dump --cli --output built-cli.txt
       - run: >
           python .github/scripts/public_api.py compare
           "$RUNNER_TEMP/released.txt" "$RUNNER_TEMP/built.txt"
+          --release-type "${{ steps.base.outputs.release_type }}"
+      - run: >
+          python .github/scripts/public_api.py compare --cli
+          "$RUNNER_TEMP/released-cli.txt" "$RUNNER_TEMP/built-cli.txt"
           --release-type "${{ steps.base.outputs.release_type }}"
 
   ci-ok:

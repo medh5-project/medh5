@@ -41,6 +41,7 @@ fn cstring(name: &str) -> Result<CString> {
 
 /// The kind of link `name` is in `group`, or `None` when it does not exist.
 pub fn link_kind(group: &hdf5::Group, name: &str) -> Option<LinkKind> {
+    phase!(Metadata);
     let cname = cstring(name).ok()?;
     super::locked(|| unsafe {
         if h5l::H5Lexists(group.id(), cname.as_ptr(), h5p::H5P_DEFAULT) <= 0 {
@@ -62,6 +63,7 @@ pub fn link_kind(group: &hdf5::Group, name: &str) -> Option<LinkKind> {
 /// What `name` in `group` is, following soft links; `None` when it cannot be
 /// resolved.
 pub fn node_kind(group: &hdf5::Group, name: &str) -> Option<NodeKind> {
+    phase!(Metadata);
     match link_kind(group, name)? {
         LinkKind::External => return Some(NodeKind::Other),
         LinkKind::Other => return Some(NodeKind::Other),
@@ -98,11 +100,13 @@ pub fn is_dataset(group: &hdf5::Group, name: &str) -> bool {
 /// (no digest covers them), and without them a corpus built twice is the
 /// same bytes.  Every group the engine creates goes through here.
 pub fn new_group(parent: &hdf5::Group, name: &str) -> Result<hdf5::Group> {
+    phase!(Metadata);
     Ok(parent.create_group_builder().obj_track_times(false).create(name)?)
 }
 
 /// The names in a group, sorted (HDF5's name order).
 pub fn members(group: &hdf5::Group) -> Result<Vec<String>> {
+    phase!(Metadata);
     super::alive(group)?;
     let mut names = group.member_names()?;
     names.sort();
@@ -212,6 +216,7 @@ pub fn visit_resolving(group: &hdf5::Group, f: &mut dyn FnMut(&str, &Node) -> Re
 }
 
 fn visit_links(group: &hdf5::Group, soft: bool, f: &mut dyn FnMut(&str, &Node) -> Result<bool>) -> Result<()> {
+    phase!(Metadata);
     fn walk(
         group: &hdf5::Group,
         prefix: &str,
@@ -312,6 +317,7 @@ pub fn soft_link_target(group: &hdf5::Group, name: &str) -> Result<String> {
 
 /// Delete a link if present.
 pub fn unlink(group: &hdf5::Group, name: &str) -> Result<()> {
+    phase!(Metadata);
     if exists(group, name) {
         group.unlink(name)?;
     }
@@ -875,6 +881,7 @@ pub fn check_self_contained(handle: &hdf5::File, path: Option<&Path>) -> Result<
 /// is reserved fallibly --- a buffer sized by the stated size alone aborted
 /// the process on a crafted 140 KB file.
 pub fn read_raw_chunk(ds: &hdf5::Dataset, offset: &[u64]) -> Result<(u32, Vec<u8>)> {
+    phase!(Read);
     super::alive(ds)?;
     if offset.len() != ds.ndim() {
         return Err(Error::Value(format!(
@@ -956,6 +963,7 @@ unsafe extern "C" fn chunk_offset(
 /// by ordinal walks the index from its start each time, so 10 000 chunks took
 /// 13 seconds.
 pub fn stored_chunks(ds: &hdf5::Dataset) -> Result<Vec<Vec<u64>>> {
+    phase!(Metadata);
     super::alive(ds)?;
     let mut state = ChunkOffsets { rank: ds.ndim(), found: Vec::new() };
     let status = super::locked(|| unsafe {

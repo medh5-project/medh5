@@ -49,6 +49,7 @@ pub fn open_read(path: &Path) -> Result<hdf5::File> {
 /// lock: a child [`spawn`](super::spawn)ed by another thread starts before the
 /// open or after the mark, never between them.
 pub(crate) fn marked(open: impl FnOnce() -> hdf5::Result<hdf5::File>) -> hdf5::Result<hdf5::File> {
+    phase!(Open);
     super::locked(|| {
         let file = open()?;
         close_on_exec(&file);
@@ -631,6 +632,7 @@ fn identity(path: &Path) -> Option<PathBuf> {
 /// not be written, the file's own last write --- so a commit never renames a
 /// file whose close failed.
 pub fn close_everything(file: hdf5::File, flush: bool) -> Result<()> {
+    phase!(Open);
     use crate::h5sys::h5f::{self, H5F_scope_t};
     let fid = file.id();
     // Released below, so the handle's own drop must not release it again.

@@ -105,6 +105,7 @@ fn stored_chunk(
     file_bytes: &mut Option<u64>,
     frame: &mut Vec<u8>,
 ) -> Option<usize> {
+    phase!(Read);
     super::locked(|| unsafe {
         let (mut mask, mut addr, mut size) = (0u32, 0u64, 0u64);
         if h5d::H5Dget_chunk_info_by_coord(ds.id(), origin.as_ptr(), &mut mask, &mut addr, &mut size) < 0
@@ -217,6 +218,7 @@ fn fill(
         if part.len() < n {
             part.resize(n, 0u8);
         }
+        phase!(Window, n);
         // SAFETY: every pointer spans the length passed with it; the helper
         // reads `frame` and writes at most `n` bytes of `part`.
         let rc = unsafe {

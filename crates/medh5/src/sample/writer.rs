@@ -740,6 +740,7 @@ impl SampleWriter {
     }
 
     fn inherit(&mut self, source: &hdf5::Group, without: &[&str]) -> Result<()> {
+        stage!("amend.inherit");
         let leaves_clinical = without.contains(&crate::clinical::GROUP);
         // Without its clinical group the sample is written in the lowest
         // version what is left needs, as `drop_clinical` writes it.
@@ -1847,6 +1848,7 @@ impl SampleWriter {
     /// `content_id`, or `None` when the writer had already committed; an
     /// aborted writer has nothing to commit, and says so.
     pub fn commit(&mut self, digests: bool) -> Result<Option<String>> {
+        stage!("commit");
         match self.state {
             State::Committed => return Ok(None),
             State::Aborted => {
@@ -1934,12 +1936,22 @@ impl SampleWriter {
         attrs::write(&root, "generator", &AttrValue::Str(format!("medh5 {VERSION}")))?;
         attrs::write(&root, "digest_algo", &AttrValue::Str(algo.clone()))?;
         let stored = collect_digests(&root, &["index"])?;
-        let stamped = stamp_in(&root, &algo, !digests)?;
-        self.refuse_restamping(&stored, &stamped)?;
+        let stamped = {
+            stage!("commit.digests");
+            stamp_in(&root, &algo, !digests)?
+        };
+        {
+            stage!("commit.restamp_check");
+            self.refuse_restamping(&stored, &stamped)?;
+        }
         let content_id = compute_content_id(&root, &attr_name_map_of(&root)?, &algo, None)?;
         attrs::write(&root, "content_id", &AttrValue::Str(content_id.clone()))?;
-        self.check_valid()?;
+        {
+            stage!("commit.validate");
+            self.check_valid()?;
+        }
         drop(root);
+        stage!("commit.replace");
         let file = self.file.take().ok_or_else(|| Error::invalid("this writer has already committed or aborted"))?;
         if self.compact {
             // Only what the root reaches comes across; the copy keeps the
