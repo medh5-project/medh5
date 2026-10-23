@@ -113,7 +113,91 @@ fn from_environment(value: Option<std::ffi::OsString>) -> Result<Option<usize>, 
 /// worker starts until its last has joined, and a `fork` takes it exclusively
 /// (`h5::fork`), so a child never inherits an allocator's or C-Blosc2's lock
 /// held by a worker it does not have.
-pub(crate) static SECTIONS: parking_lot::RwLock<()> = parking_lot::RwLock::new(());
+pub(crate) static SECTIONS: Sections = Sections(AtomicUsize::new(0));
+
+/// A lock no thread parks on: one count, its top bit the exclusive hold and
+/// the rest the shared ones, and a thread that finds it taken waits by
+/// yielding, then sleeping.  parking_lot's `RwLock` queues the threads that
+/// wait for it in a table its own locks guard, and a thread queueing for the
+/// sections while a `fork` holds them could hold one of those at the fork:
+/// the child, letting the sections go, would wait for it forever.  This one
+/// is let go with one atomic write, on either side of the fork.
+pub(crate) struct Sections(AtomicUsize);
+
+/// The exclusive hold's bit of [`Sections`].
+const EXCLUSIVE: usize = 1 << (usize::BITS - 1);
+
+impl Sections {
+    /// A shared hold, once no exclusive one is held or claimed.
+    pub(crate) fn read(&'static self) -> Shared {
+        let mut wait = Wait(0);
+        loop {
+            let held = self.0.load(Ordering::Relaxed);
+            if held & EXCLUSIVE == 0
+                && self.0.compare_exchange_weak(held, held + 1, Ordering::Acquire, Ordering::Relaxed).is_ok()
+            {
+                return Shared(self);
+            }
+            wait.snooze();
+        }
+    }
+
+    /// The exclusive hold, if nothing is held.
+    pub(crate) fn try_write(&'static self) -> Option<Exclusive> {
+        self.0.compare_exchange(0, EXCLUSIVE, Ordering::Acquire, Ordering::Relaxed).ok().map(|_| Exclusive(self))
+    }
+
+    /// The exclusive hold: claimed first, so that no section starts, and held
+    /// once those running have ended.
+    pub(crate) fn write(&'static self) -> Exclusive {
+        let mut wait = Wait(0);
+        while self.0.fetch_or(EXCLUSIVE, Ordering::Acquire) & EXCLUSIVE != 0 {
+            wait.snooze();
+        }
+        let held = Exclusive(self);
+        let mut wait = Wait(0);
+        while self.0.load(Ordering::Acquire) != EXCLUSIVE {
+            wait.snooze();
+        }
+        held
+    }
+}
+
+/// A shared hold of the [`Sections`], until dropped.
+#[must_use]
+pub(crate) struct Shared(&'static Sections);
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        self.0 .0.fetch_sub(1, Ordering::Release);
+    }
+}
+
+/// The exclusive hold of the [`Sections`], until dropped.
+#[must_use]
+pub(crate) struct Exclusive(&'static Sections);
+
+impl Drop for Exclusive {
+    fn drop(&mut self) {
+        self.0 .0.fetch_and(!EXCLUSIVE, Ordering::Release);
+    }
+}
+
+/// Waiting for the [`Sections`]: yielding at first, then sleeping, up to a
+/// millisecond at a time.  A section waits only while a `fork` is made, and
+/// a `fork` only for the sections running to end.
+struct Wait(u32);
+
+impl Wait {
+    fn snooze(&mut self) {
+        if self.0 < 64 {
+            std::thread::yield_now();
+        } else {
+            std::thread::sleep(std::time::Duration::from_micros(10 << (self.0 - 64).min(6)));
+        }
+        self.0 = self.0.saturating_add(1);
+    }
+}
 
 thread_local! {
     /// Whether this thread is in a parallel section already: an inner one
@@ -160,14 +244,16 @@ where
     let flow = (Mutex::new((window, false)), Condvar::new());
     let (tx, rx) = mpsc::channel::<(usize, R)>();
     std::thread::scope(|scope| {
+        let mut workers = Joined(Vec::with_capacity(threads));
         // A `sink` that panics stops the workers too: they would otherwise
-        // wait for it to sink more, and the scope for them.
+        // wait for it to sink more, and the scope for them.  Dropped before
+        // `workers`, so they are stopped before they are joined.
         let _stop = Stop(&flow);
         for _ in 0..threads {
             let (tx, source, flow, work) = (tx.clone(), &source, &flow, &work);
             #[cfg(test)]
             STARTED.fetch_add(1, Ordering::SeqCst);
-            scope.spawn(move || {
+            workers.0.push(scope.spawn(move || {
                 // A worker that panics stops the others, which would
                 // otherwise wait for the caller to sink the item it lost.
                 let _stop = Stop(flow);
@@ -192,7 +278,7 @@ where
                         return;
                     }
                 }
-            });
+            }));
         }
         drop(tx);
         let mut waiting = BTreeMap::new();
@@ -215,8 +301,42 @@ where
             }
         }
         Stop(&flow).stop();
+        workers.join();
         outcome
     })
+}
+
+/// A call's workers, each joined when dropped: its thread has ended, not
+/// only its closure, as the scope alone would wait for.  A thread's last
+/// steps take a lock of the standard library's that every thread's first
+/// steps take too (its stack overflow handler's), so a `fork` made as the
+/// parallel section ends would leave it held in the child, and the child's
+/// first thread would wait for it forever.
+struct Joined<'scope>(Vec<std::thread::ScopedJoinHandle<'scope, ()>>);
+
+impl Joined<'_> {
+    /// Join every worker, then go on with the first one's panic, if one
+    /// panicked: a worker joined is one the scope no longer reports.
+    fn join(mut self) {
+        let mut panicked = None;
+        for worker in self.0.drain(..) {
+            if let Err(panic) = worker.join() {
+                panicked.get_or_insert(panic);
+            }
+        }
+        if let Some(panic) = panicked {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
+impl Drop for Joined<'_> {
+    /// Joins what [`Joined::join`] did not, as the call unwinds.
+    fn drop(&mut self) {
+        for worker in self.0.drain(..) {
+            let _ = worker.join();
+        }
+    }
 }
 
 /// Marks the end of this thread's parallel section.
@@ -430,7 +550,10 @@ pub(crate) mod tests {
                 |_| Ok::<_, ()>(()),
             )
         });
-        assert!(caught.is_err());
+        // The worker's own panic, not the scope's word that one panicked.
+        let panic = caught.unwrap_err();
+        let message = panic.downcast_ref::<String>().map(String::as_str).unwrap_or_default();
+        assert!(message.contains("the seventh item"), "{message:?}");
         assert!(!INSIDE.get(), "the section outlived the call");
         assert!(SECTIONS.try_write().is_some(), "the hold outlived the call");
     }

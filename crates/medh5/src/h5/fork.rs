@@ -135,19 +135,15 @@ fn release() {
 /// fork.  Let go with them queued, it could be handed to one --- parking_lot
 /// hands a lock over, now and then, to be fair --- which the child does not
 /// have, and the child's first HDF5 call would wait for it forever.  So they
-/// are taken off the queue first.  The parallel sections are parking_lot's
-/// too, and its `RwLock` queues threads under two keys: its address, and
-/// the one after it.
+/// are taken off the queue first.  The parallel sections queue no thread
+/// (`crate::parallel::Sections`), so letting them go touches no queue.
 fn release_in_child() {
-    // SAFETY: only the raw locks' addresses are used, the keys parking_lot
-    // queues their waiters under.
+    // SAFETY: only the raw lock's address is used, the key parking_lot
+    // queues its waiters under.
     let hdf5 = unsafe { crate::h5sys::LOCK.raw() } as *const _ as usize;
-    let sections = unsafe { crate::parallel::SECTIONS.raw() } as *const _ as usize;
-    for key in [hdf5, sections, sections + 1] {
-        // SAFETY: wakes the threads queued under that key, none of which
-        // this process has; the lock they waited for is held, by this thread.
-        unsafe { parking_lot_core::unpark_all(key, parking_lot_core::DEFAULT_UNPARK_TOKEN) };
-    }
+    // SAFETY: wakes the threads queued under that key, none of which this
+    // process has; the lock they waited for is held, by this thread.
+    unsafe { parking_lot_core::unpark_all(hdf5, parking_lot_core::DEFAULT_UNPARK_TOKEN) };
     release();
 }
 
@@ -156,6 +152,29 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
+
+    /// The status of `pid`, a child just forked; one that has not exited
+    /// in 20 seconds is killed and fails the test, rather than hanging it.
+    #[cfg(unix)]
+    pub(crate) fn exit_status(pid: libc::pid_t) -> libc::c_int {
+        let mut status = 0;
+        for _ in 0..2000 {
+            // SAFETY: polls the child just forked.
+            match unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } {
+                0 => std::thread::sleep(std::time::Duration::from_millis(10)),
+                done => {
+                    assert_eq!(done, pid);
+                    return status;
+                }
+            }
+        }
+        // SAFETY: ends, and reaps, the child that hung.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            libc::waitpid(pid, &mut status, 0);
+        }
+        panic!("a forked child had not exited after 20 s");
+    }
 
     /// Whether another thread finds each lock free.  Held by this thread,
     /// none is, whatever other tests hold.
@@ -167,6 +186,8 @@ mod tests {
     /// lock until `release`.
     #[test]
     fn prepare_waits_for_a_held_lock_and_holds_every_lock_until_release() {
+        // It holds the parallel sections, which the tests of calls find free.
+        let _serial = crate::parallel::tests::serial();
         static RELEASED: AtomicBool = AtomicBool::new(false);
         let (held_tx, held_rx) = mpsc::channel();
         let holder = std::thread::spawn(move || {
@@ -205,7 +226,7 @@ mod tests {
                 })
             })
             .collect();
-        let mut hung = 0;
+        let mut failed = Vec::new();
         for _ in 0..40 {
             std::thread::sleep(std::time::Duration::from_millis(1));
             // SAFETY: the child runs a threaded call, which makes no HDF5
@@ -227,14 +248,15 @@ mod tests {
                 let code = if ran.is_ok() && sum.load(Ordering::SeqCst) == 28 { 0 } else { 1 };
                 unsafe { libc::_exit(code) };
             }
-            let mut status = 0;
-            // SAFETY: waits for the child just forked.
-            assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
-            hung += usize::from(status != 0);
+            match exit_status(pid) {
+                0 => {}
+                status if libc::WIFSIGNALED(status) => failed.push(format!("signal {}", libc::WTERMSIG(status))),
+                status => failed.push(format!("exit {}", libc::WEXITSTATUS(status))),
+            }
         }
         stop.store(true, Ordering::SeqCst);
         busy.into_iter().for_each(|t| t.join().unwrap());
-        assert_eq!(hung, 0, "a child could not run a threaded call");
+        assert_eq!(failed, Vec::<String>::new(), "a child could not run a threaded call");
     }
 
     /// A fork made while a call holds the parallel sections and waits for
@@ -271,10 +293,7 @@ mod tests {
                 unsafe { libc::_exit(0) };
             }
             let sunk = SUNK.load(Ordering::SeqCst);
-            let mut status = 0;
-            // SAFETY: waits for the child just forked.
-            assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
-            (sunk, status)
+            (sunk, exit_status(pid))
         });
         std::thread::sleep(std::time::Duration::from_millis(50));
         drop(hdf5);
