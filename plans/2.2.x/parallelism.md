@@ -385,11 +385,19 @@ exception allows ([D6](#decisions-the-maintainer)).
     and nothing runs between the calls.
   - **An early hash is only ever of bytes nothing will change.** The
     overlapped pass reads the *source* file, which the call never writes,
-    so its result answers E701 for the source as it stands. The writer
-    records every path the call writes, replaces or deletes (`scrub`'s
-    `rewrite_strings`, `fix`, a re-encoded annotation). At commit, an early
-    digest is used only for a path the call never wrote; every written path
-    is hashed after its last write, from the output, as today.
+    and has two uses, kept apart:
+    - **The refusal, for every inherited path.** Its digest of each source
+      dataset is compared with that dataset's stored digest, written by the
+      call or not, and a mismatch refuses the commit with E701 (E703 where
+      the stored digest does not parse), as `refuse_restamping` does today
+      by hashing the source again (`failing_digests`). A corrupted source
+      dataset that `scrub` then rewrites is still refused.
+    - **The output digest, for untouched paths only.** The writer records
+      every path the call writes, replaces or deletes (`scrub`'s
+      `rewrite_strings`, `fix`, a re-encoded annotation). At commit, an
+      early digest is reused as the output's only for a path the call never
+      wrote; every written path is hashed after its last write, from the
+      output, as today.
   - Users: `commit`, `verify`, `validate --level integrity`,
     `refuse_failed_digests` and `recompress`'s output check. `verify` and
     `validate` gain `--threads N` (D6).
@@ -400,6 +408,9 @@ exception allows ([D6](#decisions-the-maintainer)).
   - A `scrub` that rewrites inherited strings, a `fix` that rewrites a
     dataset, and an amendment that replaces one, each at 1 and 4 threads:
     the same digests and `content_id` as the sequential commit.
+  - A source whose dataset fails its digest, and which the call rewrites
+    (`scrub` on a corrupted string dataset), refused with E701 at 1 and 4
+    threads, as today; and E703 for an unparsable stored digest.
   - `verify`'s report the same, line for line, at 1 and 4 threads.
   - `validate --level integrity`'s findings the same, in the same order, at
     1 and 4 threads, on samples with probability maps that fail E404 and
