@@ -385,14 +385,18 @@ mod tests {
         assert_eq!(statuses, [0, 0], "a child was in a run of its parent's");
     }
 
-    /// A fork from another thread during threaded chunk writes waits until
-    /// each write's workers have joined, and leaves a child that opens,
-    /// writes and reads files, with threads and without.
+    /// A fork from another thread while its workers compress chunks waits
+    /// until they have joined, and leaves a child that opens, writes and
+    /// reads files, with threads and without.
+    ///
+    /// The other thread compresses and stores nothing: a thread that meets
+    /// HDF5's lock held for the fork can leave parking_lot's table held in
+    /// the child (#106), which is not what this test is about.
     #[cfg(unix)]
     #[test]
-    fn a_child_forked_during_threaded_writes_opens_writes_and_reads() {
+    fn a_child_forked_during_threaded_compression_opens_writes_and_reads() {
         use crate::array::{DType, NdArray};
-        use crate::h5::chunks::Chunks;
+        use crate::h5::chunks::{native_bytes, Chunks};
         use crate::h5::data::{self, Layout};
         use crate::storage::codecs::{resolve_profile, Role};
         let _serial = crate::parallel::tests::serial();
@@ -413,22 +417,25 @@ mod tests {
             Chunks::of(&ds, DType::I16).expect("a Blosc2 dataset").write_rows(&values, 0, threads)
         };
         let read = |path: &std::path::Path| data::read(&crate::h5::file::open_read(path)?.dataset("d")?);
+        // The chunks of `values`, as a write would cut and compress them.
+        let source = crate::h5::file::create_truncate(&dir.path().join("source.h5")).unwrap();
+        let chunks = Chunks::of(&data::create_empty(&source, "d", DType::I16, &shape, &layout).unwrap(), DType::I16)
+            .expect("a Blosc2 dataset");
+        let (codec, bytes, origins) = (chunks.codec(), native_bytes(&values), chunks.origins(0..shape[0]));
         let stop = AtomicBool::new(false);
-        // A child holds the files the busy thread has open, and their locks,
-        // until it closes them, so the busy thread writes a new file each
-        // time and never opens one again.  And it keeps each: the child's
-        // HDF5 still lists the file open at the fork, and a file of the
-        // child's given the inode of one deleted since would be refused as
-        // already open.
-        let busy = dir.path();
         let failed = std::thread::scope(|scope| {
             scope.spawn(|| {
-                for n in 0.. {
-                    if stop.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    let path = busy.join(format!("busy-{n}.h5"));
-                    write(&path, 4).unwrap();
+                while !stop.load(Ordering::SeqCst) {
+                    crate::parallel::ordered(
+                        4,
+                        origins.iter(),
+                        |origin| codec.compress(codec.cut(&bytes, &shape, &[0, 0, 0], origin)),
+                        |chunk| {
+                            drop(chunk);
+                            Ok::<_, ()>(())
+                        },
+                    )
+                    .unwrap();
                 }
             });
             let mut failed = Vec::new();
