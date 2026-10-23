@@ -3,7 +3,8 @@
 Two patch releases about parallelism: threads for the work inside one file
 that runs outside HDF5's lock, processes for the work across files, and the
 cost of digests at commit, and nothing else ([D2](#decisions-the-maintainer)).
-2.2.3 measures; 2.2.4 adds one thread setting and the paths that use it. Read
+2.2.3 measures; 2.2.4 adds one thread setting and the paths that use it,
+and `--workers` on more batch commands. Read
 [plans/README.md](../README.md) and the [2.2.x plan](README.md) first. Their
 rules hold here, with `p22/` branches and `P22-` titles, and with one
 exception to what a patch may change ([D6](#decisions-the-maintainer)).
@@ -23,8 +24,10 @@ exception to what a patch may change ([D6](#decisions-the-maintainer)).
     API and a command-line flag, which a patch otherwise never adds. The
     maintainer allowed it once, because it is a small change
     ([D6](#decisions-the-maintainer)). It covers exactly the names P22-11
-    lists, and `--threads` on the commands P22-12 and P22-13 make use it.
-    Nothing else in 2.2.3 or 2.2.4 adds API or a flag.
+    lists, `--threads` on the commands P22-12 and P22-13 make use it, and
+    `--workers` on the commands P22-14 measures faster with it
+    ([D7](#decisions-the-maintainer)). Nothing else in 2.2.3 or 2.2.4 adds
+    API or a flag.
   - The format stays 1.2, and the diagnostic code table keeps its codes.
   - **No thread count changes an output.** Every path this plan parallelises
     writes the same `content_id`, the same stored chunk bytes and the same
@@ -46,7 +49,7 @@ exception to what a patch may change ([D6](#decisions-the-maintainer)).
     `pub(crate)`, and `medh5-sys` gains no Rust name: the C entry point
     P22-12 adds is declared in a private `extern` block inside `medh5`
     (the symbol links in with `medh5-sys`'s static library). The list holds
-    P22-11's names, P22-14's flags if D7 takes them, and nothing else.
+    P22-11's names, P22-14's `--workers` flags (D7), and nothing else.
   - The list stays through 2.2.4's release pull request, whose gate still
     compares against the published 2.2.3, and is emptied by the first pull
     request after v2.2.4 is published, when those names are the baseline.
@@ -170,10 +173,10 @@ exception allows ([D6](#decisions-the-maintainer)).
       (processes, across files).
     - Precedence: a command's flag, then `set_threads`, then the
       environment, then 1. `0` is refused: there is no "auto".
-  - **These names are the whole exception.** P22-11 lists them in
-    `.github/api-exceptions.txt` with D6, and makes both API jobs read that
-    list (see [The API gates](#medh5-223-and-224-parallelism)). A test holds
-    the list to these names.
+  - **These names, and P22-14's flags, are the whole exception.** P22-11
+    lists them in `.github/api-exceptions.txt` with D6, and makes both API
+    jobs read that list (see [The API gates](#medh5-223-and-224-parallelism)).
+    P22-14 adds its flags with D7. A test holds the list to these names.
   - **Threads live inside one call.** Each call that uses threads starts them
     (`std::thread::scope`) and joins them before it returns, so no thread
     outlives a call. There is no persistent pool and no new dependency.
@@ -423,8 +426,9 @@ exception allows ([D6](#decisions-the-maintainer)).
 
 ### P22-14 Processes across files (2.2.4)
 
-Its flags wait on [D7](#decisions-the-maintainer). As proposed, 2.2.4 measures
-and documents, and adds no flag.
+Measures the batch commands in one process and in four, and adds `--workers`
+to each that is faster with it ([D7](#decisions-the-maintainer)). It starts
+after P22-11, whose allowed list it adds to.
 
 - **State at 2.2.x.**
   - `validate`, `verify`, `fix`, `index build` and `recompress` take
@@ -442,9 +446,10 @@ and documents, and adds no flag.
     commands would be at least 1.3 times faster on four.
   - Python keeps no worker count. `docs/explanation/concurrency.md` gains a
     `ProcessPoolExecutor` recipe, one file per task.
-  - **If D7 takes the flags:** add `--workers` to each command that measured
-    at least 1.3 times faster, and list them in `.github/api-exceptions.txt`
-    beside P22-11's names. Keep `workers.rs`'s rules: output in input order,
+  - **The flags.** Add `--workers` to each command that measured at least
+    1.3 times faster, and list them in `.github/api-exceptions.txt` beside
+    P22-11's names, with D7. A command below 1.3 gains no flag, and the
+    performance guide gives its number. Keep `workers.rs`'s rules: output in input order,
     byte for byte the one-process run's; a writing command's paths that name
     one file go to one worker; a worker that dies fails only its unit.
   - **A worker gets a whole unit of the command, never a bare path.** The
@@ -475,15 +480,16 @@ and documents, and adds no flag.
 
     A command whose unit cannot be cut this way from its code does not gain
     the flag, and the pull request says why.
-- **Tests.** The recipe runs (`test_docs_python.py`). If D7 takes the flags:
-  for each command that gains one, the text, `--json` and the exit code the
+- **Tests.** The recipe runs (`test_docs_python.py`). For each command that gains one, the text, `--json` and the exit code the
   same at 1 and 4 workers, as the existing commands' tests do, on a cohort
   where a unit spans several files (a subject's legacy files for `migrate`)
   and the shared state matters (labels a file lacks, an uneven split), and
   for `augment-cohort`, subjects whose rows span several MEDS shards and
   FHIR bulk files.
-- **Changelog.** Documentation, or Added, area `cli`, if D7 takes the flags.
-- **Done when.** Every command listed has a number and a decision.
+- **Changelog.** Added, area `cli`: each command that gains `--workers`, and
+  its measured speed-up.
+- **Done when.** Every command listed has a number and, at 1.3 times or more,
+  the flag.
 
 ## Lanes
 
@@ -499,8 +505,8 @@ from 2.2.1's `p22/measure` and `p22/threads`, which are taken.
   - P22-10 starts at once, and v2.2.3 is tagged when it merges.
   - Every 2.2.4 item merges after v2.2.3 is tagged, P22-14 included.
   - P22-11 lands alone, before P22-12 and P22-13.
-  - P22-13 waits on P22-11. Lane B does P22-14 first, which needs neither
-    to build, and holds it for the v2.2.3 tag.
+  - P22-13 waits on P22-11. Lane B does P22-14 first: its measurements need
+    neither, and its flags merge after P22-11, whose allowed list they join.
   - P22-12 and P22-13 both read P22-10's ranked list.
 - **Critical path.** Lane A: the measurement, the enabler, then the chunk
   writer.
@@ -511,7 +517,7 @@ from 2.2.1's `p22/measure` and `p22/threads`, which are taken.
 
 | File | Owner | Others touch it for |
 |---|---|---|
-| `crates/medh5/src/parallel.rs` (new), `medh5/__init__.py`'s thread setting, `.github/api-exceptions.txt` (new), `.github/scripts/public_api.py` | P22-11 | P22-14 (its flags, if D7 takes them) |
+| `crates/medh5/src/parallel.rs` (new), `medh5/__init__.py`'s thread setting, `.github/api-exceptions.txt` (new), `.github/scripts/public_api.py` | P22-11 | P22-14 (its `--workers` flags) |
 | `crates/medh5/src/h5/**` (a chunk writer beside `window.rs`) | P22-12 | P22-11 (the parallel sections in `h5/fork.rs`), P22-13 (raw chunk reads for hashing) |
 | `crates/medh5/src/transforms/resample*`, `storage/recompress.rs`, `convert/nifti/**` | P22-12 | — |
 | `crates/medh5/src/sample/writer.rs` | P22-12 (rewritten datasets) | P22-13 (`commit`, `stamp_in`) |
@@ -527,7 +533,7 @@ from 2.2.1's `p22/measure` and `p22/threads`, which are taken.
 | A default above one thread, or "auto" | These patches measure first. A later minor may change the default with their numbers, announced a minor ahead. |
 | A persistent thread pool, or a thread-pool dependency | Threads that outlive a call cross a `fork` (D3). |
 | Threads in preflight or opening | Measured slower: the work is HDF5's (2.1.0; #92). |
-| Any other new API or flag | The exception covers P22-11's names and `--threads` only (D6), and P22-14's flags if D7 takes them. |
+| Any other new API or flag | The exception covers P22-11's names and `--threads` (D6), and P22-14's `--workers` flags (D7), only. |
 | MEDS export, then FHIR and OMOP | A later minor (D2). The review of this plan settled two points for whoever plans it: the caller names each sample's MEDS `subject_id` (the importer hashes it into every event id, so none can be minted), and the round trip is promised by rule: export is a fixed point, and an event's id comes back only where its import dropped nothing. A time the importer read inside a daylight-saving fold holds both instants, and its export must keep both. OMOP needs a vocabulary mapping the user supplies. |
 | Clinical extension columns in a format minor | Needs the projection study first; candidate for 1.3. |
 | `rle` | Only for a measured case `instances` serves badly. |
@@ -592,6 +598,8 @@ maintainer answers it, and the plan is updated with the answer.
   work ships as 2.2.3 and 2.2.4, not 2.3.0, and the patch rule is relaxed
   this once for the thread setting, a small API change. First planned as
   2.3.0 (D5, when its lanes start, fell away with it).
-- **D7 `--workers` on more commands.** Open, on a card: whether the
-  exception also covers P22-14's `--workers` flags. Proposed: no; 2.2.4
-  measures them and adds the recipe, and the flags wait for the next minor.
+- **D7 `--workers` on more commands.** Settled by the maintainer on
+  2026-10-23: the exception also covers P22-14's `--workers` flags, on the
+  batch commands that measure at least 1.3 times faster with four workers.
+  Not chosen: measuring and documenting only, with the flags in the next
+  minor.

@@ -31,7 +31,8 @@ The reasons are in [What 2.2.0 taught](what-2.2.0-taught.md), cited below as
     review holds a new Rust name, as it holds a new flag.
   - **One exception.** 2.2.4 adds one thread setting (`set_threads`,
     `MEDH5_THREADS`, `--threads`), which the maintainer allowed on
-    2026-10-22 as a small API change. It is listed name by name in
+    2026-10-22 as a small API change, and `--workers` on more batch
+    commands, allowed on 2026-10-23. Both are listed name by name in
     [parallelism.md](parallelism.md), and nothing else is excepted.
   - The format stays 1.2, and the diagnostic code table keeps its 100 codes.
     A new bound reports through an existing code.
@@ -458,4 +459,5 @@ Settled on 2026-10-22:
 
 - **Parallelism as patches.** The work first planned as 2.3.0 ships as 2.2.3
   and 2.2.4 ([parallelism.md](parallelism.md)), with one exception to what a
-  patch may change: the thread setting.
+  patch may change: the thread setting, and (2026-10-23) `--workers` on more
+  batch commands.
