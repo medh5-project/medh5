@@ -438,9 +438,18 @@ mod tests {
                 if pid == 0 {
                     // SAFETY: an alarm ends a child that waits forever.
                     unsafe { libc::alarm(10) };
-                    let ok = [2, 1].into_iter().all(|threads| {
-                        write(&path, threads).and_then(|()| read(&path)).is_ok_and(|read| read == values)
-                    });
+                    let failed =
+                        [2, 1].into_iter().find_map(|threads| match write(&path, threads).and_then(|()| read(&path)) {
+                            Ok(read) if read == values => None,
+                            Ok(_) => Some(format!("{threads} thread(s): read back other values\n")),
+                            Err(e) => Some(format!("{threads} thread(s): {e}\n")),
+                        });
+                    if let Some(why) = &failed {
+                        // SAFETY: writes the reason to stderr, taking no lock
+                        // a parent's thread may hold.
+                        unsafe { libc::write(2, why.as_ptr().cast(), why.len()) };
+                    }
+                    let ok = failed.is_none();
                     // SAFETY: the child ends without running the parent's exit handlers.
                     unsafe { libc::_exit(if ok { 0 } else { 1 }) };
                 }
