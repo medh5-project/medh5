@@ -175,9 +175,12 @@ It is the API the exception allows ([D6](#decisions-the-maintainer)).
       `clinical augment` and `strip`, `dataset split --write-claims`,
       `seg convert`, `index build`, the NIfTI import), so a flag per command
       would leave some without one; a command with no threaded path runs as
-      before. A command the line hands to Python through `Host` gets the
-      count as `MEDH5_THREADS`. `--workers` keeps its meaning (processes,
-      across files).
+      before. Every process the command line starts gets the resolved
+      count as `MEDH5_THREADS` in its environment: a `--workers` worker
+      (the hidden `__worker` command, whose `worker_args` carry only the
+      command's own words) and a command handed to Python through `Host`.
+      `--workers` keeps its meaning (processes, across files); `--workers M
+      --threads N` runs up to *M* × *N* threads, and the guide says so.
     - Precedence: `--threads`, then `set_threads`, then the
       environment, then 1. `0` is refused: there is no "auto".
   - **These names, and P22-14's flags, are the whole exception.** P22-11
@@ -221,8 +224,10 @@ It is the API the exception allows ([D6](#decisions-the-maintainer)).
   barrier waits for a call's workers (a Rust test forks while a call that
   holds the parallel sections waits on HDF5's lock); `worker_init_fn` resets
   it; `--threads` parses on every command of `command_tree()`, before and
-  after the command name, and reaches the setting, and a command run in
-  Python through `Host` sees it as `MEDH5_THREADS`;
+  after the command name, and reaches the setting; a `--workers` worker
+  (`verify --workers 2 --threads 4`) and a command run in Python through
+  `Host` see the resolved count, over a different `MEDH5_THREADS` in the
+  parent's environment;
   `public_api.py compare` under `patch` passes a listed addition and fails an
   unlisted one.
 - **Documentation.** `docs/explanation/concurrency.md` gains "Threads inside
@@ -401,12 +406,17 @@ It is the API the exception allows ([D6](#decisions-the-maintainer)).
   - **An early hash is only ever of bytes nothing will change.** The
     overlapped pass reads the *source* file, which the call never writes,
     and has two uses, kept apart:
-    - **The refusal, for every inherited path.** Its digest of each source
-      dataset is compared with that dataset's stored digest, written by the
-      call or not, and a mismatch refuses the commit with E701 (E703 where
-      the stored digest does not parse), as `refuse_restamping` does today
-      by hashing the source again (`failing_digests`). A corrupted source
-      dataset that `scrub` then rewrites is still refused.
+    - **The refusal, where 2.2.2 refuses and nowhere else.** Its digest of
+      each source dataset is kept beside that dataset's stored digest. At
+      commit, `refuse_restamping`'s rule picks the paths, as today: those
+      the source holds *and* the output keeps, whose output digest differs
+      from the source's stored one, written by the call or not. Among them,
+      a source dataset whose early digest does not match its stored one
+      refuses the commit with E701 (E703 where the stored digest does not
+      parse), where today `failing_digests` hashes the source again. A
+      corrupted source dataset that `scrub` then rewrites is still refused;
+      the early result for a path the call deleted, or rewrote back to its
+      stored digest, is discarded, as 2.2.2 never checks it.
     - **The output digest, for untouched paths only.** The writer records
       every path the call writes, replaces or deletes (`scrub`'s
       `rewrite_strings`, `fix`, a re-encoded annotation). At commit, an
@@ -419,7 +429,9 @@ It is the API the exception allows ([D6](#decisions-the-maintainer)).
 - **Tests.**
   - The same digests at 1 and 4 threads, for every dtype, strings, compound
     types, and datasets whose slabs fall on and across chunk edges.
-  - The E701 refusal at any thread count.
+  - The E701 refusal at any thread count, on exactly 2.2.2's paths: an
+    amendment that removes a corrupt source image (`remove_image`) while
+    keeping another commits, as it does today, at 1 and 4 threads.
   - A `scrub` that rewrites inherited strings, a `fix` that rewrites a
     dataset, and an amendment that replaces one, each at 1 and 4 threads:
     the same digests and `content_id` as the sequential commit.
