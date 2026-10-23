@@ -129,28 +129,55 @@ forked worker either way. See [PyTorch and MONAI](../reference/torch.md#the-data
 threads help and when processes do.
 
 One lock covers the HDF5 library in a process, so files checked in one process
-take turns however many threads ask. `validate`, `verify`, `fix`, `index build`
-and `recompress` take `--workers N` and run the files in up to *N* processes:
+take turns however many threads ask. The batch commands take `--workers N` and
+run their work in up to *N* processes:
 
 ```
 $ medh5 verify --workers 4 data/*.medh5
 ```
 
 The output — the text, the `--json` document and the exit code — is the
-one-process run's, byte for byte, printed in input order. Over 32 files of
-96×192×192 on four cores, with the native binary:
+one-process run's, byte for byte, printed in input order. Each command's unit
+is the work it can do without looking at another: a file for `validate`,
+`verify`, `fix`, `index build` and `recompress`; a subject's 0.x files for
+`migrate`; a case for `convert to-nnunet` and `conformance run`; a subject for
+`clinical augment-cohort` and `task preflight`. What a run shares — the
+cohort's label set, the dataset's case names, the one pass over a MEDS dataset
+or a FHIR export — is worked out first, in one process, so it is not repeated
+per worker, and is the part `--workers` does not shorten. Over 32 files of
+96×192×192 (two per subject, and a clinical cohort of 32 subjects) on four
+cores, the median of three runs:
 
-| Command | 1 process | 2 | 4 |
-|---|---|---|---|
-| `verify` | 10.1 s | 5.2 s | 2.7 s |
-| `index build` | 17.4 s | 9.1 s | 4.6 s |
-| `recompress --profile archive` | 128 s | 64 s | 45 s |
-| `validate` | 0.07 s | 0.05 s | 0.04 s |
+| Command | Unit | 1 process | 4 workers | console script: 1 | 4 |
+|---|---|---|---|---|---|
+| `verify` | file | 3.4 s | 0.9 s | 3.5 s | 1.4 s |
+| `index build` | file | 4.6 s | 1.2 s | 4.5 s | 1.6 s |
+| `recompress --profile archive` | file | 183 s | 48 s | — | — |
+| `migrate` | subject | 10.1 s | 2.8 s | 10.1 s | 3.3 s |
+| `convert to-nnunet` | case | 18.7 s | 7.7 s | 21.2 s | 8.6 s |
+| `conformance run` | case | 4.0 s | 1.1 s | 4.5 s | 1.7 s |
+| `task preflight` | subject | 0.72 s | 0.20 s | 0.93 s | 0.67 s |
+| `clinical augment-cohort` | subject | 2.4 s | 1.5 s | 2.4 s | 1.5 s |
+| `validate` | file | 0.06 s | 0.04 s | 0.20 s | 0.47 s |
 
 A worker costs a process start, which the Python console script pays as an
 interpreter start, about 0.1 s each: `validate`, which reads structure rather
-than data, finishes before that pays off, and is slower there with workers
-(0.25 s at one, 0.5 s at four). The default, 1, runs in one process.
+than data, finishes before that pays off, and is slower there with workers.
+The default, 1, runs in one process. `scrub`, `splits`, `labels check` and
+`dataset check --deep` take no `--workers`: over the same 32 files each takes
+milliseconds, and four processes at once, each over a quarter, would be the
+most a flag could give:
+
+| Command | 1 process | four at once | console script: 1 | four at once |
+|---|---|---|---|---|
+| `scrub` | 0.04 s | 0.02 s | 0.19 s | 0.32 s |
+| `splits` | 0.02 s | 0.01 s | 0.18 s | 0.26 s |
+| `labels check` | 0.02 s | 0.01 s | 0.16 s | 0.26 s |
+| `dataset check --deep` | 0.015 s | 0.011 s | 0.17 s | 0.25 s |
+
+`docs/examples/bench_workers.py` builds the cohort and times every command
+above, with the native binary (`--medh5 target/release/medh5`) or the console
+script.
 
 Within one Python process, the calls that work over large arrays — copying a
 mask into the engine's layout, `curation.agreement.dice` and `iou`, the

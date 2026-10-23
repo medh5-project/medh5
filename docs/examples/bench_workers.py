@@ -15,9 +15,10 @@ laboratory values), all built here once and reused.  Each command then runs:
   takes it.
 
 Each figure is the median of ``--repeats`` wall-clock runs after one untimed
-run, so every run reads from the same page cache.  The commands are those of
-``plans/2.2.x/parallelism.md`` (P22-14) and the five that already take
-``--workers``.  Run it with the native binary or the console script::
+run, so every run reads from the same page cache.  The commands are every
+batch command that reads many files or a cohort: the ten that take
+``--workers``, and the four that measured too short to gain from it.  Run it
+with the native binary or the console script::
 
     python docs/examples/bench_workers.py [--medh5 target/release/medh5] [--json out.json]
 
@@ -405,7 +406,7 @@ def files(c: dict[str, Any], part: int | None, key: str, shards: int) -> list[st
 
 
 def commands(shards: int) -> dict[str, tuple[Invocation, bool]]:
-    """Each command: its invocation, and whether it already takes ``--workers``."""
+    """Each command: its invocation, and whether it takes ``--workers``."""
 
     def f(key: str) -> Callable[[dict[str, Any], int | None], list[str]]:
         return lambda c, part: files(c, part, key, shards)
@@ -457,7 +458,7 @@ def commands(shards: int) -> dict[str, tuple[Invocation, bool]]:
                 "extra.patient_id",
                 *legacy(c, p),
             ],
-            False,
+            True,
         ),
         "convert to-nnunet": (
             lambda c, p, d: [
@@ -470,7 +471,7 @@ def commands(shards: int) -> dict[str, tuple[Invocation, bool]]:
                 ".nii",
                 *samples(c, p),
             ],
-            False,
+            True,
         ),
         # A shard's manifest is not the one its files' split claims name (C201).
         "dataset check --deep": (
@@ -492,12 +493,12 @@ def commands(shards: int) -> dict[str, tuple[Invocation, bool]]:
                 "--clock",
                 "utc",
             ],
-            False,
+            True,
         ),
-        "task preflight": (lambda c, p, d: ["task", "preflight", task(c, p)], False),
+        "task preflight": (lambda c, p, d: ["task", "preflight", task(c, p)], True),
         "conformance run": (
             lambda c, p, d: ["conformance", "run", str(d / "corpus"), *cases(p)],
-            False,
+            True,
         ),
     }
 

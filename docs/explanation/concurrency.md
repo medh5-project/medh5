@@ -35,7 +35,7 @@ and come from [Tune performance](../guides/performance.md#the-numbers) and the
 
 | Work | One | Four |
 |---|---|---|
-| `medh5 verify` over 32 files | 10.1 s | 2.7 s (processes) |
+| `medh5 verify` over 32 files | 3.4 s | 0.9 s (processes) |
 | A training loader, 64³ patches | about 590 patches/s | 880–980 patches/s (`DataLoader` workers) |
 | A task's preflight | 3.6 s | 6.9 s (threads: slower) |
 
