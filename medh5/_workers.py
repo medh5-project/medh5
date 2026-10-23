@@ -17,7 +17,8 @@ run theirs with :func:`run`, on the same rules:
 
 Units are taken from their iterable only when a worker is free for one, so
 a command that reads each unit's input as it hands it out holds as many as
-there are workers.
+there are workers; and a worker is started only for a unit no started one is
+free for, so no more start than there are units.
 """
 
 from __future__ import annotations
@@ -57,21 +58,26 @@ def run(
     context = multiprocessing.get_context("spawn")
     pool: list[_Worker] = []
     try:
-        for _ in range(workers):
-            pool.append(_Worker(context, fn))
         done: dict[int, tuple[bool, Any]] = {}
         given = 0
         out = 0
         exhausted = False
         while True:
-            for worker in pool:
-                if worker.alive and worker.held is None and not exhausted:
-                    unit = next(pending, None)
-                    if unit is None:
-                        exhausted = True
-                        break
-                    worker.give(given, *unit)
-                    given += 1
+            # A worker is started only for a unit no started one is free
+            # for: never more than there are units.
+            while not exhausted:
+                idle = next((w for w in pool if w.alive and w.held is None), None)
+                if idle is None and len(pool) >= workers:
+                    break
+                unit = next(pending, None)
+                if unit is None:
+                    exhausted = True
+                    break
+                if idle is None:
+                    idle = _Worker(context, fn)
+                    pool.append(idle)
+                idle.give(given, *unit)
+                given += 1
             while out in done:
                 ok, value = done.pop(out)
                 out += 1

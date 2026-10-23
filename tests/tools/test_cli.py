@@ -3459,6 +3459,25 @@ class TestWorkersBeyondFiles:
         assert "the worker writing it stopped" in stopped["message"]
         assert not (tmp_path / "n" / dying).exists()
 
+    def test_no_more_workers_start_than_there_are_units(self, monkeypatch):
+        """``--workers 8`` over two cases or subjects started eight
+        interpreters, and over none, eight for nothing."""
+        from medh5 import _workers
+
+        started = []
+
+        class Counted(_workers._Worker):
+            def __init__(self, *args: Any) -> None:
+                started.append(self)
+                super().__init__(*args)
+
+        monkeypatch.setattr(_workers, "_Worker", Counted)
+        died = lambda label, task, status: None  # noqa: E731
+        assert list(_workers.run(str, [], 8, died)) == []
+        assert started == []
+        assert list(_workers.run(str, [("a", 1), ("b", 2)], 8, died)) == ["1", "2"]
+        assert 1 <= len(started) <= 2
+
     def conformance(self, capsys, tmp_path, cases, *flags) -> tuple[Any, ...]:
         out = tmp_path / f"corpus{len(list(tmp_path.iterdir()))}"
         selected = [arg for case in cases for arg in ("--case", case)]

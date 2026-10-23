@@ -223,14 +223,17 @@ pub fn run_units(
     let kind = command(words).expect("a command that takes --workers");
     let wanted = wanted(m);
     let mut rest: Vec<usize> = (0..units.len()).collect();
-    if wanted > 1 && units.len() > 1 {
+    // Units that touch one file are one batch, so a pool never starts more
+    // workers than there are batches: one batch is one process's work.
+    let batched = if wanted > 1 && units.len() > 1 { batches(units, kind.writes) } else { Vec::new() };
+    if batched.len() > 1 {
         match ctx.host.worker_command() {
             Some(program) => {
-                let mut pool = Pool::start(&program, words, m, wanted.min(units.len()));
+                let mut pool = Pool::start(&program, words, m, wanted.min(batched.len()));
                 if let Some(why) = pool.failed_to_start.take().filter(|_| pool.workers.is_empty()) {
                     ctx.eprint(format!("medh5: cannot start workers ({why}); running in one process"));
                 }
-                let result = pool.run(units, &kind, |outcome| take(ctx, outcome));
+                let result = pool.run(units, batched, &kind, |outcome| take(ctx, outcome));
                 pool.close();
                 // Units the workers could not take, because none was left
                 // to take them, run here.
@@ -515,16 +518,18 @@ impl Pool {
         Pool { workers, said, failed_to_start }
     }
 
-    /// Run every unit; `emit` takes each outcome in input order.  Returns the
+    /// Run every unit, a batch to a worker; `emit` takes each outcome in
+    /// input order.  Returns the
     /// units no worker was left to run, for the caller to run itself, or the
     /// error that stops the run.
     fn run(
         &mut self,
         units: &[Unit],
+        batches: Vec<Vec<usize>>,
         kind: &Kind,
         mut emit: impl FnMut(FileOutcome) -> medh5::Result<()>,
     ) -> medh5::Result<Vec<usize>> {
-        let mut queue: VecDeque<Vec<usize>> = batches(units, kind.writes).into();
+        let mut queue: VecDeque<Vec<usize>> = batches.into();
         let mut order: Reorder<Result<FileOutcome, Error>> = Reorder::new();
         let mut done = 0;
         loop {
