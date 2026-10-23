@@ -25,10 +25,10 @@ use crate::{with_array, with_dtype, Error, Result};
 
 unsafe extern "C" {
     /// The HDF5-Blosc2 filter's compression of one chunk (`blosc2_filter.c`,
-    /// patch 7): its frame's size, the frame in `*out` for the caller to
-    /// `free`, or a negative code.  It calls no HDF5 function and starts no
-    /// Blosc2 thread when `one_thread` is set; C-Blosc2 must have started
-    /// (`medh5_sys::register_blosc2_filter`).
+    /// patch 7): its frame's size, the frame in `*out` for the caller to free
+    /// with `medh5_blosc2_free`, or a negative code.  It calls no HDF5
+    /// function and starts no Blosc2 thread when `one_thread` is set;
+    /// C-Blosc2 must have started (`medh5_sys::register_blosc2_filter`).
     fn medh5_blosc2_compress(
         cd_nelmts: usize,
         cd_values: *const u32,
@@ -37,6 +37,10 @@ unsafe extern "C" {
         one_thread: c_int,
         out: *mut *mut c_void,
     ) -> i64;
+
+    /// Free a frame [`medh5_blosc2_compress`] returned, with the C library
+    /// that allocated it.
+    fn medh5_blosc2_free(frame: *mut c_void);
 }
 
 /// One chunk's frame, as the filter's compression allocated it.
@@ -57,8 +61,9 @@ impl Frame {
 
 impl Drop for Frame {
     fn drop(&mut self) {
-        // SAFETY: allocated by the C library's `malloc`, freed once.
-        unsafe { libc::free(self.data) }
+        // SAFETY: the compression's frame, freed once, by the C library
+        // that allocated it.
+        unsafe { medh5_blosc2_free(self.data) }
     }
 }
 

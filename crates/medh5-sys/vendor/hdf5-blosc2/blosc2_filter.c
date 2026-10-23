@@ -313,6 +313,10 @@ int64_t medh5_blosc2_compress(size_t cd_nelmts, const unsigned cd_values[],
                               const void *in, size_t nbytes, int one_thread,
                               void **out);
 
+/* Free a frame `medh5_blosc2_compress` returned, with the C library that
+ * allocated it: on Windows, the caller's runtime may not be this one. */
+void medh5_blosc2_free(void *frame);
+
 /* The contexts of a super-chunk compress and decompress on the calling
  * thread: BLOSC_NTHREADS reached them when they were made, and threads start
  * only when a context first compresses or decompresses. */
@@ -324,6 +328,10 @@ static void medh5_one_thread(blosc2_schunk *schunk) {
       contexts[i]->new_nthreads = 1;
     }
   }
+}
+
+void medh5_blosc2_free(void *frame) {
+  free(frame);
 }
 
 int64_t medh5_blosc2_compress(size_t cd_nelmts, const unsigned cd_values[],

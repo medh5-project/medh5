@@ -56,7 +56,9 @@ chunk would go on to be decompressed into the wrong buffer.
    bytes it stores are upstream's: a test pins the stored chunks of every
    profile and type against the filter before this patch. Upstream's
    `compute_blosc2_blocksize` kept its scratch array in a `static`, which two
-   workers would share; it is on the stack.
+   workers would share; it is on the stack. The frame it returns is freed
+   with `medh5_blosc2_free`, by the C library that allocated it, which on
+   Windows need not be the caller's.
 
 Patches 4 to 6 are held by tests in `src/lib.rs` that call the filter as HDF5
 does, and patch 7 by the chunk writer's tests in

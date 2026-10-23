@@ -1182,6 +1182,8 @@ thread_local! {
     static LARGEST_BLOCK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// The most source voxels one block read.
     static LARGEST_CROP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The most chunks' sources a direct write held at once.
+    static MOST_QUEUED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// [`CROP_BUDGET`], lowered by a test.
     static TEST_CROP_BUDGET: std::cell::Cell<usize> = const { std::cell::Cell::new(CROP_BUDGET) };
     /// The most target voxels one write of a mask or a carried annotation
@@ -1334,8 +1336,17 @@ fn resample_image(
                 points.shift(crop);
             }
             // The whole chunk, unsplit: computed and compressed on workers.
-            let whole = direct.is_some() && block == chunk_block;
-            let mut sources = Vec::new();
+            // Its points join the batch, and each chunk of the leading axes
+            // joins them as it is read, so the batch, not the frames of one
+            // block, bounds what is held.
+            let nearest = rows.is_some();
+            let here = match &direct {
+                Some(_) if block == chunk_block => {
+                    batch.push(Ready { block: block.clone(), points, inside, rows, sources: Vec::new() });
+                    None
+                }
+                _ => Some((points, inside, rows)),
+            };
             // Each chunk of the leading (time, channel) axes in turn, so a block
             // holds one chunk of the image and no more, however many frames.
             for lead in blocks(&leading_shape, &leading_chunk) {
@@ -1348,15 +1359,20 @@ fn resample_image(
                     full.extend(spatial.iter().cloned());
                     full
                 });
-                let source =
-                    Source::read(&image, plan, rows.is_some(), crop.as_deref(), roi.as_deref(), group, || {
-                        lane_indices(&leading_shape, &lead)
-                    })?;
-                if whole {
-                    sources.push((lead, source));
+                let source = Source::read(&image, plan, nearest, crop.as_deref(), roi.as_deref(), group, || {
+                    lane_indices(&leading_shape, &lead)
+                })?;
+                let Some((points, inside, rows)) = &here else {
+                    batch.last_mut().expect("this block's, pushed above").sources.push((lead, source));
+                    let queued: usize = batch.iter().map(|r| r.sources.len()).sum();
+                    #[cfg(test)]
+                    MOST_QUEUED.set(MOST_QUEUED.get().max(queued));
+                    if queued >= 2 * threads {
+                        compute.write(direct.as_ref().expect("a whole chunk is direct"), &mut batch, threads)?;
+                    }
                     continue;
-                }
-                let values = compute.values(&source, &points, &inside, rows.as_deref(), group, n)?;
+                };
+                let values = compute.values(&source, points, inside, rows.as_deref(), group, n)?;
                 let mut shape = lead_dims;
                 shape.extend(&dims);
                 let mut starts: Vec<usize> = lead.iter().map(|(a, _)| *a).collect();
@@ -1364,12 +1380,6 @@ fn resample_image(
                 data::write_region(&dataset, &values.reshape(&shape)?, &starts)?;
             }
             valid.block(writer, &block, invalid)?;
-            if let (true, Some(direct)) = (whole, &direct) {
-                batch.push(Ready { block, points, inside, rows, sources });
-                if batch.iter().map(|r| r.sources.len()).sum::<usize>() >= 2 * threads {
-                    compute.write(direct, &mut batch, threads)?;
-                }
-            }
         }
         valid.chunk_done();
     }
@@ -1495,7 +1505,8 @@ impl Compute<'_> {
     }
 
     /// Compute and compress every chunk of `batch` on up to `threads`
-    /// workers, and store each in order; `batch` is emptied.
+    /// workers, and store each in order; `batch` keeps only its last block,
+    /// with no chunk.
     fn write(&self, writer: &Chunks, batch: &mut Vec<Ready>, threads: usize) -> Result<()> {
         let items: Vec<_> =
             batch.iter().flat_map(|ready| ready.sources.iter().map(move |source| (ready, source))).collect();
@@ -1529,7 +1540,10 @@ impl Compute<'_> {
                 writer.store(&origin, chunk)
             },
         )?;
-        batch.clear();
+        // The last block's points are kept: its next chunks of the leading
+        // axes may still be to come.
+        batch.drain(..batch.len().saturating_sub(1));
+        batch.iter_mut().for_each(|ready| ready.sources.clear());
         Ok(())
     }
 }
@@ -1944,6 +1958,44 @@ mod tests {
                         assert_eq!(other.1, reference.1, "{case}");
                     }
                 }
+            }
+        }
+    }
+
+    /// A direct write holds the sources of at most twice `threads` chunks,
+    /// however many frames one spatial chunk has: each frame's joins the
+    /// batch as it is read.
+    #[test]
+    fn s14_2_a_direct_resample_holds_twice_threads_frames_at_most() {
+        let _serial = crate::parallel::tests::serial();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.medh5");
+        let mut w = create(&path, Some("s"), Some("s"), "training", &[]).unwrap();
+        let options = |origin: f64, chunk_hint: Option<Vec<i64>>| GridOptions {
+            frame_uid: Some("F0".into()),
+            axis_kinds: Some(vec!["time".into(), "spatial".into(), "spatial".into(), "spatial".into()]),
+            time_values: Some((0..12).map(f64::from).collect()),
+            origin: Some(vec![origin; 3]),
+            chunk_hint,
+            ..Default::default()
+        };
+        w.add_grid("g", &[12, 6, 16, 16], &[1.0, 1.0, 1.0], options(0.0, None)).unwrap();
+        let values: Vec<f32> = (0..12 * 6 * 16 * 16).map(|i| ((i * 31) % 997) as f32).collect();
+        w.add_image("img", &NdArray::from_vec(&[12, 6, 16, 16], values).unwrap(), "g", "MR", ImageOptions::default())
+            .unwrap();
+        w.add_grid("fine", &[12, 12, 32, 32], &[0.5, 0.5, 0.5], options(-0.25, Some(vec![1, 12, 32, 32]))).unwrap();
+        w.commit(true).unwrap();
+        for interpolation in ["nearest", "linear"] {
+            for threads in [1, 2] {
+                let mut plan = ResamplePlan::onto(["img"], "fine");
+                plan.interpolation = interpolation.into();
+                plan.out = Some(dir.path().join(format!("{interpolation}-{threads}.medh5")));
+                let _threads = crate::parallel::for_this_run(threads).unwrap();
+                MOST_QUEUED.set(0);
+                DIRECT.set(0);
+                resample(&path, &plan).unwrap();
+                assert_eq!(DIRECT.get(), 12, "{interpolation} {threads}: every frame's chunk written directly");
+                assert_eq!(MOST_QUEUED.get(), 2 * threads, "{interpolation} {threads}");
             }
         }
     }
