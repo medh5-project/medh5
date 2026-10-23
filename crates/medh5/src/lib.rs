@@ -1,5 +1,9 @@
 #![doc = include_str!("../README.md")]
 
+// First, so its macros reach every module after it.
+#[macro_use]
+mod timings;
+
 pub mod annotations;
 pub mod array;
 pub mod bench;

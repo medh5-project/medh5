@@ -638,6 +638,7 @@ impl VoxelStream {
 
     /// The voxels' bytes, as `shape`.
     pub fn into_voxels(mut self, shape: Vec<usize>) -> Result<Voxels> {
+        phase!(Inflate);
         let bytes = read_capped(&mut *self.reader, self.wanted, self.available).map_err(|e| self.error(e))?;
         if bytes.len() as u64 != self.wanted {
             return Err(self.short(bytes.len() as u64));
@@ -689,12 +690,20 @@ impl VoxelStream {
         let (mut pending, mut got) = (0usize, 0u64);
         let mut stream = (&mut self.reader).take(self.wanted);
         let failed = loop {
+            #[cfg(medh5_phase_timings)]
+            let inflate = crate::timings::Span::enter(crate::timings::Phase::Inflate, 0);
             let n = match stream.read(&mut buffer[pending..]) {
                 Ok(0) => break None,
                 Ok(n) => n,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => break Some(e),
             };
+            #[cfg(medh5_phase_timings)]
+            {
+                inflate.add_bytes(n as u64);
+                drop(inflate);
+            }
+            phase!(Decode, n);
             got += n as u64;
             pending += n;
             let whole = pending - pending % N;

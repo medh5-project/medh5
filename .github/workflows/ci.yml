@@ -93,6 +93,18 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      # The phase timings compile only under a cfg no profile sets
+      # (crates/medh5/src/timings.rs), so nothing above builds them: their
+      # lints, and their tests run alone (the counts are the process's), with
+      # the engine crate alone rebuilt under the cfg.
+      - name: The phase timings build
+        run: |
+          cargo clippy -p medh5 --lib --tests --locked -- -D warnings --cfg medh5_phase_timings
+          tests=$(cargo rustc -p medh5 --lib --profile test --locked --message-format json \
+            -- --cfg medh5_phase_timings | jq -r 'select(.executable != null) | .executable')
+          out=$("$tests" timings)
+          echo "$out"
+          grep -q "test result: ok. 4 passed" <<<"$out"
       # No zlib gzip-file function is linked (SECURITY.md, CVE-2026-85091):
       # NIfTI's gzip is inflated in Rust, and zlib serves memory buffers only.
       # A debug build, reusing the test build's crates, keeps the symbol

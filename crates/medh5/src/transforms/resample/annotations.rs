@@ -917,6 +917,7 @@ pub(super) fn write(
     activity: &str,
     written: &mut Vec<String>,
 ) -> Result<Vec<ResampledAnnotation>> {
+    phase!(Carry);
     let annotations = sample.annotations()?;
     let target_spatial = target.spatial_shape();
     let mut nearest_by_grid: HashMap<String, Nearest> = HashMap::new();
