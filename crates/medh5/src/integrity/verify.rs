@@ -373,6 +373,7 @@ fn verify(
     mut inspect: Option<InspectPath<'_>>,
     mut unread: Option<&mut Unread>,
 ) -> Result<VerifyResult> {
+    stage!("verify");
     let stored = collect_digests(root, &["index"])?;
     let targets: Vec<String> = match partial {
         Some(p) => p.to_vec(),

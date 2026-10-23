@@ -285,6 +285,7 @@ pub fn validate_root_with(
     attr_names: Option<&AttrNameMap>,
     errors_only: bool,
 ) -> Result<Report> {
+    stage!("validate");
     check_level(level)?;
     check_required(profiles)?;
     let mut declared: Vec<String> = attrs::get_strs(root, "medh5_profiles").ok().flatten().unwrap_or_default();

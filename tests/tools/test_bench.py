@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import h5py
@@ -242,3 +243,102 @@ class TestThreadBench:
         with pytest.raises(SystemExit):
             module.main(flags.split())
         assert "--" in capsys.readouterr().err
+
+
+def _load_script(name: str, module_name: str):
+    import importlib.util
+    import sys
+
+    script = Path(__file__).parents[2] / "docs" / "examples" / name
+    spec = importlib.util.spec_from_file_location(module_name, script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in CLI is a script")
+class TestPhaseBench:
+    """``docs/examples/bench_phases.py``, run small through a stand-in for the
+    timing build: the command line itself, and a report of made-up phases."""
+
+    def stand_in(self, tmp_path: Path) -> Path:
+        phases = _load_script("bench_phases.py", "bench_phases_stand_in").PHASES
+        report = {
+            "wall": 0.5,
+            "other": 0.1,
+            "phases": {
+                name: {"seconds": 0.02, "calls": 1, "bytes": 1 << 20, "locked": locked}
+                for name, locked in phases.items()
+            },
+            "stages": {
+                "commit.digests": {
+                    "seconds": 0.3,
+                    "calls": 1,
+                    "phases": {name: 0.01 for name in phases},
+                }
+            },
+        }
+        stub = tmp_path / "medh5-timings"
+        stub.write_text(
+            f"#!{sys.executable}\n"
+            "import os, subprocess, sys\n"
+            "cli = [sys.executable, '-m', 'medh5.cli', *sys.argv[1:]]\n"
+            "done = subprocess.run(cli)\n"
+            "if os.environ.get('MEDH5_PHASE_TIMINGS'):\n"
+            "    with open(os.environ['MEDH5_PHASE_TIMINGS'], 'a') as f:\n"
+            f"        f.write({json.dumps(report)!r} + '\\n')\n"
+            "sys.exit(done.returncode)\n"
+        )
+        stub.chmod(0o755)
+        return stub
+
+    def test_the_phase_bench_runs_every_command(self, tmp_path):
+        pytest.importorskip("nibabel")  # the inputs are NIfTI files
+        module = _load_script("bench_phases.py", "bench_phases")
+        out = tmp_path / "out.json"
+        results = module.main(
+            ["--medh5", str(self.stand_in(tmp_path)), "--shape", "8", "16", "16"]
+            + ["--repeats", "1", "--digest-mib", "1", "--out", str(tmp_path / "w")]
+            + ["--json", str(out)]
+        )
+        assert json.loads(out.read_text())["conditions"]["shape"] == [8, 16, 16]
+        assert len(results["rows"]) == 8
+        for row in results["rows"].values():
+            assert row["locked"] == pytest.approx(0.14)
+            assert row["outside"] == pytest.approx(0.14)
+            # 0.14 s of work outside the lock; a chunk writer's workers would
+            # take 0.08 s of it (compress, map, interpolate, decode).
+            now = row["wall"] / (row["wall"] - 0.75 * 0.14)
+            assert row["ceiling"]["now"] == pytest.approx(now)
+            assert row["writes"] == pytest.approx(0.08)
+            assert row["ceiling"]["both"] >= row["ceiling"]["writes"]
+            # Decompressing, the window reader and hashing, inside commit.
+            assert row["digests"] == pytest.approx(0.03)
+        assert set(results["digest_mib_s"]) == {"sha256", "sha512", "blake2b"}
+        assert "| resample nearest |" in module.table(results)
+
+    def test_a_cli_without_timings_is_refused(self, tmp_path):
+        pytest.importorskip("nibabel")
+        module = _load_script("bench_phases.py", "bench_phases_plain")
+        plain = tmp_path / "medh5"
+        plain.write_text(
+            f"#!{sys.executable}\nimport runpy, sys\n"
+            "sys.argv[0] = 'medh5'\n"
+            "runpy.run_module('medh5.cli', run_name='__main__')\n"
+        )
+        plain.chmod(0o755)
+        with pytest.raises(SystemExit, match="reported no phase timings"):
+            module.main(
+                ["--medh5", str(plain), "--shape", "8", "16", "16", "--repeats", "1"]
+                + ["--out", str(tmp_path / "w")]
+            )
+
+    def test_the_ceiling_is_amdahls_bound(self):
+        module = _load_script("bench_phases.py", "bench_phases_ceiling")
+        assert module.ceiling(10.0, 0.0) == 1.0
+        assert module.ceiling(10.0, 10.0) == pytest.approx(4.0)
+        assert module.ceiling(10.0, 4.0) == pytest.approx(10.0 / 7.0)
+        # Never more parallel work than there was time.
+        assert module.ceiling(1.0, 5.0) == pytest.approx(4.0)

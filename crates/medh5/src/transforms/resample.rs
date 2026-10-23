@@ -334,9 +334,15 @@ pub fn resample(source: &Path, plan: &ResamplePlan) -> Result<Resampled> {
         }
     };
     let sample = open_sample(source)?;
-    let prepared = prepare(&sample, plan)?;
+    let prepared = {
+        stage!("resample.prepare");
+        prepare(&sample, plan)?
+    };
     let mut writer = amend_into(source, &out, None, &[])?;
-    let written = write(&sample, &mut writer, plan, &prepared);
+    let written = {
+        stage!("resample.write");
+        write(&sample, &mut writer, plan, &prepared)
+    };
     let mut result = match written {
         Ok(result) => result,
         Err(e) => {
@@ -372,6 +378,7 @@ impl Points {
     /// The points of `block` in a source of `spatial` extent, and whether
     /// each lies inside the source, in C order.
     fn new(mapping: &Mapping, block: &[(usize, usize)], spatial: &[usize]) -> Result<(Points, Vec<bool>)> {
+        phase!(Map);
         let within_axis = |v: f64, m: usize| v >= -0.5 && v <= m as f64 - 0.5;
         if let Some(mut coords) = mapping.axes(block)? {
             let within: Vec<Vec<bool>> =
@@ -407,6 +414,7 @@ impl Points {
     /// The part of the source the inside points fall in, an axis at a time;
     /// `None` when no point is inside.
     fn crop(&self, inside: &[bool], spatial: &[usize]) -> Option<Vec<(usize, usize)>> {
+        phase!(Map);
         let span = |k: usize, values: &mut dyn Iterator<Item = f64>| {
             let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
             for v in values {
@@ -439,6 +447,7 @@ impl Points {
     /// Each inside point's nearest source voxel, as a flat C-order offset
     /// into `crop` (0 outside, where `inside` says so).
     fn nearest_offsets(&self, inside: &[bool], crop: &[(usize, usize)], spatial: &[usize]) -> Vec<usize> {
+        phase!(Map);
         // A cast truncates, which is the floor at and above zero and
         // saturates to 0 below it, as the floor's cast did; the floor is a
         // call on baseline x86-64.
@@ -477,6 +486,7 @@ impl Points {
 
     /// The points taken into `crop`: each coordinate less the crop's start.
     fn shift(&mut self, crop: &[(usize, usize)]) {
+        phase!(Map);
         match self {
             Points::Rows(clamped) => {
                 for mut point in clamped.outer_iter_mut() {
@@ -1042,7 +1052,10 @@ fn write(sample: &Sample, writer: &mut SampleWriter, plan: &ResamplePlan, prepar
     let mut images = Vec::new();
     for job in &prepared.jobs {
         let mapping = &prepared.mappings[&job.source_grid.grid_id];
-        let (filled, valid) = resample_image(sample, writer, job, target, mapping, plan, &activity.id)?;
+        let (filled, valid) = {
+            stage!("resample.image");
+            resample_image(sample, writer, job, target, mapping, plan, &activity.id)?
+        };
         let mask = if let Some(name) = valid {
             let images_attr = writer.root()?.group("images")?.dataset(&job.output)?;
             crate::h5::attrs::write(&images_attr, "valid_mask", &crate::h5::attrs::AttrValue::Str(name.clone()))?;
@@ -1059,8 +1072,10 @@ fn write(sample: &Sample, writer: &mut SampleWriter, plan: &ResamplePlan, prepar
             filled_voxels: filled,
         });
     }
-    let carried =
-        annotations::write(sample, writer, &prepared.carry, &prepared.mappings, target, &activity.id, &mut written)?;
+    let carried = {
+        stage!("resample.carry");
+        annotations::write(sample, writer, &prepared.carry, &prepared.mappings, target, &activity.id, &mut written)?
+    };
     let mut fields = Map::new();
     fields.insert("tool".into(), json!("medh5 resample"));
     fields.insert("inputs".into(), json!(inputs));
@@ -1477,6 +1492,7 @@ fn lane_indices(shape: &[usize], block: &[(usize, usize)]) -> Vec<usize> {
 
 /// `(lanes, n)` values of `dtype`, all `fill`.
 fn constant(dtype: DType, lanes: usize, n: usize, fill: f64) -> Result<NdArray> {
+    phase!(Interpolate);
     convert(&Array2::from_elem((n, lanes), fill), dtype, "")
 }
 
@@ -1494,6 +1510,7 @@ fn gather(
     fill: f64,
     dtype: DType,
 ) -> Result<NdArray> {
+    phase!(Interpolate);
     let n = offsets.len();
     let flat_shape = [lanes, stored.len() / lanes.max(1)];
     let rows = || offsets.iter().zip(inside).map(|(at, ok)| ok.then_some(*at));
@@ -1548,6 +1565,7 @@ fn gather(
 /// integers rounded half to even and clipped.  A NaN is refused for an
 /// integer type, which has none.
 fn convert(values: &Array2<f64>, dtype: DType, image: &str) -> Result<NdArray> {
+    phase!(Interpolate);
     let lanes_first = values.t();
     let flat: Vec<f64> = lanes_first.iter().copied().collect();
     let shape = [values.ncols(), values.nrows()];

@@ -625,7 +625,7 @@ compiled extension the modules re-export from, not an API of its own.
 | `diagnose` | function | What is stale, mismatched or missing in one file. |  |
 | `Diagnosis` | class | What is wrong with one file, before anything is done about it. |  |
 | `DIGEST_ALGOS` | constant (`tuple`) |  |  |
-| `digest_bytes` | function | Return the `"<algo>:<hex>"` digest of a byte string. |  |
+| `digest_bytes` | function | Return the `"<algo>:<hex>"` digest of a byte string. | [Tune performance › Where a command's time goes](../guides/performance.md#where-a-commands-time-goes) |
 | `fix` | function | Repair what was asked: rebuild stale indices, rewrite digests (with a *reason*, recorded as a provenance activity). | [Storage › Atomic writes](storage.md#atomic-writes) |
 | `fix_paths` | function | `fix` over many files, every one of them: a file that cannot be repaired stops no other. |  |
 | `group_digest` | function | The digest of an object group: its datasets and canonical attributes. |  |

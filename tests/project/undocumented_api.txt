@@ -292,7 +292,6 @@ medh5.integrity.canonical_attrs
 medh5.integrity.collect_digests
 medh5.integrity.dataset_digest
 medh5.integrity.diagnose
-medh5.integrity.digest_bytes
 medh5.integrity.fix_paths
 medh5.integrity.group_digest
 medh5.integrity.parse_digest

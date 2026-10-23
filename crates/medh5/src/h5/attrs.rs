@@ -269,6 +269,7 @@ fn descriptor(attr: &hdf5::Attribute) -> Result<TD> {
 
 /// Read one attribute, or `None` when it is absent.
 pub fn read(obj: &hdf5::Location, name: &str) -> Result<Option<AttrValue>> {
+    phase!(Metadata);
     super::alive(obj)?;
     if !has(obj, name) {
         return Ok(None);
@@ -573,6 +574,7 @@ pub fn numeric_dtype(td: &TD) -> Option<DType> {
 /// Asked of HDF5 by name: listing every name to find one made each attribute
 /// read cost as many reads as the object has attributes.
 pub fn has(obj: &hdf5::Location, name: &str) -> bool {
+    phase!(Metadata);
     let Ok(cname) = std::ffi::CString::new(name) else { return false };
     // SAFETY: a NUL-terminated name and HDF5's own id, under its lock; a
     // closed object is an error, which reads as absent, as it did.
@@ -581,6 +583,7 @@ pub fn has(obj: &hdf5::Location, name: &str) -> bool {
 
 /// Every attribute name, sorted (HDF5's name order).
 pub fn names(obj: &hdf5::Location) -> Result<Vec<String>> {
+    phase!(Metadata);
     super::alive(obj)?;
     let mut names = obj.attr_names()?;
     names.sort();
@@ -589,6 +592,7 @@ pub fn names(obj: &hdf5::Location) -> Result<Vec<String>> {
 
 /// Delete an attribute if present.
 pub fn delete(obj: &hdf5::Location, name: &str) -> Result<()> {
+    phase!(Metadata);
     if has(obj, name) {
         obj.delete_attr(name)?;
     }
@@ -597,6 +601,7 @@ pub fn delete(obj: &hdf5::Location, name: &str) -> Result<()> {
 
 /// Write (or overwrite) one attribute.
 pub fn write(obj: &hdf5::Location, name: &str, value: &AttrValue) -> Result<()> {
+    phase!(Metadata);
     delete(obj, name)?;
     match value {
         AttrValue::Str(s) => {

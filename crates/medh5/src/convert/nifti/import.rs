@@ -1087,6 +1087,7 @@ pub fn from_nifti(
     options: &ImportOptions,
     report: &mut ConversionReport,
 ) -> Result<()> {
+    stage!("from_nifti");
     let (mut arrays, mut masks) = (VecDeque::new(), VecDeque::new());
     match import(images, out, options, report, &mut arrays, &mut masks) {
         Ok(()) => Ok(()),

@@ -192,6 +192,7 @@ pub fn stored_element_size(ds: &hdf5::Dataset) -> Result<Option<usize>> {
 /// as their stored bytes: read in the dataset's own type, so nothing is
 /// converted.  `size` is the element size ([`stored_element_size`]).
 pub(crate) fn read_stored_rows(ds: &hdf5::Dataset, size: usize, start: usize, count: usize) -> Result<Vec<u8>> {
+    phase!(Read);
     use crate::h5sys::{h5d, h5p, h5s, h5t};
     let shape = ds.shape();
     let mut first = vec![0u64; shape.len()];
@@ -322,6 +323,7 @@ pub(crate) fn holdable(extents: &[usize], itemsize: usize) -> bool {
 
 /// Read a whole numeric dataset.
 pub fn read(ds: &hdf5::Dataset) -> Result<NdArray> {
+    phase!(Read);
     super::alive(ds)?;
     let dtype = dtype(ds)?;
     ensure_allocatable(ds, &ds.shape(), dtype.itemsize())?;
@@ -333,6 +335,7 @@ pub fn read(ds: &hdf5::Dataset) -> Result<NdArray> {
 }
 
 fn read_enum(ds: &hdf5::Dataset, dtype: DType) -> Result<NdArray> {
+    phase!(Read);
     use crate::h5sys::{h5d, h5p, h5s, h5t};
     let shape = ds.shape();
     let n: usize = shape.iter().product::<usize>().max(1);
@@ -359,6 +362,7 @@ fn read_enum_region(
     axes: &[(usize, usize, usize, bool)],
     out_shape: &[usize],
 ) -> Result<NdArray> {
+    phase!(Read);
     use crate::h5sys::{h5d, h5p, h5s, h5t};
     let start: Vec<u64> = axes.iter().map(|a| a.0 as u64).collect();
     let count: Vec<u64> = axes.iter().map(|a| a.1 as u64).collect();
@@ -459,6 +463,7 @@ pub(crate) fn read_hyperslab(
     axes: &[(usize, usize, usize, bool)],
     out_shape: &[usize],
 ) -> Result<NdArray> {
+    phase!(Read);
     let selection: Vec<SliceOrIndex> = axes
         .iter()
         .map(|(start, count, step, kept)| {
@@ -710,6 +715,7 @@ fn decoded_bytes(n: usize, width: Option<usize>, text: usize) -> Option<usize> {
 /// bytes, a fixed-length one's without its NUL padding.  The caller has
 /// sized the read.
 fn read_string_rows(ds: &hdf5::Dataset, td: &TD, start: usize, count: usize) -> Result<Vec<Vec<u8>>> {
+    phase!(Read);
     let shape = ds.shape();
     let selection: Vec<SliceOrIndex> = shape
         .iter()
@@ -860,6 +866,7 @@ pub fn read_stored_strings(ds: &hdf5::Dataset) -> Result<Vec<Vec<u8>>> {
 /// One string, so a dataset of any other shape is refused rather than read
 /// whole and cut to its first element.
 pub fn read_scalar_string(ds: &hdf5::Dataset) -> Result<String> {
+    phase!(Read);
     if !ds.is_scalar() {
         return Err(Error::Value(format!(
             "{} is a dataset of shape {}, not one string",
@@ -876,6 +883,7 @@ pub fn read_scalar_string(ds: &hdf5::Dataset) -> Result<String> {
 
 /// Create a numeric dataset holding `data`.
 pub fn create(group: &hdf5::Group, name: &str, data: &NdArray, layout: &Layout) -> Result<hdf5::Dataset> {
+    phase!(Write);
     let chunks = layout.chunks.clone();
     with_array!(data, a => {
         let mut builder = group.new_dataset_builder().obj_track_times(false).with_data(a.view());
@@ -894,6 +902,7 @@ pub fn create_empty(
     shape: &[usize],
     layout: &Layout,
 ) -> Result<hdf5::Dataset> {
+    phase!(Metadata);
     let chunks = layout.chunks.clone();
     with_dtype!(dtype, T => {
         let mut builder = group.new_dataset::<T>().obj_track_times(false).shape(shape.to_vec());
@@ -906,6 +915,7 @@ pub fn create_empty(
 
 /// Write `data` into a region of an existing dataset (slices only).
 pub fn write_region(ds: &hdf5::Dataset, data: &NdArray, starts: &[usize]) -> Result<()> {
+    phase!(Write, data.nbytes());
     let shape = data.shape();
     let selection: Vec<SliceOrIndex> = starts
         .iter()
@@ -922,6 +932,7 @@ pub fn write_region(ds: &hdf5::Dataset, data: &NdArray, starts: &[usize]) -> Res
 
 /// Create a 1-D variable-length UTF-8 string dataset.
 pub fn create_strings(group: &hdf5::Group, name: &str, values: &[String]) -> Result<hdf5::Dataset> {
+    phase!(Write);
     let parsed: Vec<VarLenUnicode> = values
         .iter()
         .map(|s| s.parse::<VarLenUnicode>())
@@ -933,6 +944,7 @@ pub fn create_strings(group: &hdf5::Group, name: &str, values: &[String]) -> Res
 
 /// Create a scalar variable-length UTF-8 string dataset.
 pub fn create_scalar_string(group: &hdf5::Group, name: &str, value: &str) -> Result<hdf5::Dataset> {
+    phase!(Write);
     let parsed: VarLenUnicode = value.parse().map_err(|e| Error::Value(format!("{e}")))?;
     let ds = group.new_dataset::<VarLenUnicode>().obj_track_times(false).shape(()).create(name)?;
     ds.write_scalar(&parsed)?;
@@ -1084,6 +1096,7 @@ fn fixed_bytes(values: &[String], width: usize) -> Vec<u8> {
 /// Overwrite a fixed-length string dataset whose width fits `values`, one
 /// value per element of the dataset.
 pub fn write_fixed_strings(ds: &hdf5::Dataset, values: &[String], width: usize, ascii: bool) -> Result<()> {
+    phase!(Write);
     use crate::h5sys::{h5d, h5p, h5s, h5t};
     check_fixed_strings(ds, values, width)?;
     let buf = fixed_bytes(values, width);
@@ -1109,6 +1122,7 @@ pub fn write_fixed_strings(ds: &hdf5::Dataset, values: &[String], width: usize, 
 /// step, leaves the original where it was and no temporary behind.  One value
 /// per element of the dataset, as [`write_fixed_strings`].
 pub fn recreate_fixed_strings(ds: &hdf5::Dataset, values: &[String], width: usize, ascii: bool) -> Result<()> {
+    phase!(Write);
     use crate::h5sys::{h5d, h5i, h5p, h5s, h5t};
     use std::ffi::CString;
     check_fixed_strings(ds, values, width)?;
