@@ -394,12 +394,17 @@ fn copy_dataset(
     let out = data::create_empty(dst, name, dtype, &shape, &new_layout)?;
     // Blosc2 compresses whole chunks on workers, outside HDF5's lock, from
     // slabs cut on the new chunks' boundaries; anything else is written
-    // through HDF5, which compresses under its lock.
-    let direct = Chunks::of(&out, dtype).filter(|_| !through_hdf5());
+    // through HDF5, which compresses under its lock.  So is a dataset whose
+    // one row of chunks is over the slab budget: a slab of whole rows would
+    // read more than the budget at once.
+    let (budget, plane) = (slab_budget(), plane_bytes(&shape, dtype.itemsize()));
+    let direct = Chunks::of(&out, dtype).filter(|w| !through_hdf5() && w.chunk()[0].saturating_mul(plane) <= budget);
     #[cfg(test)]
     DIRECT.with(|n| n.set(n.get() + usize::from(direct.is_some())));
     let rows = direct.as_ref().map_or(1, |w| w.chunk()[0]);
-    for (start, stop) in slabs(&shape, dtype.itemsize(), 64 << 20, rows) {
+    for (start, stop) in slabs(&shape, dtype.itemsize(), budget, rows) {
+        #[cfg(test)]
+        MOST_READ.set(MOST_READ.get().max((stop - start) * plane));
         let block = data::read_region(&ds, &[Index::Slice(Slice::new(start as i64, stop as i64))])?;
         match &direct {
             Some(writer) => writer.write_rows(&block, start, threads)?,
@@ -428,6 +433,10 @@ thread_local! {
     static THROUGH_HDF5: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The datasets written a chunk at a time.
     static DIRECT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The slab budget, when a test sets one (0: the default).
+    static BUDGET: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The most bytes one slab read.
+    static MOST_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn through_hdf5() -> bool {
@@ -437,14 +446,27 @@ fn through_hdf5() -> bool {
     false
 }
 
+/// The bytes one slab reads at most, unless one plane is more.
+fn slab_budget() -> usize {
+    #[cfg(test)]
+    if BUDGET.get() > 0 {
+        return BUDGET.get();
+    }
+    64 << 20
+}
+
+/// The bytes of one index of a dataset's first axis.
+fn plane_bytes(shape: &[usize], itemsize: usize) -> usize {
+    (shape.get(1..).unwrap_or(&[]).iter().product::<usize>().max(1) * itemsize).max(1)
+}
+
 /// Row windows covering a dataset, each under `budget` bytes, and each a
 /// whole number of `rows` (a chunk's first extent) but the last.
 fn slabs(shape: &[usize], itemsize: usize, budget: usize, rows: usize) -> Vec<(usize, usize)> {
     if shape.is_empty() || shape[0] == 0 {
         return vec![(0, shape.first().copied().unwrap_or(0))];
     }
-    let trailing: usize = shape[1..].iter().product::<usize>().max(1);
-    let per_plane = (trailing * itemsize).max(1);
+    let per_plane = plane_bytes(shape, itemsize);
     let rows = rows.max(1);
     let step = ((budget / per_plane) / rows * rows).clamp(rows, shape[0].max(rows));
     let mut out = Vec::new();
@@ -554,6 +576,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A dataset whose one row of chunks is over the slab budget is written
+    /// through HDF5, a budget at a time: a slab of whole chunk rows would
+    /// read the row whole.  The file is the one a direct write gives.
+    #[test]
+    fn s14_2_a_chunk_row_over_the_slab_budget_is_written_through_hdf5() {
+        let _serial = crate::parallel::tests::serial();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("s.medh5");
+        sample(&source, "portable");
+        // Each image is one chunk of 37 planes; four planes of the f32 PET.
+        let budget = 4 * 70 * 83 * 4;
+        let mut ids = Vec::new();
+        for (n, set) in [(0, false), (1, true)] {
+            let out = dir.path().join(format!("{n}.medh5"));
+            let _threads = crate::parallel::for_this_run(4).unwrap();
+            BUDGET.set(if set { budget } else { 0 });
+            DIRECT.set(0);
+            MOST_READ.set(0);
+            let result = recompress(&source, "archive", Some(&out), false);
+            BUDGET.set(0);
+            let result = result.unwrap();
+            assert!(result.ok(), "{result:?}");
+            if set {
+                assert_eq!(DIRECT.get(), 0);
+                assert!(MOST_READ.get() <= budget, "{} > {budget}", MOST_READ.get());
+            } else {
+                assert_eq!(DIRECT.get(), 2);
+            }
+            ids.push(result.content_id);
+        }
+        assert_eq!(ids[0], ids[1]);
     }
 
     /// What the check of a recompressed file cannot read is reported in the
