@@ -31,12 +31,14 @@ struct Lock {
 }
 
 /// HDF5's lock, which a thread holds through every HDF5 call; the files
-/// checked self-contained, which an open takes; and the parallel sections,
-/// which a call holds while its workers run (`crate::parallel`).
-const LOCKS: [Lock; 3] = [
+/// checked self-contained, which an open takes; the parallel sections, which
+/// a call holds while its workers run (`crate::parallel`); and the command
+/// line's runs, which `--threads` takes as a run begins and ends.
+const LOCKS: [Lock; 4] = [
     Lock { take: take_hdf5, wait: wait_hdf5 },
     Lock { take: take_checked, wait: wait_checked },
     Lock { take: take_sections, wait: wait_sections },
+    Lock { take: take_runs, wait: wait_runs },
 ];
 
 fn take_hdf5() -> Option<Box<dyn Any>> {
@@ -65,6 +67,14 @@ fn take_sections() -> Option<Box<dyn Any>> {
 
 fn wait_sections() {
     drop(crate::parallel::SECTIONS.write());
+}
+
+fn take_runs() -> Option<Box<dyn Any>> {
+    free(&crate::parallel::RUNS)
+}
+
+fn wait_runs() {
+    drop(crate::parallel::RUNS.lock());
 }
 
 /// `lock`, if it is free.  A poisoned lock is taken as it stands, as its
@@ -257,6 +267,40 @@ mod tests {
         stop.store(true, Ordering::SeqCst);
         busy.into_iter().for_each(|t| t.join().unwrap());
         assert_eq!(failed, Vec::<String>::new(), "a child could not run a threaded call");
+    }
+
+    /// A child forked while another thread begins and ends command line
+    /// runs begins one of its own: the fork found the runs free.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_forked_while_runs_begin_and_end_begins_one() {
+        let _serial = crate::parallel::tests::serial();
+        install();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let busy = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    drop(crate::parallel::for_this_run(3).unwrap());
+                }
+            })
+        };
+        let mut failed = 0;
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            // SAFETY: the child begins and ends a run, and exits.
+            let pid = unsafe { libc::fork() };
+            if pid == 0 {
+                let run = crate::parallel::for_this_run(2).unwrap();
+                let code = i32::from(crate::parallel::threads().ok() != Some(2));
+                drop(run);
+                unsafe { libc::_exit(code) };
+            }
+            failed += usize::from(exit_status(pid) != 0);
+        }
+        stop.store(true, Ordering::SeqCst);
+        busy.join().unwrap();
+        assert_eq!(failed, 0, "a child could not begin a run");
     }
 
     /// A fork made while a call holds the parallel sections and waits for

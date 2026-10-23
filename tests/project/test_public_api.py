@@ -547,6 +547,54 @@ def test_a_glob_of_another_crate_is_an_addition(rust_api: ModuleType) -> None:
     assert status == 1 and "- `medh5::ndarray::*: new use`" in report
 
 
+def test_a_deep_module_is_walked_and_a_glob_cycle_ends(rust_api: ModuleType) -> None:
+    """Depth is no reason to stop: a function twenty modules down is an item.
+    A cycle is, and only a cycle: `pub use super::*` names its parent's items
+    once more under the child, and not the child again; two modules that
+    glob each other name each other's items once."""
+
+    def item(name, kind, inner):
+        return {"name": name, "visibility": "public", "inner": {kind: inner}}
+
+    index = {"0": item("medh5", "module", {"items": ["1"]})}
+    for level in range(1, 21):
+        index[str(level)] = item(f"m{level}", "module", {"items": [str(level + 1)]})
+    index["21"] = item("deep", "function", {})
+    index["0"]["inner"]["module"]["items"].append("30")
+    index["30"] = item("a", "module", {"items": ["31", "32"]})
+    index["31"] = item("f", "function", {})
+    index["32"] = item("b", "module", {"items": ["33"]})
+    index["33"] = item(
+        None, "use", {"source": "super", "name": "super", "id": "30", "is_glob": True}
+    )
+    # And two modules that glob each other.
+    index["0"]["inner"]["module"]["items"] += ["40", "41"]
+    index["40"] = item("x", "module", {"items": ["42"]})
+    index["41"] = item("y", "module", {"items": ["43", "44"]})
+    index["42"] = item(
+        None, "use", {"source": "y", "name": "y", "id": "41", "is_glob": True}
+    )
+    index["43"] = item(
+        None, "use", {"source": "x", "name": "x", "id": "40", "is_glob": True}
+    )
+    index["44"] = item("g", "function", {})
+    found = rust_api.items({"root": "0", "index": index})
+    assert {path for path in found if path.startswith(("medh5::x", "medh5::y"))} == {
+        "medh5::x",
+        "medh5::x::g",
+        "medh5::y",
+        "medh5::y::g",
+    }
+    deep = "::".join(["medh5", *(f"m{level}" for level in range(1, 21)), "deep"])
+    assert found[deep] == "function"
+    assert {path for path in found if path.startswith("medh5::a")} == {
+        "medh5::a",
+        "medh5::a::f",
+        "medh5::a::b",
+        "medh5::a::b::f",
+    }
+
+
 def test_rust_items_are_the_paths_a_caller_names(rust_api: ModuleType) -> None:
     assert rust_api.items(_rustdoc()) == {
         "medh5": "module",

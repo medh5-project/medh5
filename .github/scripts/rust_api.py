@@ -62,10 +62,18 @@ def items(doc: dict[str, Any]) -> dict[str, str]:
         found[name] = kind
         return True
 
-    def visit(id_: Any, path: list[str], name: str | None = None) -> None:
+    def visit(
+        id_: Any,
+        path: list[str],
+        name: str | None = None,
+        open_: frozenset[tuple[str, str]] = frozenset(),
+    ) -> None:
+        """`open_` is the modules being walked (`mod`) and the globs being
+        expanded (`glob`) on the way here: a re-export cycle (`pub use
+        super::*`) reaches one of them again, and would name paths
+        forever."""
         item = index.get(str(id_))
-        # A re-export cycle (`pub use super::*`) would name paths forever.
-        if item is None or len(path) > 16 or hidden(item):
+        if item is None or hidden(item):
             return
         (kind, inner), *_ = item["inner"].items()
         if kind == "use":
@@ -75,8 +83,10 @@ def items(doc: dict[str, Any]) -> dict[str, str]:
             if inner.get("is_glob"):
                 module = index.get(str(target))
                 if module is not None and "module" in module["inner"]:
+                    if ("glob", str(target)) in open_:
+                        return
                     for child in module["inner"]["module"]["items"]:
-                        visit(child, path)
+                        visit(child, path, None, open_ | {("glob", str(target))})
                 else:
                     # Another crate's module, whose names the JSON does not
                     # list: the glob itself is the API, so a new one is an
@@ -89,19 +99,21 @@ def items(doc: dict[str, Any]) -> dict[str, str]:
                 # not document: the name is the API.
                 add([*path, inner["name"]], "use")
                 return
-            visit(target, path, inner["name"])
+            visit(target, path, inner["name"], open_)
             return
         if kind == "impl":
             return
         name = name or item.get("name")
         if not name or item.get("visibility") != "public":
             return
+        if kind == "module" and ("mod", str(id_)) in open_:
+            return
         here = [*path, name]
         if not add(here, kind):
             return
         if kind == "module":
             for child in inner["items"]:
-                visit(child, here)
+                visit(child, here, None, open_ | {("mod", str(id_))})
         elif kind in MEMBERS:
             members(item, kind, inner, here)
 

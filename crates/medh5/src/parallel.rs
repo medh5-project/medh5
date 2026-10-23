@@ -35,8 +35,10 @@ static SET: AtomicUsize = AtomicUsize::new(0);
 static RUN: AtomicUsize = AtomicUsize::new(0);
 
 /// Each command line run still going, by the number its guard holds, and
-/// its count, oldest first.
-static RUNS: parking_lot::Mutex<(u64, Vec<(u64, usize)>)> = parking_lot::const_mutex((0, Vec::new()));
+/// its count, oldest first.  A `fork` holds it (`h5::fork`): the command
+/// line runs detached from Python, so a thread of Python's could fork while
+/// another holds it.
+pub(crate) static RUNS: Mutex<(u64, Vec<(u64, usize)>)> = Mutex::new((0, Vec::new()));
 
 /// `MEDH5_THREADS`, as read at the first call that asked: `None` when unset.
 static ENVIRONMENT: OnceLock<Result<Option<usize>, String>> = OnceLock::new();
@@ -77,7 +79,7 @@ pub fn for_this_run(n: usize) -> Result<Restore> {
     if n == 0 {
         return Err(Error::Value("the thread count must be at least 1, not 0".into()));
     }
-    let mut runs = RUNS.lock();
+    let mut runs = RUNS.lock().unwrap_or_else(|e| e.into_inner());
     runs.0 += 1;
     let id = runs.0;
     runs.1.push((id, n));
@@ -91,7 +93,7 @@ pub struct Restore(u64);
 
 impl Drop for Restore {
     fn drop(&mut self) {
-        let mut runs = RUNS.lock();
+        let mut runs = RUNS.lock().unwrap_or_else(|e| e.into_inner());
         runs.1.retain(|&(id, _)| id != self.0);
         RUN.store(runs.1.last().map_or(0, |&(_, n)| n), Ordering::SeqCst);
     }
