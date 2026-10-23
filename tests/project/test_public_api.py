@@ -352,6 +352,20 @@ def test_a_patch_adds_only_what_the_exceptions_list_allows(
     assert api.main(["compare", str(new), str(old), "--release-type", "patch"]) == 1
 
 
+def test_a_patch_allowing_a_class_allows_none_of_its_members(api: ModuleType) -> None:
+    """A listed class's members are additions of their own: listing a class
+    is no way to add methods unreviewed."""
+    after = BEFORE + "medh5.Reader\tclass\t(path) bases=\n"
+    after += "medh5.Reader.read\tmethod\t()\n"
+    assert api.compare(BEFORE, after, "patch")[0] == 1
+    status, report = api.compare(BEFORE, after, "patch", {"medh5.Reader": "D6"})
+    assert status == 1
+    assert "- `medh5.Reader: new class` (D6)" in report
+    assert "- `medh5.Reader.read: new method`\n" in report
+    allowed = {"medh5.Reader": "D6", "medh5.Reader.read": "D6"}
+    assert api.compare(BEFORE, after, "patch", allowed)[0] == 0
+
+
 @pytest.mark.parametrize(
     "line",
     [
@@ -505,9 +519,16 @@ def test_a_patch_adds_only_the_rust_items_the_exceptions_list_allows(
         "medh5::Grid::spacing": "D9",
         "medh5::geometry::Grid::spacing": "D9",
     }
+    # Allowing a module allows the module, not what it holds.
+    status, report = rust_api.compare([(old, new)], "patch", allowed)
+    assert status == 1
+    assert "- `medh5::parallel: new module` (D6)" in report
+    assert "- `medh5::parallel::threads: new function`\n" in report
+    assert "- `medh5::parallel::set_threads: new function`\n" in report
+    allowed |= {"medh5::parallel::threads": "D6", "medh5::parallel::set_threads": "D6"}
     status, report = rust_api.compare([(old, new)], "patch", allowed)
     assert status == 0
-    assert "- `medh5::parallel: new module` (D6)" in report
+    assert "- `medh5::parallel::threads: new function` (D6)" in report
     assert rust_api.compare([(old, new)], "minor")[0] == 0
     assert rust_api.compare([(old, old)], "patch") == (
         0,
@@ -549,7 +570,7 @@ def test_the_rust_files_are_found_where_semver_checks_left_them(
     )
     out = capsys.readouterr().out
     assert "- `medh5::parallel: new module` (D6)" in out
-    assert "2 addition(s), not allowed in a patch" in out
+    assert "4 addition(s), not allowed in a patch" in out
     with pytest.raises(SystemExit, match="0 baseline and 1 local"):
         rust_api.main([*argv, "--baseline", "2.2.0"])
 

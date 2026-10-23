@@ -134,12 +134,39 @@ fn hand_over(python: &str, argv: &[String], err: &mut dyn Write) -> Option<i32> 
         return None;
     }
     let mut command = python_running(python, "from medh5.cli import main; raise SystemExit(main())");
-    if let Err(e) = with_threads(command.args(argv)) {
+    if let Err(e) = with_threads(command.args(without_threads(argv))) {
         let _ = writeln!(err, "medh5: {}", top_level_message(&e));
         return Some(EXIT_ERROR);
     }
     let status = medh5::h5::spawn(&mut command).and_then(|mut child| child.wait()).ok()?;
     Some(status.code().unwrap_or(EXIT_ERROR))
+}
+
+/// `argv` without its `--threads`, which `MEDH5_THREADS` hands over: a 2.x
+/// package older than the option would refuse the command line.  The option
+/// is the token clap took for it --- `--threads N`, `--threads=N`, or an
+/// abbreviation `infer_long_args` resolves --- found as the one whose
+/// removal leaves a command line that parses without it; `argv` as it is
+/// when there is none.
+fn without_threads(argv: &[String]) -> Vec<String> {
+    let parses_without = |args: &[String]| {
+        let argv = std::iter::once("medh5").chain(args.iter().map(String::as_str));
+        app::command().try_get_matches_from(argv).is_ok_and(|m| !m.contains_id("threads"))
+    };
+    let options = argv.iter().take_while(|arg| *arg != "--").enumerate();
+    for (i, arg) in options {
+        let Some(option) = arg.strip_prefix("--") else { continue };
+        let (name, value) = option.split_once('=').map_or((option, None), |(name, value)| (name, Some(value)));
+        if name.is_empty() || !"threads".starts_with(name) {
+            continue;
+        }
+        let end = (i + if value.is_some() { 1 } else { 2 }).min(argv.len());
+        let rest = [&argv[..i], &argv[end..]].concat();
+        if parses_without(&rest) {
+            return rest;
+        }
+    }
+    argv.to_vec()
 }
 
 /// The dataloader benchmark, run by `python`'s `medh5` package as the console
@@ -610,16 +637,17 @@ mod tests {
         let missing = probe("/nonexistent/python3", modules).unwrap_err();
         assert!(missing.starts_with("/nonexistent/python3 could not be run: "), "{missing}");
 
-        // Handed over: the command line as given, this run's thread count,
-        // and its exit code.
-        let argv = ["convert".to_string(), "from-dicom".to_string(), "out.medh5".to_string()];
+        // Handed over: the command line as given, less its `--threads`, which
+        // goes as this run's thread count; and its exit code.
+        let argv: Vec<String> =
+            ["convert", "from-dicom", "--threads", "5", "in", "out.medh5"].map(String::from).to_vec();
         let mut err = Vec::new();
         let threads = medh5::parallel::for_this_run(5).unwrap();
         assert_eq!(hand_over(&current, &argv, &mut err), Some(3));
         drop(threads);
         assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
         let handed = std::fs::read_to_string(dir.path().join("handed")).unwrap();
-        assert_eq!(handed.trim_end(), "5 convert from-dicom out.medh5");
+        assert_eq!(handed.trim_end(), "5 convert from-dicom in out.medh5");
         // Refused: nothing run, and why on stderr.
         std::fs::remove_file(dir.path().join("handed")).unwrap();
         assert_eq!(hand_over(&old, &argv, &mut err), None);
@@ -627,5 +655,30 @@ mod tests {
         assert!(!dir.path().join("handed").exists());
         let why = measure_throughput(&old, "case.medh5", 64, 0, None).unwrap_err();
         assert!(why.ends_with(&refused) && why.contains("pip install 'medh5[torch]'"), "{why}");
+    }
+
+    /// A package older than `--threads` refuses it, so it is not handed
+    /// over, in whichever spelling clap took, at whichever level; a value
+    /// that only looks like it is kept.
+    #[test]
+    fn the_command_line_handed_over_has_no_threads_option() {
+        let args = |line: &str| line.split(' ').map(String::from).collect::<Vec<_>>();
+        let handed = "convert from-dicom in out.medh5";
+        for line in [
+            "--threads 4 convert from-dicom in out.medh5",
+            "--threads=4 convert from-dicom in out.medh5",
+            "convert --thr 4 from-dicom in out.medh5",
+            "convert from-dicom in --threads 4 out.medh5",
+            "convert from-dicom in out.medh5 --t=4",
+            "convert from-dicom in out.medh5",
+        ] {
+            assert_eq!(without_threads(&args(line)), args(handed), "{line}");
+        }
+        for kept in ["convert from-dicom in out.medh5 -- --threads", "convert from-dicom --threads"] {
+            assert_eq!(without_threads(&args(kept)), args(kept), "{kept}");
+        }
+        let clinical = "clinical augment s.medh5 --from-meds meds --meds-subject 1001 --kind LOINC=lab";
+        let given = format!("{clinical} --threads 2");
+        assert_eq!(without_threads(&args(&given)), args(clinical));
     }
 }

@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Container
 from pathlib import Path
 from typing import Any
 
@@ -132,14 +133,17 @@ def items(doc: dict[str, Any]) -> dict[str, str]:
     return found
 
 
-def additions(old: dict[str, str], new: dict[str, str]) -> list[str]:
+def additions(
+    old: dict[str, str], new: dict[str, str], allowed: Container[str] = ()
+) -> list[str]:
     """What `new` adds, each new item once: an added module's or type's
-    members come with it."""
-    fresh = sorted(set(new) - set(old))
+    members come with it, unless `allowed` lists it, when each member must
+    be listed too (allowing a module allows only the module)."""
+    fresh = set(new) - set(old)
     return [
         f"{path}: new {new[path]}"
-        for path in fresh
-        if path.rpartition("::")[0] not in fresh
+        for path in sorted(fresh)
+        if (parent := path.rpartition("::")[0]) not in fresh or parent in allowed
     ]
 
 
@@ -155,7 +159,9 @@ def compare(
     unlisted: list[str] = []
     listed: list[str] = []
     for old_text, new_text in pairs:
-        for line in additions(items(json.loads(old_text)), items(json.loads(new_text))):
+        for line in additions(
+            items(json.loads(old_text)), items(json.loads(new_text)), allowed
+        ):
             path = line.rpartition(": new ")[0]
             if path in allowed:
                 listed.append(f"- `{line}` ({allowed[path]})")

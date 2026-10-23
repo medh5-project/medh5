@@ -44,7 +44,7 @@ import re
 import sys
 import typing
 import warnings
-from collections.abc import Iterator
+from collections.abc import Container, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -364,9 +364,11 @@ def _split_class(detail: str) -> tuple[str, set[str]]:
 
 
 def changes(
-    old: dict[str, Entry], new: dict[str, Entry]
+    old: dict[str, Entry], new: dict[str, Entry], allowed: Container[str] = ()
 ) -> tuple[list[str], list[str]]:
-    """What breaks a caller of `old`, and what `new` adds."""
+    """What breaks a caller of `old`, and what `new` adds: a new class's
+    members come with it, unless `allowed` lists the class, when each member
+    must be listed too."""
     breaks: list[str] = []
     gone: list[str] = []
     for path in sorted(old):
@@ -400,11 +402,11 @@ def changes(
         else:
             reasons = []
         breaks.extend(f"{path}: {reason}" for reason in reasons)
-    fresh = sorted(set(new) - set(old))
+    fresh = set(new) - set(old)
     added = [
         f"{path}: new {new[path].kind}"
-        for path in fresh
-        if path.rpartition(".")[0] not in fresh
+        for path in sorted(fresh)
+        if (parent := path.rpartition(".")[0]) not in fresh or parent in allowed
     ]
     return breaks, added
 
@@ -440,7 +442,7 @@ def compare(
     """The exit status and a Markdown report.  `allowed` is the Python names
     a patch may add, with the decision that allowed each."""
     allowed = allowed or {}
-    breaks, added = changes(parse(old_text), parse(new_text))
+    breaks, added = changes(parse(old_text), parse(new_text), allowed)
     lines = [f"## Python API ({release_type})", ""]
     if breaks:
         verdict = "allowed in a major" if release_type == "major" else "not allowed"
