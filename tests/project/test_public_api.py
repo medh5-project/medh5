@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import importlib.util
+import json
 import sys
 import textwrap
 from pathlib import Path
@@ -324,20 +325,183 @@ def test_a_deprecated_name_leaves_only_in_a_major(api: ModuleType) -> None:
     assert "1 breaking change(s), allowed in a major" in report
 
 
-def test_a_patch_lists_its_additions(
+def test_a_patch_adds_only_what_the_exceptions_list_allows(
     api: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A patch adds no API without saying so: the additions go to the job's
-    summary, where the release's author reads them."""
+    """A patch adds no API without a decision: an addition the list does not
+    name fails, and a listed one goes to the job's summary with its decision,
+    where the release's author reads it."""
     old, new, summary = tmp_path / "old.txt", tmp_path / "new.txt", tmp_path / "s.md"
+    listed, empty = tmp_path / "listed.txt", tmp_path / "empty.txt"
     old.write_text(BEFORE, encoding="utf-8")
     new.write_text(BEFORE + "medh5.extra\tfunction\t()\n", encoding="utf-8")
+    listed.write_text("# a comment\n\npython\tmedh5.extra\tD6\n", encoding="utf-8")
+    empty.write_text("rust\tmedh5::extra\tD6\n", encoding="utf-8")
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
-    assert api.main(["compare", str(old), str(new), "--release-type", "patch"]) == 0
+    compare = ["compare", str(old), str(new), "--release-type"]
+    assert api.main([*compare, "patch", "--exceptions", str(listed)]) == 0
     text = summary.read_text(encoding="utf-8")
     assert "No breaking change." in text
-    assert "- `medh5.extra: new function`" in text
+    assert "- `medh5.extra: new function` (D6)" in text
+    # The list's Rust names are not Python's.
+    assert api.main([*compare, "patch", "--exceptions", str(empty)]) == 1
+    assert "1 addition(s) in a patch release, not allowed" in summary.read_text(encoding="utf-8")
+    assert api.main([*compare, "minor", "--exceptions", str(empty)]) == 0
     assert api.main(["compare", str(new), str(old), "--release-type", "patch"]) == 1
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["python\tmedh5.x", "go\tmedh5.x\tD6", "python\tmedh5.x \tD6", "python\tmedh5.x\tD6\textra"],
+)
+def test_an_exceptions_line_is_kind_name_and_decision(api: ModuleType, line: str) -> None:
+    with pytest.raises(ValueError, match="line 1"):
+        api.exceptions(line + "\n")
+    with pytest.raises(ValueError, match="listed twice"):
+        api.exceptions("python\tmedh5.x\tD6\npython\tmedh5.x\tD7\n")
+
+
+def test_the_exceptions_are_the_thread_setting_and_the_workers_flags(api: ModuleType) -> None:
+    """The list holds the names the maintainer's decisions allow in 2.2.3 and
+    nothing else: the thread setting (D6), and command line flags (D6, D7),
+    each of which the parser has."""
+    from medh5._core import cli_command_tree
+
+    allowed = api.exceptions(api.EXCEPTIONS.read_text(encoding="utf-8"))
+    assert allowed["rust"] == {
+        "medh5::parallel": "D6",
+        "medh5::parallel::set_threads": "D6",
+        "medh5::parallel::threads": "D6",
+    }
+    assert allowed["python"] == {"medh5.set_threads": "D6", "medh5.get_threads": "D6"}
+    snapshot = api.parse((ROOT / "tests" / "project" / "python_api.txt").read_text(encoding="utf-8"))
+    assert set(allowed["python"]) <= set(snapshot)
+    tree = cli_command_tree()
+    for flag, decision in allowed["cli"].items():
+        assert decision in ("D6", "D7"), flag
+        program, *words, option = flag.split(" ")
+        assert program == "medh5" and option.startswith("--"), flag
+        node = tree
+        for word in words:
+            node = node["commands"][word]
+        assert option in node["options"], flag
+
+
+# --- Rust additions ---
+
+
+@pytest.fixture(scope="module")
+def rust_api() -> ModuleType:
+    return _script("rust_api.py")
+
+
+def _rustdoc(extra: bool = False, version: str = "2.2.2") -> dict:
+    """A crate's rustdoc JSON, as much of it as the walk reads: modules, a
+    function, a struct with a field and an inherent method, a trait impl, a
+    private item, a re-export of another crate and one of its own."""
+    def item(name, kind, inner, visibility="public"):
+        return {"name": name, "visibility": visibility, "inner": {kind: inner}}
+
+    index = {
+        "0": item("medh5", "module", {"items": ["1", "2", "5", "6", "7"]}),
+        "1": item("geometry", "module", {"items": ["3", "4"]}),
+        "2": item("hdf5", "use", {"source": "hdf5", "name": "hdf5", "id": "99", "is_glob": False}),
+        "3": item("Grid", "struct", {"kind": {"plain": {"fields": ["8", "9"]}}, "impls": ["10", "11"]}),
+        "4": item("private", "function", {}, visibility="crate"),
+        "5": item("Grid", "use", {"source": "geometry::Grid", "name": "Grid", "id": "3", "is_glob": False}),
+        "6": item(None, "impl", {"items": [], "trait": None}),
+        "7": item("VERSION", "constant", {}),
+        "8": item("shape", "struct_field", {}),
+        "9": item("hidden", "struct_field", {}, visibility="default"),
+        "10": item(None, "impl", {"items": ["12"], "trait": None}),
+        "11": item(None, "impl", {"items": ["13"], "trait": {"path": "Clone"}}),
+        "12": item("ndim", "function", {}),
+        "13": item("clone", "function", {}, visibility="default"),
+    }
+    if extra:
+        index["0"]["inner"]["module"]["items"].append("20")
+        index["20"] = item("parallel", "module", {"items": ["21", "22"]})
+        index["21"] = item("threads", "function", {})
+        index["22"] = item("set_threads", "function", {})
+        index["10"]["inner"]["impl"]["items"].append("23")
+        index["23"] = item("spacing", "function", {})
+    return {"root": "0", "crate_version": version, "index": index}
+
+
+def test_rust_items_are_the_paths_a_caller_names(rust_api: ModuleType) -> None:
+    assert rust_api.items(_rustdoc()) == {
+        "medh5": "module",
+        "medh5::geometry": "module",
+        "medh5::geometry::Grid": "struct",
+        "medh5::geometry::Grid::shape": "struct_field",
+        "medh5::geometry::Grid::ndim": "function",
+        "medh5::hdf5": "use",
+        "medh5::Grid": "struct",
+        "medh5::Grid::shape": "struct_field",
+        "medh5::Grid::ndim": "function",
+        "medh5::VERSION": "constant",
+    }
+
+
+def test_a_patch_adds_only_the_rust_items_the_exceptions_list_allows(
+    rust_api: ModuleType,
+) -> None:
+    old, new = json.dumps(_rustdoc()), json.dumps(_rustdoc(extra=True))
+    status, report = rust_api.compare([(old, new)], "patch")
+    assert status == 1
+    # A new module's items come with it; a method added to a type at both
+    # of its paths is two additions.
+    assert "- `medh5::parallel: new module`" in report
+    assert "medh5::parallel::threads" not in report
+    assert "- `medh5::Grid::spacing: new function`" in report
+    assert "- `medh5::geometry::Grid::spacing: new function`" in report
+    allowed = {
+        "medh5::parallel": "D6",
+        "medh5::Grid::spacing": "D9",
+        "medh5::geometry::Grid::spacing": "D9",
+    }
+    status, report = rust_api.compare([(old, new)], "patch", allowed)
+    assert status == 0
+    assert "- `medh5::parallel: new module` (D6)" in report
+    assert rust_api.compare([(old, new)], "minor")[0] == 0
+    assert rust_api.compare([(old, old)], "patch") == (
+        0,
+        "## Rust API additions (patch)\n\nNo public item added.\n",
+    )
+
+
+def test_the_rust_files_are_found_where_semver_checks_left_them(
+    rust_api: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    checks = tmp_path / "semver-checks"
+    cache = checks / "cache"
+    local = checks / "local-medh5-2_2_2-x86_64-unknown-linux-gnu-abc" / "target" / "doc"
+    cache.mkdir(parents=True)
+    local.mkdir(parents=True)
+    (cache / "medh5-2_2_2-x86_64-unknown-linux-gnu-abc.json").write_text(json.dumps(_rustdoc()))
+    (cache / "medh5-2_2_2-x86_64-unknown-linux-gnu-abc.metadata.json").write_text("{}")
+    (cache / "medh5-2_2_1-x86_64-unknown-linux-gnu-abc.json").write_text(
+        json.dumps(_rustdoc(version="2.2.1"))
+    )
+    (local / "medh5.json").write_text(json.dumps(_rustdoc(extra=True)))
+    (local / "hdf5.json").write_text(json.dumps(_rustdoc()))
+    exceptions = tmp_path / "exceptions.txt"
+    exceptions.write_text("rust\tmedh5::parallel\tD6\n")
+    argv = ["compare", "--semver-checks", str(checks), "--crate", "medh5", "--release-type", "patch"]
+    assert rust_api.main([*argv, "--baseline", "2.2.2", "--exceptions", str(exceptions)]) == 1
+    out = capsys.readouterr().out
+    assert "- `medh5::parallel: new module` (D6)" in out
+    assert "2 addition(s), not allowed in a patch" in out
+    with pytest.raises(SystemExit, match="0 baseline and 1 local"):
+        rust_api.main([*argv, "--baseline", "2.2.0"])
+
+
+def test_ci_checks_rust_additions_after_semver_checks() -> None:
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    job = ci[ci.index("\n  semver:") : ci.index("\n  python-api:")]
+    assert job.index("cargo semver-checks") < job.index("rust_api.py compare")
+    for crate in ("medh5-sys", "medh5", "medh5-cli"):
+        assert f"--crate {crate}" in job
 
 
 # --- the baseline ---

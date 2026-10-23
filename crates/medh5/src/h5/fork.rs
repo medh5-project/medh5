@@ -30,9 +30,14 @@ struct Lock {
     wait: fn(),
 }
 
-/// HDF5's lock, which a thread holds through every HDF5 call, and the files
-/// checked self-contained, which an open takes.
-const LOCKS: [Lock; 2] = [Lock { take: take_hdf5, wait: wait_hdf5 }, Lock { take: take_checked, wait: wait_checked }];
+/// HDF5's lock, which a thread holds through every HDF5 call; the files
+/// checked self-contained, which an open takes; and the parallel sections,
+/// which a call holds while its workers run (`crate::parallel`).
+const LOCKS: [Lock; 3] = [
+    Lock { take: take_hdf5, wait: wait_hdf5 },
+    Lock { take: take_checked, wait: wait_checked },
+    Lock { take: take_sections, wait: wait_sections },
+];
 
 fn take_hdf5() -> Option<Box<dyn Any>> {
     crate::h5sys::LOCK.try_lock().map(|held| Box::new(held) as Box<dyn Any>)
@@ -48,6 +53,18 @@ fn take_checked() -> Option<Box<dyn Any>> {
 
 fn wait_checked() {
     drop(super::ops::checked_files().lock());
+}
+
+/// Exclusively: a call's workers, which the child would not have, may hold
+/// an allocator's lock or C-Blosc2's while it runs.  A call holding the
+/// sections may be waiting for HDF5's lock, so this waits holding nothing;
+/// no call enters a section holding HDF5's lock.
+fn take_sections() -> Option<Box<dyn Any>> {
+    crate::parallel::SECTIONS.try_write().map(|held| Box::new(held) as Box<dyn Any>)
+}
+
+fn wait_sections() {
+    drop(crate::parallel::SECTIONS.write());
 }
 
 /// `lock`, if it is free.  A poisoned lock is taken as it stands, as its
@@ -118,14 +135,19 @@ fn release() {
 /// fork.  Let go with them queued, it could be handed to one --- parking_lot
 /// hands a lock over, now and then, to be fair --- which the child does not
 /// have, and the child's first HDF5 call would wait for it forever.  So they
-/// are taken off the queue first.
+/// are taken off the queue first.  The parallel sections are parking_lot's
+/// too, and its `RwLock` queues threads under two keys: its address, and
+/// the one after it.
 fn release_in_child() {
-    // SAFETY: only the raw lock's address is used, the key parking_lot
-    // queues the lock's waiters under.
-    let key = unsafe { crate::h5sys::LOCK.raw() } as *const _ as usize;
-    // SAFETY: wakes the threads queued under that key, none of which this
-    // process has; the lock they waited for is held, by this thread.
-    unsafe { parking_lot_core::unpark_all(key, parking_lot_core::DEFAULT_UNPARK_TOKEN) };
+    // SAFETY: only the raw locks' addresses are used, the keys parking_lot
+    // queues their waiters under.
+    let hdf5 = unsafe { crate::h5sys::LOCK.raw() } as *const _ as usize;
+    let sections = unsafe { crate::parallel::SECTIONS.raw() } as *const _ as usize;
+    for key in [hdf5, sections, sections + 1] {
+        // SAFETY: wakes the threads queued under that key, none of which
+        // this process has; the lock they waited for is held, by this thread.
+        unsafe { parking_lot_core::unpark_all(key, parking_lot_core::DEFAULT_UNPARK_TOKEN) };
+    }
     release();
 }
 
@@ -158,9 +180,105 @@ mod tests {
         prepare();
         assert!(RELEASED.load(Ordering::SeqCst), "prepare took a lock another thread held");
         holder.join().unwrap();
-        assert_eq!(free_elsewhere(), vec![false, false], "a lock was free between prepare and release");
+        assert_eq!(free_elsewhere(), vec![false; LOCKS.len()], "a lock was free between prepare and release");
         release();
         // Another thread takes each, once whoever else had it lets it go.
         std::thread::spawn(|| LOCKS.iter().for_each(|l| (l.wait)())).join().unwrap();
+    }
+
+    /// A child forked while threads run threaded calls, waiting for the
+    /// parallel sections the fork holds and queued for them, runs a threaded
+    /// call to the end, in every one of forty forks.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_forked_while_calls_use_threads_runs_one_to_the_end() {
+        let _serial = crate::parallel::tests::serial();
+        install();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let busy: Vec<_> = (0..2)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::SeqCst) {
+                        crate::parallel::ordered(2, 0..4, |i| i, |_| Ok::<_, ()>(())).unwrap();
+                    }
+                })
+            })
+            .collect();
+        let mut hung = 0;
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            // SAFETY: the child runs a threaded call, which makes no HDF5
+            // call, and exits.
+            let pid = unsafe { libc::fork() };
+            if pid == 0 {
+                // SAFETY: an alarm ends a child that waits forever.
+                unsafe { libc::alarm(5) };
+                let sum = std::sync::atomic::AtomicUsize::new(0);
+                let ran = crate::parallel::ordered(
+                    2,
+                    0..8usize,
+                    |i| i,
+                    |i| {
+                        sum.fetch_add(i, Ordering::SeqCst);
+                        Ok::<_, ()>(())
+                    },
+                );
+                let code = if ran.is_ok() && sum.load(Ordering::SeqCst) == 28 { 0 } else { 1 };
+                unsafe { libc::_exit(code) };
+            }
+            let mut status = 0;
+            // SAFETY: waits for the child just forked.
+            assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+            hung += usize::from(status != 0);
+        }
+        stop.store(true, Ordering::SeqCst);
+        busy.into_iter().for_each(|t| t.join().unwrap());
+        assert_eq!(hung, 0, "a child could not run a threaded call");
+    }
+
+    /// A fork made while a call holds the parallel sections and waits for
+    /// HDF5's lock waits for the call to end: every result was sunk first.
+    #[cfg(unix)]
+    #[test]
+    fn a_fork_waits_for_a_calls_workers() {
+        use std::sync::atomic::AtomicUsize;
+        static SUNK: AtomicUsize = AtomicUsize::new(0);
+        let _serial = crate::parallel::tests::serial();
+        install();
+        let hdf5 = crate::h5sys::LOCK.lock();
+        let call = std::thread::spawn(|| {
+            crate::parallel::ordered(
+                2,
+                0..4,
+                |i| i,
+                |_| {
+                    crate::h5::locked(|| ());
+                    SUNK.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, ()>(())
+                },
+            )
+            .unwrap();
+        });
+        // The call is in its section, its sink waiting for HDF5's lock.
+        while crate::parallel::SECTIONS.try_write().is_some() {
+            std::thread::yield_now();
+        }
+        let fork = std::thread::spawn(|| {
+            // SAFETY: the child exits at once.
+            let pid = unsafe { libc::fork() };
+            if pid == 0 {
+                unsafe { libc::_exit(0) };
+            }
+            let sunk = SUNK.load(Ordering::SeqCst);
+            let mut status = 0;
+            // SAFETY: waits for the child just forked.
+            assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+            (sunk, status)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(hdf5);
+        call.join().unwrap();
+        assert_eq!(fork.join().unwrap(), (4, 0), "the fork did not wait for the call");
     }
 }

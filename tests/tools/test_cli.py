@@ -3358,6 +3358,26 @@ class TestWorkers:
         ]
         assert err.strip().endswith("c.medh5: stopped here, as MEDH5_TEST_WORKERS asks")
 
+    def test_a_worker_is_given_the_runs_thread_count(
+        self, capsys, tmp_path, batch, monkeypatch
+    ):
+        """``--threads`` reaches the worker processes, which the console
+        script starts as Python, over the parent's ``MEDH5_THREADS``."""
+        monkeypatch.setenv("MEDH5_THREADS", "7")
+        monkeypatch.setenv("MEDH5_TEST_WORKERS", "threads:b.medh5")
+        paths = self.fresh(tmp_path, batch, ["a.medh5", "b.medh5", "c.medh5"])
+        for argv in (
+            ["--threads", "4", "verify", *paths, "--workers", "2"],
+            ["verify", *paths, "--workers", "2", "--threads", "4"],
+            ["verify", *paths, "--threads", "4"],
+        ):
+            code, printed = run(capsys, *argv)
+            assert code == EXIT_ERROR, argv
+            assert "b.medh5: 4 threads, as MEDH5_TEST_WORKERS asks" in printed.err
+        before = medh5.get_threads()
+        assert run(capsys, "--threads", "3", "conformance", "list")[0] == EXIT_OK
+        assert medh5.get_threads() == before, "--threads outlived its run"
+
     def test_zero_workers_is_one_process(self, capsys, tmp_path, batch):
         paths = self.fresh(tmp_path, batch, ["a.medh5", "b.medh5"])
         assert run(capsys, "verify", *paths, "--workers", "0") == run(

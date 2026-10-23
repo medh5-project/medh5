@@ -46,7 +46,9 @@ flate2 = { version = "1.1", default-features = false, features = ["rust_backend"
 unicode-normalization = "0.1"
 libc = "0.2"
 # HDF5's lock is parking_lot's: a forked child takes the parent's threads off
-# its queue (`medh5::h5::fork`).
+# its queue (`medh5::h5::fork`).  So is the lock a fork takes for the calls
+# whose workers run (`medh5::parallel`), for the same reason.
+parking_lot = "0.12"
 parking_lot_core = "0.9"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 clap = { version = "4.5", features = ["string", "wrap_help"] }

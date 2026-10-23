@@ -25,8 +25,9 @@ caller of OLD: a removed name or member, a change of kind (except to
 `deprecated`), a positional parameter renamed or moved, a keyword, `*args` or
 `**kwargs` removed, a default removed, a new required parameter, a constant's
 type or a class's base changed. It fails on any of them unless TYPE is `major`;
-under `patch` it also lists the additions. Standard library only: CI runs it in
-a virtual environment holding nothing but a released wheel.
+under `patch` it also fails an addition that `.github/api-exceptions.txt` does
+not list, and lists the ones it does. Standard library only: CI runs it in a
+virtual environment holding nothing but a released wheel.
 """
 
 from __future__ import annotations
@@ -51,6 +52,8 @@ ROOT = Path(__file__).resolve().parents[2]
 SNAPSHOT = ROOT / "tests" / "project" / "python_api.txt"
 PACKAGE = "medh5"
 RELEASE_TYPES = ("major", "minor", "patch")
+EXCEPTIONS = ROOT / ".github" / "api-exceptions.txt"
+EXCEPTION_KINDS = ("rust", "python", "cli")
 
 UNKNOWN = "(?)"
 """A signature `inspect` cannot read (a PyO3 exception type)."""
@@ -406,8 +409,34 @@ def changes(
     return breaks, added
 
 
-def compare(old_text: str, new_text: str, release_type: str) -> tuple[int, str]:
-    """The exit status and a Markdown report."""
+def exceptions(text: str) -> dict[str, dict[str, str]]:
+    """`.github/api-exceptions.txt`: for each kind, each name a patch may add
+    and the decision that allowed it."""
+    allowed: dict[str, dict[str, str]] = {kind: {} for kind in EXCEPTION_KINDS}
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) != 3 or not all(f.strip() == f and f for f in fields):
+            raise ValueError(f"line {number}: not KIND<TAB>NAME<TAB>DECISION: {line!r}")
+        kind, name, decision = fields
+        if kind not in allowed:
+            raise ValueError(f"line {number}: kind {kind!r} is not one of {', '.join(EXCEPTION_KINDS)}")
+        if name in allowed[kind]:
+            raise ValueError(f"line {number}: {name} is listed twice")
+        allowed[kind][name] = decision
+    return allowed
+
+
+def compare(
+    old_text: str,
+    new_text: str,
+    release_type: str,
+    allowed: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """The exit status and a Markdown report.  `allowed` is the Python names
+    a patch may add, with the decision that allowed each."""
+    allowed = allowed or {}
     breaks, added = changes(parse(old_text), parse(new_text))
     lines = [f"## Python API ({release_type})", ""]
     if breaks:
@@ -416,10 +445,22 @@ def compare(old_text: str, new_text: str, release_type: str) -> tuple[int, str]:
         lines += [f"- `{line}`" for line in breaks]
     else:
         lines.append("No breaking change.")
+    unlisted: list[str] = []
     if added and release_type == "patch":
-        lines += ["", f"{len(added)} addition(s) in a patch release:", ""]
-        lines += [f"- `{line}`" for line in added]
-    status = 1 if breaks and release_type != "major" else 0
+        listed = [line for line in added if line.partition(":")[0] in allowed]
+        unlisted = [line for line in added if line.partition(":")[0] not in allowed]
+        if listed:
+            lines += ["", f"{len(listed)} addition(s) in a patch release, each excepted:", ""]
+            lines += [f"- `{line}` ({allowed[line.partition(':')[0]]})" for line in listed]
+        if unlisted:
+            lines += [
+                "",
+                f"{len(unlisted)} addition(s) in a patch release, not allowed"
+                f" ({EXCEPTIONS.relative_to(ROOT).as_posix()} does not list them):",
+                "",
+            ]
+            lines += [f"- `{line}`" for line in unlisted]
+    status = 1 if (breaks and release_type != "major") or unlisted else 0
     return status, "\n".join(lines) + "\n"
 
 
@@ -433,6 +474,12 @@ def main(argv: list[str] | None = None) -> int:
     command.add_argument("old", type=Path)
     command.add_argument("new", type=Path)
     command.add_argument("--release-type", choices=RELEASE_TYPES, required=True)
+    command.add_argument(
+        "--exceptions",
+        type=Path,
+        default=EXCEPTIONS,
+        help="the additions a patch may make (default: %(default)s)",
+    )
     args = parser.parse_args(argv)
 
     if args.command == "dump":
@@ -450,6 +497,7 @@ def main(argv: list[str] | None = None) -> int:
         args.old.read_text(encoding="utf-8"),
         args.new.read_text(encoding="utf-8"),
         args.release_type,
+        exceptions(args.exceptions.read_text(encoding="utf-8"))["python"],
     )
     sys.stdout.write(report)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")

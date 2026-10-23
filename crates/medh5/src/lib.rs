@@ -25,6 +25,7 @@ pub mod integrity;
 pub mod json;
 pub mod labels;
 pub mod numeric;
+pub mod parallel;
 pub mod pyval;
 pub mod rng;
 pub mod sample;

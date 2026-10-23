@@ -135,7 +135,8 @@ pub fn run_files(words: &str, m: &ArgMatches, ctx: &mut Ctx, paths: &[String]) -
     if wanted > 1 && paths.len() > 1 {
         match ctx.host.worker_command() {
             Some(program) => {
-                let mut pool = Pool::start(&program, words, m, wanted.min(paths.len()));
+                let threads = medh5::parallel::threads()?;
+                let mut pool = Pool::start(&program, words, m, wanted.min(paths.len()), threads);
                 if let Some(why) = pool.failed_to_start.take().filter(|_| pool.workers.is_empty()) {
                     ctx.eprint(format!("medh5: cannot start workers ({why}); running in one process"));
                 }
@@ -169,14 +170,19 @@ fn run_one(one: One, path: &str, m: &ArgMatches) -> medh5::Result<FileOutcome> {
     if test_hook("error", path) {
         return Err(Error::Runtime(format!("{path}: stopped here, as MEDH5_TEST_WORKERS asks")));
     }
+    if test_hook("threads", path) {
+        let threads = medh5::parallel::threads()?;
+        return Err(Error::Runtime(format!("{path}: {threads} threads, as MEDH5_TEST_WORKERS asks")));
+    }
     one(path, m)
 }
 
 /// For the test suite only: `MEDH5_TEST_WORKERS=exit:NAME` makes a worker
 /// end as a crash would, without an answer, when it is handed the file
 /// named `NAME`; `error:NAME` makes that file's command raise an error that
-/// stops the run, in a worker and in one process alike.  Nothing else can
-/// be made to do either on demand.
+/// stops the run, in a worker and in one process alike; `threads:NAME` makes
+/// it an error that says the thread count the process was given.  Nothing
+/// else can be made to do any of these on demand.
 fn test_hook(what: &str, path: &str) -> bool {
     let Some(hook) = std::env::var_os("MEDH5_TEST_WORKERS") else { return false };
     let hook = hook.to_string_lossy();
@@ -370,7 +376,9 @@ struct Pool {
 }
 
 impl Pool {
-    fn start(program: &[OsString], words: &str, m: &ArgMatches, count: usize) -> Pool {
+    /// `count` workers, each told this run's thread count (`MEDH5_THREADS`):
+    /// `worker_args` carry only the command's own words.
+    fn start(program: &[OsString], words: &str, m: &ArgMatches, count: usize, threads: usize) -> Pool {
         let (tell, said) = mpsc::channel();
         let mut workers = Vec::new();
         let mut failed_to_start = None;
@@ -378,7 +386,7 @@ impl Pool {
         for _ in 0..count {
             let Some((exe, rest)) = program.split_first() else { break };
             let mut command = Command::new(exe);
-            command.args(rest).arg("__worker").args(&args);
+            command.args(rest).arg("__worker").args(&args).env("MEDH5_THREADS", threads.to_string());
             command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
             let mut child = match medh5::h5::spawn(&mut command) {
                 Ok(child) => child,

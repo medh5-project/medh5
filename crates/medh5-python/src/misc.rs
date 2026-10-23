@@ -52,7 +52,33 @@ fn read_stats(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     Ok(out)
 }
 
+/// Let one call use up to ``n`` threads for its work outside HDF5, from now
+/// on and in every thread of this process; ``0`` is refused.
+///
+/// The default is 1, which runs every call on its caller's thread and starts
+/// none.  It is set over ``MEDH5_THREADS``, and the command line's
+/// ``--threads`` is set over it for the one command.
+#[pyfunction]
+fn set_threads(n: i64) -> R<()> {
+    if n < 1 {
+        return Err(medh5::Error::Value(format!("the thread count must be at least 1, not {n}")).into());
+    }
+    Ok(medh5::parallel::set_threads(n as usize)?)
+}
+
+/// How many threads one call may use for its work outside HDF5: what
+/// :func:`set_threads` set, else ``MEDH5_THREADS``, else 1.
+///
+/// ``MEDH5_THREADS`` is read once, the first time it is needed; a value that
+/// is not a positive integer raises ``ValueError``, naming it.
+#[pyfunction]
+fn get_threads() -> R<usize> {
+    Ok(medh5::parallel::threads()?)
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(set_threads, m)?)?;
+    m.add_function(wrap_pyfunction!(get_threads, m)?)?;
     m.add_function(wrap_pyfunction!(validate_sample_key, m)?)?;
     m.add_function(wrap_pyfunction!(check_value_type, m)?)?;
     m.add_function(wrap_pyfunction!(lossless_as_int16, m)?)?;

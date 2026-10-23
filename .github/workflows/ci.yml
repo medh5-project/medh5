@@ -974,6 +974,17 @@ jobs:
           --release-type "${{ steps.base.outputs.release_type }}"
         env:
           CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+      # cargo-semver-checks has no lint for an added item, so a patch that
+      # adds a public name passed it.  This reads the rustdoc JSON it left
+      # and fails, under `patch`, an addition .github/api-exceptions.txt does
+      # not list.
+      - name: Rust additions
+        run: >
+          python .github/scripts/rust_api.py compare
+          --semver-checks target/semver-checks
+          --baseline "${{ steps.base.outputs.version }}"
+          --crate medh5-sys --crate medh5 --crate medh5-cli
+          --release-type "${{ steps.base.outputs.release_type }}"
 
   python-api:
     # The Python package's public API against the newest release at or below
