@@ -24,7 +24,7 @@ exception to what a patch may change ([D6](#decisions-the-maintainer)).
     API and a command-line flag, which a patch otherwise never adds. The
     maintainer allowed it once, because it is a small change
     ([D6](#decisions-the-maintainer)). It covers exactly the names P22-11
-    lists, `--threads` on the commands P22-12 and P22-13 make use it, and
+    lists, one `--threads` option for every command, and
     `--workers` on the commands P22-14 measures faster with it
     ([D7](#decisions-the-maintainer)). Nothing else in 2.2.3 adds API or a
     flag.
@@ -160,19 +160,31 @@ It is the API the exception allows ([D6](#decisions-the-maintainer)).
 - **Change.** Settles [D3 and D4](#decisions-the-maintainer).
   - **The setting.** How many threads one call may use for its work outside
     HDF5. The default is 1, which runs today's code and starts no thread.
-    - Rust: `medh5::parallel::set_threads(n)` and `medh5::parallel::threads()`.
-      No options type gains a field: a call reads the setting.
+    - Rust: a new module, `medh5::parallel`, holding `set_threads(n)` and
+      `threads()`: three public items, the module included, and nothing
+      else in it is public. No options type gains a field: a call reads the
+      setting.
     - Python: `medh5.set_threads(n)` and `medh5.get_threads()`.
     - The environment: `MEDH5_THREADS`, read once, at the first call that
       asks. A value that is not a positive integer is refused with an error
       naming the variable, never guessed.
-    - The command line: `--threads N` on each command that uses it, added by
-      the item that makes the command use it. `--workers` keeps its meaning
-      (processes, across files).
-    - Precedence: a command's flag, then `set_threads`, then the
+    - The command line: one global option, `--threads N`, taken before or
+      after the command name and added by P22-11 for every command at once.
+      A threaded path is reached from more commands than its own (a
+      writer's `commit` from `resample`, `scrub`, `fix`, `migrate`,
+      `clinical augment` and `strip`, `dataset split --write-claims`,
+      `seg convert`, `index build`, the NIfTI import), so a flag per command
+      would leave some without one; a command with no threaded path runs as
+      before. A command the line hands to Python through `Host` gets the
+      count as `MEDH5_THREADS`. `--workers` keeps its meaning (processes,
+      across files).
+    - Precedence: `--threads`, then `set_threads`, then the
       environment, then 1. `0` is refused: there is no "auto".
   - **These names, and P22-14's flags, are the whole exception.** P22-11
-    lists them in `.github/api-exceptions.txt` with D6, and makes both API
+    lists each public item they add, as the API checks see items (the
+    module `medh5::parallel` and its two functions; `medh5.set_threads` and
+    `medh5.get_threads`), in `.github/api-exceptions.txt` with D6, and makes
+    both API
     jobs read that list (see [The API gates](#medh5-223-parallelism)).
     P22-14 adds its flags with D7. A test holds the list to these names.
   - **Threads live inside one call.** Each call that uses threads starts them
@@ -208,14 +220,16 @@ It is the API the exception allows ([D6](#decisions-the-maintainer)).
   starts no thread (a Rust test counts them) and takes no hold; the fork
   barrier waits for a call's workers (a Rust test forks while a call that
   holds the parallel sections waits on HDF5's lock); `worker_init_fn` resets
-  it;
+  it; `--threads` parses on every command of `command_tree()`, before and
+  after the command name, and reaches the setting, and a command run in
+  Python through `Host` sees it as `MEDH5_THREADS`;
   `public_api.py compare` under `patch` passes a listed addition and fails an
   unlisted one.
 - **Documentation.** `docs/explanation/concurrency.md` gains "Threads inside
   one call": what the setting covers, why loaders keep one, and `--threads`
   beside `--workers`.
-- **Changelog.** Added, area `python-api` (and `cli` for the flags, in the
-  items that add them). The entry says the setting is new in a patch by the
+- **Changelog.** Added, areas `python-api` and `cli`. The entry says the
+  setting is new in a patch by the
   maintainer's decision.
 - **Done when.** The setting exists, is documented, and no path uses it yet.
 
@@ -297,7 +311,7 @@ It is the API the exception allows ([D6](#decisions-the-maintainer)).
     - `convert from-nifti`: decode a slab of whole chunks, compress on
       workers;
     - an amendment's rewritten datasets (a scrub's, a re-encoded annotation).
-  - Each command that uses it gains `--threads N` (D6).
+  - These commands take P22-11's `--threads`; no flag is added here.
 - **Tests.**
   - For each profile and each user, at 1 and 4 threads: the same
     `content_id`, every chunk's stored bytes and filter mask the same
@@ -316,7 +330,7 @@ It is the API the exception allows ([D6](#decisions-the-maintainer)).
     threaded digest, waits until the call's workers have joined, and leaves
     a child that opens, reads and writes files; on the free-threaded build
     too.
-- **Changelog.** Added (`--threads`), area `cli`; Performance, area `writer`.
+- **Changelog.** Performance, area `writer`.
 - **Done when.**
   - P22-10's rows for these commands are measured again at 1, 2 and 4
     threads, before and after, on one machine.
@@ -400,8 +414,8 @@ It is the API the exception allows ([D6](#decisions-the-maintainer)).
       wrote; every written path is hashed after its last write, from the
       output, as today.
   - Users: `commit`, `verify`, `validate --level integrity`,
-    `refuse_failed_digests` and `recompress`'s output check. `verify` and
-    `validate` gain `--threads N` (D6).
+    `refuse_failed_digests` and `recompress`'s output check. Every command
+    that reaches them takes P22-11's `--threads`; no flag is added here.
 - **Tests.**
   - The same digests at 1 and 4 threads, for every dtype, strings, compound
     types, and datasets whose slabs fall on and across chunk edges.
@@ -413,6 +427,12 @@ It is the API the exception allows ([D6](#decisions-the-maintainer)).
     (`scrub` on a corrupted string dataset), refused with E701 at 1 and 4
     threads, as today; and E703 for an unparsable stored digest.
   - `verify`'s report the same, line for line, at 1 and 4 threads.
+  - Every command that commits a sample gives the same `content_id` at
+    `--threads 1` and `--threads 4`: `resample`, `scrub`, `fix`, `migrate`,
+    `clinical augment` and `strip`, `dataset split --write-claims`,
+    `seg convert`, `index build` and `convert from-nifti`. The list is the
+    `commit(true)` callers outside tests at 0e5e61c; the pull request
+    checks it against the code, and the code wins.
   - `validate --level integrity`'s findings the same, in the same order, at
     1 and 4 threads, on samples with probability maps that fail E404 and
     E411, digested and undigested.
@@ -586,7 +606,8 @@ maintainer answers it, and the plan is updated with the answer.
   "auto"; threads started and joined inside each call, with no persistent
   pool and no new dependency; only the calling thread calls HDF5; loaders'
   workers reset to one.
-- **D4 Names.** Proposed: `--threads N` for threads inside one call,
+- **D4 Names.** Proposed: `--threads N`, one global option, for threads
+  inside one call,
   `--workers N` for processes across files. `dataset stats --workers` keeps
   its meaning (threads) and is documented as the exception, as now.
 - **D6 A patch, not a minor.** Settled by the maintainer on 2026-10-22, and
