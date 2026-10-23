@@ -180,7 +180,7 @@ every process it starts. It sits beside `--workers`: `--workers M` runs files in
 eight threads busy. A command whose work has no threaded path runs as it did.
 
 ```bash
-medh5 --threads 4 resample case.medh5 --image CT --spacing 1,1,1 --grid-id iso -o iso.medh5
+medh5 resample case.medh5 --image CT --spacing 1,1,1 --grid-id iso -o iso.medh5 --threads 4
 medh5 verify --workers 2 --threads 2 case.medh5 case2.medh5
 ```
 

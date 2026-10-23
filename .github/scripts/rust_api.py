@@ -1,6 +1,7 @@
 """The public Rust items a pull request adds, against the release before it.
 
-    python .github/scripts/rust_api.py compare OLD.json NEW.json [...] --release-type TYPE
+    python .github/scripts/rust_api.py compare OLD.json NEW.json [...] \
+        --release-type TYPE
     python .github/scripts/rust_api.py compare --semver-checks target/semver-checks \
         --baseline VERSION --crate medh5 [--crate ...] --release-type TYPE
 
@@ -29,7 +30,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from public_api import EXCEPTIONS, RELEASE_TYPES, ROOT, exceptions  # noqa: E402
+from public_api import EXCEPTIONS, RELEASE_TYPES, ROOT, exceptions
 
 MEMBERS = ("struct", "enum", "union", "trait")
 
@@ -83,7 +84,9 @@ def items(doc: dict[str, Any]) -> dict[str, str]:
         elif kind in MEMBERS:
             members(item, kind, inner, here)
 
-    def members(item: dict[str, Any], kind: str, inner: dict[str, Any], here: list[str]) -> None:
+    def members(
+        item: dict[str, Any], kind: str, inner: dict[str, Any], here: list[str]
+    ) -> None:
         children: list[Any] = []
         if kind == "struct":
             shape = inner.get("kind")
@@ -135,7 +138,9 @@ def additions(old: dict[str, str], new: dict[str, str]) -> list[str]:
 
 
 def compare(
-    pairs: list[tuple[str, str]], release_type: str, allowed: dict[str, str] | None = None
+    pairs: list[tuple[str, str]],
+    release_type: str,
+    allowed: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     """The exit status and a Markdown report, for each crate's (old, new)
     rustdoc JSON text."""
@@ -156,7 +161,8 @@ def compare(
         lines += [f"{len(listed)} addition(s), each excepted:", "", *listed, ""]
     if unlisted:
         verdict = (
-            f"not allowed in a patch ({EXCEPTIONS.relative_to(ROOT).as_posix()} does not list them)"
+            f"not allowed in a patch"
+            f" ({EXCEPTIONS.relative_to(ROOT).as_posix()} does not list them)"
             if release_type == "patch"
             else "allowed"
         )
@@ -176,7 +182,9 @@ def locate(directory: Path, crate: str, baseline: str) -> tuple[Path, Path]:
     for path in sorted(directory.rglob("*.json")):
         if path.name.endswith(".metadata.json"):
             continue
-        local = any(part.startswith("local-") for part in path.relative_to(directory).parts)
+        local = any(
+            part.startswith("local-") for part in path.relative_to(directory).parts
+        )
         if local and path.name != f"{name}.json":
             continue
         try:
@@ -192,8 +200,8 @@ def locate(directory: Path, crate: str, baseline: str) -> tuple[Path, Path]:
             old.append(path)
     if len(old) != 1 or len(new) != 1:
         raise SystemExit(
-            f"rust_api.py: {len(old)} baseline and {len(new)} local rustdoc JSON files of"
-            f" {crate} {baseline} under {directory}, not one of each"
+            f"rust_api.py: {len(old)} baseline and {len(new)} local rustdoc JSON"
+            f" files of {crate} {baseline} under {directory}, not one of each"
         )
     return old[0], new[0]
 
@@ -201,7 +209,9 @@ def locate(directory: Path, crate: str, baseline: str) -> tuple[Path, Path]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
-    command = commands.add_parser("compare", help="fail on an addition a patch may not make")
+    command = commands.add_parser(
+        "compare", help="fail on an addition a patch may not make"
+    )
     command.add_argument(
         "pairs",
         nargs="*",
@@ -216,7 +226,9 @@ def main(argv: list[str] | None = None) -> int:
         help="find the files where cargo semver-checks left them",
     )
     command.add_argument("--baseline", metavar="VERSION", help="with --semver-checks")
-    command.add_argument("--crate", action="append", default=[], help="with --semver-checks")
+    command.add_argument(
+        "--crate", action="append", default=[], help="with --semver-checks"
+    )
     command.add_argument("--release-type", choices=RELEASE_TYPES, required=True)
     command.add_argument("--exceptions", type=Path, default=EXCEPTIONS)
     args = parser.parse_args(argv)
@@ -230,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("give each crate's two files: OLD NEW [OLD NEW ...]")
     texts = [p.read_text(encoding="utf-8") for p in paths]
     status, report = compare(
-        list(zip(texts[::2], texts[1::2])),
+        list(zip(texts[::2], texts[1::2], strict=True)),
         args.release_type,
         exceptions(args.exceptions.read_text(encoding="utf-8"))["rust"],
     )

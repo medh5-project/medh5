@@ -76,6 +76,7 @@ fn main() -> medh5::Result<()> {
 | [`bench`] | reproducing the performance targets |
 | [`rng`] | the generator behind sampling, the same stream in every frontend |
 | [`error`] | the one [`Error`] type, and the code each error carries |
+| [`parallel`] | how many threads one call may use for its work outside HDF5: `set_threads`, `threads` (`MEDH5_THREADS`, else 1) |
 | [`conformance`] | the conformance corpus third-party implementations run |
 | [`version`] | 1.1 §2 — which versions are read fully, read as a projection, or refused |
 | [`clinical`] | 1.1 §3–§10 — the clinical profile: records, columns, checks, selection, augmentation |
@@ -126,4 +127,5 @@ code the validator reports for the same defect (§15.2, [1.1] §11.2).
 [`dataset`]: https://docs.rs/medh5/latest/medh5/dataset/
 [`sampling`]: https://docs.rs/medh5/latest/medh5/sampling/
 [`conformance`]: https://docs.rs/medh5/latest/medh5/conformance/
+[`parallel`]: https://docs.rs/medh5/latest/medh5/parallel/
 [`Error`]: https://docs.rs/medh5/latest/medh5/enum.Error.html

@@ -421,7 +421,10 @@ def exceptions(text: str) -> dict[str, dict[str, str]]:
             raise ValueError(f"line {number}: not KIND<TAB>NAME<TAB>DECISION: {line!r}")
         kind, name, decision = fields
         if kind not in allowed:
-            raise ValueError(f"line {number}: kind {kind!r} is not one of {', '.join(EXCEPTION_KINDS)}")
+            raise ValueError(
+                f"line {number}: kind {kind!r} is not one of"
+                f" {', '.join(EXCEPTION_KINDS)}"
+            )
         if name in allowed[kind]:
             raise ValueError(f"line {number}: {name} is listed twice")
         allowed[kind][name] = decision
@@ -450,8 +453,14 @@ def compare(
         listed = [line for line in added if line.partition(":")[0] in allowed]
         unlisted = [line for line in added if line.partition(":")[0] not in allowed]
         if listed:
-            lines += ["", f"{len(listed)} addition(s) in a patch release, each excepted:", ""]
-            lines += [f"- `{line}` ({allowed[line.partition(':')[0]]})" for line in listed]
+            lines += [
+                "",
+                f"{len(listed)} addition(s) in a patch release, each excepted:",
+                "",
+            ]
+            lines += [
+                f"- `{line}` ({allowed[line.partition(':')[0]]})" for line in listed
+            ]
         if unlisted:
             lines += [
                 "",

@@ -3002,6 +3002,7 @@ medh5.geometry.read_grids	function	(root)
 medh5.geometry.slices_to_box	function	(slices)
 medh5.geometry.voxel_volume	function	(spacing)
 medh5.geometry.world_to_index	function	(affine, points)
+medh5.get_threads	function	()
 medh5.grid_patches	function	(shape, patch_size, *, overlap=0, grid_id=None)
 medh5.image	module
 medh5.image.Image	class	(handle) bases=
@@ -3723,6 +3724,7 @@ medh5.sampling.coerce_patch_size	function	(patch_size, ndim)
 medh5.sampling.grid_patches	function	(shape, patch_size, *, overlap=0, grid_id=None)
 medh5.sampling.iter_patches	function	(sample, sampler, *, annotation=None, n=1, rng=None, grid=None)
 medh5.sampling.window_around	function	(center, patch, shape)
+medh5.set_threads	function	(n)
 medh5.storage	module
 medh5.storage.BLOSC2_FILTER_ID	constant	int
 medh5.storage.BLOSC_FILTER_ID	constant	int
