@@ -1,9 +1,9 @@
-# medh5 2.2.3 and 2.2.4: parallelism
+# medh5 2.2.3: parallelism
 
-Two patch releases about parallelism: threads for the work inside one file
+One patch release about parallelism: threads for the work inside one file
 that runs outside HDF5's lock, processes for the work across files, and the
 cost of digests at commit, and nothing else ([D2](#decisions-the-maintainer)).
-2.2.3 measures; 2.2.4 adds one thread setting and the paths that use it,
+It measures first, then adds one thread setting and the paths that use it,
 and `--workers` on more batch commands. Read
 [plans/README.md](../README.md) and the [2.2.x plan](README.md) first. Their
 rules hold here, with `p22/` branches and `P22-` titles, and with one
@@ -18,16 +18,16 @@ exception to what a patch may change ([D6](#decisions-the-maintainer)).
   - The 2.2.x measurements: #92's tables (P22-06), and lane B's phase timings
     of the 512³ resample, summarised in
     [The numbers](#the-numbers-this-plan-starts-from).
-- **What these patches may change.** The [2.2.x rules](README.md), with one
+- **What this patch may change.** The [2.2.x rules](README.md), with one
   exception:
-  - **The exception (2.2.4 only).** The thread setting of P22-11 is public
+  - **The exception (2.2.3 only).** The thread setting of P22-11 is public
     API and a command-line flag, which a patch otherwise never adds. The
     maintainer allowed it once, because it is a small change
     ([D6](#decisions-the-maintainer)). It covers exactly the names P22-11
     lists, `--threads` on the commands P22-12 and P22-13 make use it, and
     `--workers` on the commands P22-14 measures faster with it
-    ([D7](#decisions-the-maintainer)). Nothing else in 2.2.3 or 2.2.4 adds
-    API or a flag.
+    ([D7](#decisions-the-maintainer)). Nothing else in 2.2.3 adds API or a
+    flag.
   - The format stays 1.2, and the diagnostic code table keeps its codes.
   - **No thread count changes an output.** Every path this plan parallelises
     writes the same `content_id`, the same stored chunk bytes and the same
@@ -50,9 +50,9 @@ exception to what a patch may change ([D6](#decisions-the-maintainer)).
     P22-12 adds is declared in a private `extern` block inside `medh5`
     (the symbol links in with `medh5-sys`'s static library). The list holds
     P22-11's names, P22-14's `--workers` flags (D7), and nothing else.
-  - The list stays through 2.2.4's release pull request, whose gate still
-    compares against the published 2.2.3, and is emptied by the first pull
-    request after v2.2.4 is published, when those names are the baseline.
+  - The list stays through 2.2.3's release pull request, whose gate still
+    compares against the published 2.2.2, and is emptied by the first pull
+    request after v2.2.3 is published, when those names are the baseline.
 
 ## The numbers this plan starts from
 
@@ -78,16 +78,16 @@ exception to what a patch may change ([D6](#decisions-the-maintainer)).
     12.2 s, **digests 11.7 s**, carrying the label map 7.7 s, writing 4.9 s.
   - Of the digest time, 576 MiB is the source's untouched images, which the
     commit hashes again
-    ([P22-13](#p22-13-digests-in-parallel-outside-the-lock-224)).
+    ([P22-13](#p22-13-digests-in-parallel-outside-the-lock)).
   - The machine (a 4-vCPU Linux VM) has no SHA instructions. Apple Silicon
     and recent x86_64 have them, so digests cost much less there.
 
 ## How this plan answers what came before
 
-| Before | So in 2.2.3 and 2.2.4 |
+| Before | So in 2.2.3 |
 |---|---|
 | 2.2.x left threads out: a thread pool is a new behaviour and needs a setting (P22-09). | The maintainer allowed the setting in a patch, once (D6). It defaults to one thread, today's code path. |
-| 2.1.0 added a preflight thread pool and it ran slower. Nothing was measured before it was built. | P22-10 measures how much of each command runs outside HDF5's lock before any thread code is written, ships alone in 2.2.3, and drops an item that cannot pay. |
+| 2.1.0 added a preflight thread pool and it ran slower. Nothing was measured before it was built. | P22-10 measures how much of each command runs outside HDF5's lock before any thread code is written, merges first, and drops an item that cannot pay. |
 | P22-06's table set the work of P22-07 to P22-09, and each of those recorded its numbers (lessons §9). | Every item records 1, 2 and 4 threads before and after, on one machine, in its pull request. |
 | P22-08 and P22-09 changed hot paths with every digest pinned to 2.2.0's. | Every parallel path is tested for the same `content_id` and the same stored chunks at 1 and 4 threads. |
 | Arming auto-merge on #96 was stopped by the session's own permission check, and waited for a card. | Each lane's brief says whether the maintainer allows it to arm auto-merge on its own pull requests ([Before the lanes start](#before-the-lanes-start-the-maintainer)). |
@@ -97,17 +97,15 @@ exception to what a patch may change ([D6](#decisions-the-maintainer)).
 
 | Release | Holds | Tagged when |
 |---|---|---|
-| 2.2.3 | P22-10, the measurement | its pull request has merged and the release checklist passes |
-| 2.2.4 | P22-11 to P22-14: the thread setting, chunk writes, digests, and processes across files | their pull requests have merged and the release checklist passes |
+| 2.2.3 | P22-10 to P22-14: the measurement, the thread setting, chunk writes, digests, and processes across files | their five pull requests have merged and the release checklist passes |
 
-2.2.3 changes no behaviour, so it ships alone and does not wait on 2.2.4.
-Patches are tagged from `main` in order, so no 2.2.4 item (P22-11 to P22-14)
-merges before v2.2.3 is tagged. A 2.2.4 pull request may open and pass
-review earlier, and waits to be queued.
+One release, not two ([D6](#decisions-the-maintainer)). P22-10 changes no
+behaviour and merges first: its ranked list sets what P22-12 and P22-13
+build. v2.2.3 is tagged from `main` once all five have merged.
 
 ## Work items
 
-### P22-10 Measure what can run outside the lock (2.2.3, start at once)
+### P22-10 Measure what can run outside the lock (start at once)
 
 - **State at 2.2.x.**
   - `docs/examples/bench_threads.py` (#92) times reads from one, two and
@@ -141,10 +139,10 @@ review earlier, and waits to be queued.
   documented for users.
 - **Done when.** The table covers every row above, on 2.2.2's code.
 
-### P22-11 One thread setting (2.2.4, the enabler)
+### P22-11 One thread setting (the enabler)
 
-Lands alone and first: P22-12 and P22-13 build on it. It is the API the
-exception allows ([D6](#decisions-the-maintainer)).
+Lands alone, after P22-10 and before P22-12 and P22-13, which build on it.
+It is the API the exception allows ([D6](#decisions-the-maintainer)).
 
 - **State at 2.2.x.**
   - `--workers N` runs a batch command's files in up to *N* processes:
@@ -175,7 +173,7 @@ exception allows ([D6](#decisions-the-maintainer)).
       environment, then 1. `0` is refused: there is no "auto".
   - **These names, and P22-14's flags, are the whole exception.** P22-11
     lists them in `.github/api-exceptions.txt` with D6, and makes both API
-    jobs read that list (see [The API gates](#medh5-223-and-224-parallelism)).
+    jobs read that list (see [The API gates](#medh5-223-parallelism)).
     P22-14 adds its flags with D7. A test holds the list to these names.
   - **Threads live inside one call.** Each call that uses threads starts them
     (`std::thread::scope`) and joins them before it returns, so no thread
@@ -221,7 +219,7 @@ exception allows ([D6](#decisions-the-maintainer)).
   maintainer's decision.
 - **Done when.** The setting exists, is documented, and no path uses it yet.
 
-### P22-12 Compress outside the lock, with direct chunk writes (2.2.4)
+### P22-12 Compress outside the lock, with direct chunk writes
 
 - **State at 2.2.x.**
   - Chunks are written through `data::write_region` (`h5/data.rs:908`), so
@@ -324,7 +322,7 @@ exception allows ([D6](#decisions-the-maintainer)).
     threads, before and after, on one machine.
   - One thread is no slower than 2.2.2 by more than noise.
 
-### P22-13 Digests in parallel, outside the lock (2.2.4)
+### P22-13 Digests in parallel, outside the lock
 
 - **State at 2.2.x.**
   - `SampleWriter::commit(true)` recomputes every dataset's digest
@@ -424,11 +422,11 @@ exception allows ([D6](#decisions-the-maintainer)).
 - **Done when.** Commit and `verify` on P22-10's sample are measured again at
   1, 2 and 4 threads.
 
-### P22-14 Processes across files (2.2.4)
+### P22-14 Processes across files
 
 Measures the batch commands in one process and in four, and adds `--workers`
-to each that is faster with it ([D7](#decisions-the-maintainer)). It starts
-after P22-11, whose allowed list it adds to.
+to each that is faster with it ([D7](#decisions-the-maintainer)). Its flags
+merge after P22-11, whose allowed list they join.
 
 - **State at 2.2.x.**
   - `validate`, `verify`, `fix`, `index build` and `recompress` take
@@ -502,18 +500,17 @@ from 2.2.1's `p22/measure` and `p22/threads`, which are taken.
 | B, across files and digests | P22-14 → P22-13 | `p22/workers`, `p22/digests` |
 
 - **Edges.**
-  - P22-10 starts at once, and v2.2.3 is tagged when it merges.
-  - Every 2.2.4 item merges after v2.2.3 is tagged, P22-14 included.
+  - P22-10 starts at once and merges first.
   - P22-11 lands alone, before P22-12 and P22-13.
   - P22-13 waits on P22-11. Lane B does P22-14 first: its measurements need
     neither, and its flags merge after P22-11, whose allowed list they join.
   - P22-12 and P22-13 both read P22-10's ranked list.
 - **Critical path.** Lane A: the measurement, the enabler, then the chunk
   writer.
-- **Two sessions.** The releases need no third; a third would only wait on
+- **Two sessions.** The release needs no third; a third would only wait on
   P22-11.
 
-### Shared files (2.2.3 and 2.2.4)
+### Shared files
 
 | File | Owner | Others touch it for |
 |---|---|---|
@@ -530,7 +527,7 @@ from 2.2.1's `p22/measure` and `p22/threads`, which are taken.
 
 | Item | Why |
 |---|---|
-| A default above one thread, or "auto" | These patches measure first. A later minor may change the default with their numbers, announced a minor ahead. |
+| A default above one thread, or "auto" | This patch measures first. A later minor may change the default with its numbers, announced a minor ahead. |
 | A persistent thread pool, or a thread-pool dependency | Threads that outlive a call cross a `fork` (D3). |
 | Threads in preflight or opening | Measured slower: the work is HDF5's (2.1.0; #92). |
 | Any other new API or flag | The exception covers P22-11's names and `--threads` (D6), and P22-14's `--workers` flags (D7), only. |
@@ -558,18 +555,16 @@ from 2.2.1's `p22/measure` and `p22/threads`, which are taken.
 
 As 2.2.x's, plus:
 
-1. For 2.2.3: no public name and no flag added; `docs/guides/performance.md`
-   names the version it measured.
-2. For 2.2.4: the API jobs show no addition but the names in
+1. The API jobs show no addition but the names in
    `.github/api-exceptions.txt`. The release pull request keeps the list;
-   the first pull request after v2.2.4 is published empties it.
-3. Every thread-identity and worker-identity test passes on every CI
+   the first pull request after v2.2.3 is published empties it.
+2. Every thread-identity and worker-identity test passes on every CI
    platform, including the free-threaded wheels.
-4. `docs/guides/performance.md` gives 2.2.4's rows at 1, 2 and 4 threads and
-   names the machine.
-5. `docs/explanation/concurrency.md` describes `--threads` beside
+3. `docs/guides/performance.md` gives 2.2.3's rows at 1, 2 and 4 threads and
+   names the machine and the version it measured.
+4. `docs/explanation/concurrency.md` describes `--threads` beside
    `--workers`, and `worker_init_fn`'s reset.
-6. No changelog sentence promises a later default. If D3's default is to
+5. No changelog sentence promises a later default. If D3's default is to
    change in a later minor, the maintainer has settled it, and the sentence
    names that decision.
 
@@ -594,10 +589,11 @@ maintainer answers it, and the plan is updated with the answer.
 - **D4 Names.** Proposed: `--threads N` for threads inside one call,
   `--workers N` for processes across files. `dataset stats --workers` keeps
   its meaning (threads) and is documented as the exception, as now.
-- **D6 Patches, not a minor.** Settled by the maintainer on 2026-10-22: the
-  work ships as 2.2.3 and 2.2.4, not 2.3.0, and the patch rule is relaxed
-  this once for the thread setting, a small API change. First planned as
-  2.3.0 (D5, when its lanes start, fell away with it).
+- **D6 A patch, not a minor.** Settled by the maintainer on 2026-10-22, and
+  made one release on 2026-10-23: the work ships as 2.2.3, not 2.3.0, and
+  the patch rule is relaxed this once for the thread setting, a small API
+  change. First planned as 2.3.0 (D5, when its lanes start, fell away with
+  it), then as 2.2.3 (the measurement) and 2.2.4 (the rest).
 - **D7 `--workers` on more commands.** Settled by the maintainer on
   2026-10-23: the exception also covers P22-14's `--workers` flags, on the
   batch commands that measure at least 1.3 times faster with four workers.
