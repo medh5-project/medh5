@@ -30,6 +30,14 @@ const VARIABLE: &str = "MEDH5_THREADS";
 /// What [`set_threads`] set; 0 while nothing has.
 static SET: AtomicUsize = AtomicUsize::new(0);
 
+/// The count of the newest command line run still going, over [`SET`]; 0
+/// while none is.  Written only with [`RUNS`] held.
+static RUN: AtomicUsize = AtomicUsize::new(0);
+
+/// Each command line run still going, by the number its guard holds, and
+/// its count, oldest first.
+static RUNS: parking_lot::Mutex<(u64, Vec<(u64, usize)>)> = parking_lot::const_mutex((0, Vec::new()));
+
 /// `MEDH5_THREADS`, as read at the first call that asked: `None` when unset.
 static ENVIRONMENT: OnceLock<Result<Option<usize>, String>> = OnceLock::new();
 
@@ -47,6 +55,9 @@ pub fn set_threads(n: usize) -> Result<()> {
 /// [`set_threads`] set, else `MEDH5_THREADS`, else 1.  `Err` when it falls to
 /// `MEDH5_THREADS` and that is not a positive integer.
 pub fn threads() -> Result<usize> {
+    if let n @ 1.. = RUN.load(Ordering::SeqCst) {
+        return Ok(n);
+    }
     match SET.load(Ordering::SeqCst) {
         0 => match ENVIRONMENT.get_or_init(|| from_environment(std::env::var_os(VARIABLE))) {
             Ok(n) => Ok(n.unwrap_or(1)),
@@ -56,23 +67,33 @@ pub fn threads() -> Result<usize> {
     }
 }
 
-/// The count for one command line run, `--threads N`: set until the guard is
-/// dropped, and then what was set before it.  Not API: the command line's.
+/// The count for one command line run, `--threads N`, over what
+/// [`set_threads`] set, until the guard is dropped.  Runs that overlap (the
+/// command line called from two threads) each hold their own: the newest
+/// still going is the count, and a [`set_threads`] made during a run takes
+/// effect when the last ends.  Not API: the command line's.
 #[doc(hidden)]
 pub fn for_this_run(n: usize) -> Result<Restore> {
     if n == 0 {
         return Err(Error::Value("the thread count must be at least 1, not 0".into()));
     }
-    Ok(Restore(SET.swap(n, Ordering::SeqCst)))
+    let mut runs = RUNS.lock();
+    runs.0 += 1;
+    let id = runs.0;
+    runs.1.push((id, n));
+    RUN.store(n, Ordering::SeqCst);
+    Ok(Restore(id))
 }
 
-/// What [`for_this_run`] gives back when it is dropped.
+/// What [`for_this_run`] gives back: dropped, its run ends.
 #[doc(hidden)]
-pub struct Restore(usize);
+pub struct Restore(u64);
 
 impl Drop for Restore {
     fn drop(&mut self) {
-        SET.store(self.0, Ordering::SeqCst);
+        let mut runs = RUNS.lock();
+        runs.1.retain(|&(id, _)| id != self.0);
+        RUN.store(runs.1.last().map_or(0, |&(_, n)| n), Ordering::SeqCst);
     }
 }
 
@@ -139,6 +160,9 @@ where
     let flow = (Mutex::new((window, false)), Condvar::new());
     let (tx, rx) = mpsc::channel::<(usize, R)>();
     std::thread::scope(|scope| {
+        // A `sink` that panics stops the workers too: they would otherwise
+        // wait for it to sink more, and the scope for them.
+        let _stop = Stop(&flow);
         for _ in 0..threads {
             let (tx, source, flow, work) = (tx.clone(), &source, &flow, &work);
             #[cfg(test)]
@@ -261,6 +285,29 @@ pub(crate) mod tests {
         SET.store(before, Ordering::SeqCst);
     }
 
+    /// Runs that overlap end in any order and leave each other's count,
+    /// and what was set, as they found them; a count set during a run is
+    /// the count once the runs end.
+    #[test]
+    fn overlapping_runs_and_a_setting_made_during_one_leave_each_other_be() {
+        let _serial = serial();
+        let before = SET.load(Ordering::SeqCst);
+        set_threads(2).unwrap();
+        let three = for_this_run(3).unwrap();
+        let four = for_this_run(4).unwrap();
+        assert_eq!(threads().unwrap(), 4);
+        drop(three);
+        assert_eq!(threads().unwrap(), 4, "the run still going keeps its count");
+        drop(four);
+        assert_eq!(threads().unwrap(), 2);
+        let run = for_this_run(3).unwrap();
+        set_threads(5).unwrap();
+        assert_eq!(threads().unwrap(), 3, "--threads comes before set_threads");
+        drop(run);
+        assert_eq!(threads().unwrap(), 5);
+        SET.store(before, Ordering::SeqCst);
+    }
+
     #[test]
     fn the_environment_is_a_positive_integer_or_refused() {
         let os = |s: &str| Some(std::ffi::OsString::from(s));
@@ -351,6 +398,22 @@ pub(crate) mod tests {
         assert_eq!(sunk, 11);
         // The window bounds what ran past the failure.
         assert!(done.load(Ordering::SeqCst) <= 11 + 2 * 4, "{} items ran", done.load(Ordering::SeqCst));
+    }
+
+    /// A `sink` that panics with more items to come ends the call with its
+    /// panic: the workers, out of items they may take, are stopped rather
+    /// than left waiting for it, and the scope for them.
+    #[test]
+    fn a_sink_that_panics_ends_the_call_with_its_panic() {
+        let _serial = serial();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let ended = std::panic::catch_unwind(|| {
+                ordered(2, 0..1000, |i| i, |i| if i == 3 { panic!("sink") } else { Ok::<(), ()>(()) })
+            });
+            tx.send(ended.is_err()).unwrap();
+        });
+        assert_eq!(rx.recv_timeout(Duration::from_secs(20)), Ok(true), "the call did not end");
     }
 
     #[test]

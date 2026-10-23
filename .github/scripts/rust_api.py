@@ -62,6 +62,12 @@ def items(doc: dict[str, Any]) -> dict[str, str]:
                 if module is not None and "module" in module["inner"]:
                     for child in module["inner"]["module"]["items"]:
                         visit(child, path)
+                else:
+                    # Another crate's module, whose names the JSON does not
+                    # list: the glob itself is the API, so a new one is an
+                    # addition rather than nothing.
+                    source = inner.get("source") or inner.get("name")
+                    add([*path, f"{source}::*"], "use")
                 return
             if target is None or str(target) not in index:
                 # A re-export of another crate's item, or one rustdoc did

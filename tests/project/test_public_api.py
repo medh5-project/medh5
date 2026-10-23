@@ -454,6 +454,25 @@ def _rustdoc(extra: bool = False, version: str = "2.2.2") -> dict:
     return {"root": "0", "crate_version": version, "index": index}
 
 
+def test_a_glob_of_another_crate_is_an_addition(rust_api: ModuleType) -> None:
+    """A `pub use dependency::*` names a module the JSON does not hold, so the
+    names it brings cannot be listed: the glob is recorded as one item, and a
+    new one fails a patch rather than adding nothing."""
+    old = _rustdoc()
+    new = _rustdoc()
+    new["index"]["0"]["inner"]["module"]["items"].append("30")
+    new["index"]["30"] = {
+        "name": "ndarray",
+        "visibility": "public",
+        "inner": {
+            "use": {"source": "ndarray", "name": "ndarray", "id": "98", "is_glob": True}
+        },
+    }
+    assert rust_api.items(new)["medh5::ndarray::*"] == "use"
+    status, report = rust_api.compare([(json.dumps(old), json.dumps(new))], "patch")
+    assert status == 1 and "- `medh5::ndarray::*: new use`" in report
+
+
 def test_rust_items_are_the_paths_a_caller_names(rust_api: ModuleType) -> None:
     assert rust_api.items(_rustdoc()) == {
         "medh5": "module",
