@@ -456,6 +456,81 @@ pub(crate) mod tests {
         }
     }
 
+    /// With `BLOSC_NTHREADS=8`, a write on four threads --- the process's
+    /// first Blosc2 compression --- starts four threads and no more: Blosc2
+    /// starts none of its own inside a worker.  It stores what one thread
+    /// stores.  HDF5's write still spreads each chunk's blocks over Blosc2's
+    /// threads, through the threads callback.  In a process of its own, whose
+    /// environment is set before Blosc2 reads it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn s14_2_blosc2_starts_no_thread_of_its_own_in_a_worker() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        const CHILD: &str = "MEDH5_TEST_BLOSC_THREADS_CHILD";
+        let threads = || std::fs::read_dir("/proc/self/task").unwrap().count();
+        // The most threads `f` had running at once beside those before it.
+        let started = |f: &mut dyn FnMut()| {
+            let (done, most) = (AtomicBool::new(false), AtomicUsize::new(0));
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    while !done.load(Ordering::SeqCst) {
+                        most.fetch_max(threads(), Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_micros(100));
+                    }
+                });
+                // The watcher is running: every thread from here is `f`'s.
+                while most.load(Ordering::SeqCst) == 0 {
+                    std::thread::yield_now();
+                }
+                let before = threads();
+                f();
+                done.store(true, Ordering::SeqCst);
+                most.load(Ordering::SeqCst).saturating_sub(before)
+            })
+        };
+        if std::env::var_os(CHILD).is_some() {
+            crate::h5::init();
+            let dir = tempfile::tempdir().unwrap();
+            let file = crate::h5::file::create_truncate(&dir.path().join("t.h5")).unwrap();
+            // Chunks of several Blosc2 blocks each.
+            let shape = [128usize, 192, 192];
+            let values = volume(&shape, DType::I16, &mut Rng::new(8));
+            let layout = Layout {
+                chunks: Some(vec![64, 192, 192]),
+                filters: resolve_profile(Some("balanced")).unwrap().codec(Role::Image).filters(),
+            };
+            let mut found = Vec::new();
+            for (k, workers) in [4, 1].into_iter().enumerate() {
+                let ds = data::create_empty(&file, &format!("d{k}"), DType::I16, &shape, &layout).unwrap();
+                let writer = Chunks::of(&ds, DType::I16).unwrap();
+                let n = started(&mut || writer.write_rows(&values, 0, workers).unwrap());
+                assert!(n <= workers, "{n} threads started by a write on {workers}");
+                found.push(stored(&ds, &writer));
+            }
+            assert_eq!(found[0], found[1]);
+            let mut through = None;
+            let n = started(&mut || through = Some(data::create(&file, "hdf5", &values, &layout).unwrap()));
+            let through = through.unwrap();
+            assert!(n > 0, "HDF5's write shares a chunk's blocks out");
+            // Its threads store each chunk's blocks in the order they finish
+            // them, so its bytes are its own; the values are the same.
+            assert_eq!(data::read(&through).unwrap(), values);
+            assert_eq!(data::read(&file.dataset("d0").unwrap()).unwrap(), values);
+            return;
+        }
+        let name = "h5::chunks::tests::s14_2_blosc2_starts_no_thread_of_its_own_in_a_worker";
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", name, "--test-threads=1"])
+            .env(CHILD, "1")
+            .env("BLOSC_NTHREADS", "8")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let run = crate::h5::spawn(&mut command).unwrap().wait_with_output().unwrap();
+        let out = String::from_utf8_lossy(&run.stdout);
+        assert!(run.status.success() && out.contains("1 passed"), "{out}{}", String::from_utf8_lossy(&run.stderr));
+    }
+
     /// What the writer cannot store as HDF5 would is left to HDF5.
     #[test]
     fn s14_2_what_a_chunk_write_cannot_store_exactly_goes_through_hdf5() {
