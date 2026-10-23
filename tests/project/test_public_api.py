@@ -366,6 +366,60 @@ def test_a_patch_allowing_a_class_allows_none_of_its_members(api: ModuleType) ->
     assert api.compare(BEFORE, after, "patch", allowed)[0] == 0
 
 
+def _tree(options: list[str], commands: dict | None = None) -> dict:
+    return {"options": options, "positionals": [], "commands": commands or {}}
+
+
+def test_the_command_line_dump_lists_commands_and_their_own_options(
+    api: ModuleType,
+) -> None:
+    """clap copies a global option into every command; it prints once, under
+    `medh5`, so a new global option is one addition and not one per command."""
+    tree = _tree(
+        ["--threads", "--help"],
+        {"info": _tree(["--json", "--threads", "--help"], {"x": _tree(["--help"])})},
+    )
+    assert list(api.cli_entries(tree)) == [
+        ("medh5", "command", ""),
+        ("medh5 --threads", "option", ""),
+        ("medh5 --help", "option", ""),
+        ("medh5 info", "command", ""),
+        ("medh5 info --json", "option", ""),
+        ("medh5 info x", "command", ""),
+    ]
+    dumped = api.parse(api.dump_cli())
+    assert dumped["medh5 --threads"].kind == "option"
+    assert "medh5 info --threads" not in dumped
+    assert dumped["medh5 convert from-nifti"].kind == "command"
+
+
+def test_a_patch_adds_only_the_flags_the_exceptions_list_allows(
+    api: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new flag is an addition like a new name: a patch fails one the
+    list's `cli` names do not hold, and a removed flag is a break."""
+    old, new = tmp_path / "old.txt", tmp_path / "new.txt"
+    listed = tmp_path / "listed.txt"
+    before = "medh5\tcommand\nmedh5 info\tcommand\nmedh5 info --json\toption\n"
+    old.write_text(before, encoding="utf-8")
+    new.write_text(before + "medh5 info --key\toption\n", encoding="utf-8")
+    listed.write_text("cli\tmedh5 info --key\tD6\n", encoding="utf-8")
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    compare = ["compare", "--cli", str(old), str(new), "--release-type"]
+    # The list's Python names are not the command line's.
+    python = tmp_path / "python.txt"
+    python.write_text("python\tmedh5 info --key\tD6\n", encoding="utf-8")
+    assert api.main([*compare, "patch", "--exceptions", str(python)]) == 1
+    assert api.main([*compare, "patch", "--exceptions", str(listed)]) == 0
+    assert api.main([*compare, "minor", "--exceptions", str(python)]) == 0
+    status, report = api.compare(before, new.read_text(), "patch", {}, "Command line")
+    assert status == 1 and report.startswith("## Command line (patch)")
+    assert "- `medh5 info --key: new option`" in report
+    removed = api.compare(before, "medh5\tcommand\n", "minor", {}, "Command line")
+    assert removed[0] == 1
+    assert "- `medh5 info: the command was removed`" in removed[1]
+
+
 @pytest.mark.parametrize(
     "line",
     [

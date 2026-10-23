@@ -992,7 +992,8 @@ jobs:
     # a virtual environment of its own, dumped by public_api.py from outside
     # the checkout (`python -I`, in $RUNNER_TEMP) so that neither reads the
     # checkout's `medh5/`.  The snapshot, tests/project/python_api.txt, shows
-    # a reviewer the change; this fails one that breaks callers.
+    # a reviewer the change; this fails one that breaks callers.  The command
+    # line is compared the same way, from each package's parser.
     needs: build-linux-x86_64
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1023,9 +1024,15 @@ jobs:
           built/bin/pip install --quiet "$wheel"
           released/bin/python -I "$script" dump --output released.txt
           built/bin/python -I "$script" dump --output built.txt
+          released/bin/python -I "$script" dump --cli --output released-cli.txt
+          built/bin/python -I "$script" dump --cli --output built-cli.txt
       - run: >
           python .github/scripts/public_api.py compare
           "$RUNNER_TEMP/released.txt" "$RUNNER_TEMP/built.txt"
+          --release-type "${{ steps.base.outputs.release_type }}"
+      - run: >
+          python .github/scripts/public_api.py compare --cli
+          "$RUNNER_TEMP/released-cli.txt" "$RUNNER_TEMP/built-cli.txt"
           --release-type "${{ steps.base.outputs.release_type }}"
 
   ci-ok:

@@ -1,7 +1,7 @@
 # Public names a patch release may add, each with the decision that allowed
 # it (plans/2.2.x/parallelism.md).  Under API_RELEASE_TYPE=patch, CI's
-# `python-api` job (public_api.py compare) and `semver` job (rust_api.py)
-# fail an addition that is not here.  One line per name, tab-separated:
+# `python-api` job (public_api.py compare, and compare --cli for the command
+# line) and `semver` job (rust_api.py) fail an addition that is not here.  One line per name, tab-separated:
 #
 #     KIND<TAB>NAME<TAB>DECISION
 #

@@ -1,8 +1,8 @@
 """The public Python API as text, and whether a change to it breaks callers.
 
-    python .github/scripts/public_api.py dump [--output FILE]
+    python .github/scripts/public_api.py dump [--cli] [--output FILE]
     python .github/scripts/public_api.py write
-    python .github/scripts/public_api.py compare OLD NEW --release-type TYPE
+    python .github/scripts/public_api.py compare OLD NEW --release-type TYPE [--cli]
 
 `dump` prints the API of the *installed* `medh5`: the package and every module
 path without a `_`-prefixed part (`medh5._core` is stubtest's), one line per
@@ -28,6 +28,13 @@ type or a class's base changed. It fails on any of them unless TYPE is `major`;
 under `patch` it also fails an addition that `.github/api-exceptions.txt` does
 not list, and lists the ones it does. Standard library only: CI runs it in a
 virtual environment holding nothing but a released wheel.
+
+With `--cli`, `dump` prints the command line instead, from the installed
+package's parser: one line per command and per option, `medh5 convert
+from-nifti<TAB>command` and `medh5 convert from-nifti --report<TAB>option`.
+An option every command inherits from `medh5` (`--threads`, `--help`) prints
+once, under `medh5`. `compare --cli` compares two such dumps, a removed
+command or option being a break, against the list's `cli` names.
 """
 
 from __future__ import annotations
@@ -266,6 +273,34 @@ def dump() -> str:
     return "".join(f"{text}\n" for text in sorted(lines))
 
 
+def cli_entries(
+    tree: dict[str, Any], path: str = "medh5"
+) -> Iterator[tuple[str, str, str]]:
+    """The command line in `tree`, `medh5._core.cli_command_tree()`'s shape:
+    each command, and each option a command has that `medh5` does not
+    (clap copies a global option into every command)."""
+    inherited = set(tree["options"])
+
+    def walk(
+        node: dict[str, Any], path: str, top: bool
+    ) -> Iterator[tuple[str, str, str]]:
+        yield path, "command", ""
+        for option in node["options"]:
+            if top or option not in inherited:
+                yield f"{path} {option}", "option", ""
+        for name, child in node["commands"].items():
+            yield from walk(child, f"{path} {name}", False)
+
+    yield from walk(tree, path, True)
+
+
+def dump_cli() -> str:
+    from medh5._core import cli_command_tree
+
+    lines = {line(entry) for entry in cli_entries(cli_command_tree())}
+    return "".join(f"{text}\n" for text in sorted(lines))
+
+
 # --- compare ---
 
 
@@ -438,12 +473,13 @@ def compare(
     new_text: str,
     release_type: str,
     allowed: dict[str, str] | None = None,
+    title: str = "Python API",
 ) -> tuple[int, str]:
-    """The exit status and a Markdown report.  `allowed` is the Python names
-    a patch may add, with the decision that allowed each."""
+    """The exit status and a Markdown report.  `allowed` is the names a
+    patch may add, with the decision that allowed each."""
     allowed = allowed or {}
     breaks, added = changes(parse(old_text), parse(new_text), allowed)
-    lines = [f"## Python API ({release_type})", ""]
+    lines = [f"## {title} ({release_type})", ""]
     if breaks:
         verdict = "allowed in a major" if release_type == "major" else "not allowed"
         lines += [f"{len(breaks)} breaking change(s), {verdict}:", ""]
@@ -479,12 +515,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
     command = commands.add_parser("dump", help="print the installed package's API")
+    command.add_argument("--cli", action="store_true", help="the command line instead")
     command.add_argument("--output", type=Path)
     commands.add_parser("write", help=f"regenerate {SNAPSHOT.relative_to(ROOT)}")
     command = commands.add_parser("compare", help="fail on a breaking change")
     command.add_argument("old", type=Path)
     command.add_argument("new", type=Path)
     command.add_argument("--release-type", choices=RELEASE_TYPES, required=True)
+    command.add_argument("--cli", action="store_true", help="compare `dump --cli`s")
     command.add_argument(
         "--exceptions",
         type=Path,
@@ -494,7 +532,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "dump":
-        text = dump()
+        text = dump_cli() if args.cli else dump()
         if args.output:
             args.output.write_text(text, encoding="utf-8", newline="\n")
         else:
@@ -508,7 +546,10 @@ def main(argv: list[str] | None = None) -> int:
         args.old.read_text(encoding="utf-8"),
         args.new.read_text(encoding="utf-8"),
         args.release_type,
-        exceptions(args.exceptions.read_text(encoding="utf-8"))["python"],
+        exceptions(args.exceptions.read_text(encoding="utf-8"))[
+            "cli" if args.cli else "python"
+        ],
+        "Command line" if args.cli else "Python API",
     )
     sys.stdout.write(report)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")

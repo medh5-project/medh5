@@ -1165,6 +1165,9 @@ class TestDistribution:
         assert re.search(r"^    needs: build-linux-x86_64$", python, re.M)
         assert 'cd "$RUNNER_TEMP"' in python
         assert python.count('/bin/python -I "$script" dump --output') == 2
+        # And the command line, from each one's parser.
+        assert python.count('/bin/python -I "$script" dump --cli --output') == 2
+        assert "public_api.py compare --cli" in python
         assert '--release-type "${{ steps.base.outputs.release_type }}"' in python
         gate = jobs["ci-ok"].split("steps:")[0]
         assert "      - semver\n" in gate and "      - python-api\n" in gate
