@@ -385,6 +385,28 @@ only with its `asm` feature, which medh5 does not enable, so every aarch64
 build hashes in software. On a CPU that hashes several times faster the
 digests' share, and so what threads give them, is smaller.
 
+### Threads in `recompress` and `resample`
+
+With `--threads N`, `recompress` and `resample` compress the chunks they
+write on *N* threads, and `resample` maps and interpolates each chunk on the
+thread that compresses it
+([Which calls use them](../explanation/concurrency.md#which-calls-use-them)).
+The same sample and machine as above, an ordinary release build, seconds,
+median of three:
+
+| Command | 2.2.2 | 1 thread | 2 threads | 4 threads |
+|---|---|---|---|---|
+| `recompress --profile archive` | 116.3 | 90.5 | 48.2 | 29.5 |
+| `recompress --profile training` | 8.5 | 7.9 | 8.2 | 7.5 |
+| `resample`, nearest, no annotation | 15.7 | 15.3 | 15.4 | 14.1 |
+| `resample`, linear, carrying the annotation | 43.4 | 40.0 | 33.4 | 29.1 |
+
+Compression is nearly all of an archive recompression, so it is the command
+threads shorten most. A `training` recompression and a nearest resample spend
+little time compressing, and most of the rest is digests, which the threads
+do not reach. Every file written at four threads holds the bytes one thread
+writes.
+
 ## Related
 
 - **[Storage](../reference/storage.md)** — codec profiles, chunking and the index in full.
