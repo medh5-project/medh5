@@ -45,7 +45,7 @@ import numpy as np
 import numpy.typing as npt
 
 from medh5._files import write_text
-from medh5.errors import MEDH5ValidationError
+from medh5.errors import MEDH5Error, MEDH5ValidationError
 from medh5.io._common import sanitize_key
 from medh5.io.report import ConversionReport
 
@@ -765,6 +765,36 @@ def to_nnunetv2(
     it.  An export interrupted part way leaves the dataset a mix of the old
     and the new until it is run again, which completes it.
     """
+    return _export(
+        paths,
+        out,
+        dataset_name=dataset_name,
+        file_ending=file_ending,
+        annotation=annotation,
+        classes=classes,
+        unlabeled=unlabeled,
+        report=report,
+        split=split,
+        replace=replace,
+    )
+
+
+def _export(
+    paths: Sequence[str | os.PathLike[str]],
+    out: str | os.PathLike[str],
+    *,
+    dataset_name: str = "Dataset001_medh5",
+    file_ending: str = ".nii.gz",
+    annotation: str = "seg",
+    classes: Sequence[int | str] | None = None,
+    unlabeled: str = "refuse",
+    report: ConversionReport | None = None,
+    split: str | None = None,
+    replace: bool = False,
+    workers: int = 1,
+) -> ConversionReport:
+    """:func:`to_nnunetv2`, its cases written on *workers* processes: what
+    ``medh5 convert to-nnunet --workers`` runs."""
     from medh5.io.nifti import NIFTI_SUFFIXES
 
     if unlabeled not in UNLABELED:
@@ -791,11 +821,13 @@ def to_nnunetv2(
     if ignore_value is not None:
         labels[IGNORE] = ignore_value
     if not replace:
-        _write(plan, root, labels, ignore_value, annotation, file_ending, log)
+        _write(plan, root, labels, ignore_value, annotation, file_ending, log, workers)
         return log
 
     left, owned = _inventory(root)
-    written = _write(plan, root, labels, ignore_value, annotation, file_ending, log)
+    written = _write(
+        plan, root, labels, ignore_value, annotation, file_ending, log, workers
+    )
     # After `dataset.json`, so an export interrupted before it has removed
     # nothing.
     removed = sorted(set(owned) - set(written))
@@ -820,10 +852,13 @@ def _write(
     annotation: str,
     file_ending: str,
     log: ConversionReport,
+    workers: int = 1,
 ) -> list[str]:
     """Write the planned dataset under *root*, ``dataset.json`` last; the
-    files written, relative to *root*."""
-    import medh5
+    files written, relative to *root*.  The cases are written on *workers*
+    processes (``medh5 convert to-nnunet --workers``), each its own files,
+    and reported in their order."""
+    from medh5 import _workers
 
     written: list[str] = []
 
@@ -838,48 +873,12 @@ def _write(
         if case.labeled:
             (root / case.labels).mkdir(exist_ok=True)
 
-    for case in plan.cases:
-        with medh5.open(case.path) as sample:
-            ann = sample.annotations.get(annotation) if case.labeled else None
-            for index, image_id in enumerate(plan.channels):
-                target = root / case.images / f"{case.name}_{index:04d}{file_ending}"
-                _save(
-                    sample.images[image_id].grid,
-                    sample.images[image_id].read(),
-                    target,
-                    rescale=sample.images[image_id].rescale,
-                )
-                log.outputs.append(place(target))
-            if ann is not None:
-                volume = _labelmap_for(ann, labels, plan.order, plan.by_label)
-                ignored = np.asarray(sample.ignore_region(annotation), dtype=bool)
-                if ignored.any():
-                    assert ignore_value is not None  # `_check_cases` saw it
-                    covered = int(np.count_nonzero(ignored & (volume != BACKGROUND)))
-                    volume[ignored] = ignore_value
-                    log.decision(
-                        "ignore",
-                        f"{case.path}: {int(ignored.sum())} ignored voxel(s) were "
-                        f"written as nnU-Net's ignore label {ignore_value}"
-                        + (
-                            f", {covered} of them over a class, which nnU-Net "
-                            "neither trains nor scores there"
-                            if covered
-                            else ""
-                        ),
-                        {
-                            "case": case.name,
-                            "voxels": int(ignored.sum()),
-                            "over": covered,
-                        },
-                    )
-                target = root / case.labels / f"{case.name}{file_ending}"
-                _save(ann.grid, volume, target)
-                # Listed only when written.  A sample without the annotation
-                # produced no label file and the report named one anyway, so a
-                # caller checking `outputs` for what to ship was told about a
-                # path that did not exist.
-                log.outputs.append(place(target))
+    shared: tuple[Any, ...] = (root, plan.channels, labels, ignore_value)
+    shared += (annotation, file_ending, plan.order, plan.by_label)
+    jobs = ((case.name, (case, *shared)) for case in plan.cases)
+    for targets, notes in _workers.run(_write_case, jobs, workers, _case_died):
+        log.outputs.extend(place(target) for target in targets)
+        log.notes.extend(notes)
 
     stashed = plan.stashed
     document = dict(stashed) if stashed else {}
@@ -914,6 +913,66 @@ def _write(
         {"reused": plan.reused},
     )
     return written
+
+
+def _write_case(job: tuple[Any, ...]) -> tuple[list[Path], list[Any]]:
+    """One case of :func:`_write`: its channels and label volume written,
+    the files in the order written, and the notes the report takes for it."""
+    import medh5
+
+    case, root, channels, labels, ignore_value, annotation, file_ending, order, by = job
+    log = ConversionReport(converter="to-nnunet")
+    targets: list[Path] = []
+    with medh5.open(case.path) as sample:
+        ann = sample.annotations.get(annotation) if case.labeled else None
+        for index, image_id in enumerate(channels):
+            target = root / case.images / f"{case.name}_{index:04d}{file_ending}"
+            _save(
+                sample.images[image_id].grid,
+                sample.images[image_id].read(),
+                target,
+                rescale=sample.images[image_id].rescale,
+            )
+            targets.append(target)
+        if ann is not None:
+            volume = _labelmap_for(ann, labels, order, by)
+            ignored = np.asarray(sample.ignore_region(annotation), dtype=bool)
+            if ignored.any():
+                assert ignore_value is not None  # `_check_cases` saw it
+                covered = int(np.count_nonzero(ignored & (volume != BACKGROUND)))
+                volume[ignored] = ignore_value
+                log.decision(
+                    "ignore",
+                    f"{case.path}: {int(ignored.sum())} ignored voxel(s) were "
+                    f"written as nnU-Net's ignore label {ignore_value}"
+                    + (
+                        f", {covered} of them over a class, which nnU-Net "
+                        "neither trains nor scores there"
+                        if covered
+                        else ""
+                    ),
+                    {
+                        "case": case.name,
+                        "voxels": int(ignored.sum()),
+                        "over": covered,
+                    },
+                )
+            target = root / case.labels / f"{case.name}{file_ending}"
+            _save(ann.grid, volume, target)
+            # Listed only when written.  A sample without the annotation
+            # produced no label file and the report named one anyway, so a
+            # caller checking `outputs` for what to ship was told about a
+            # path that did not exist.
+            targets.append(target)
+    return targets, log.notes
+
+
+def _case_died(name: str, job: tuple[Any, ...], status: str) -> Any:
+    """A case whose worker stopped stops the export, as a case that cannot
+    be written does: ``dataset.json`` is not written."""
+    raise MEDH5Error(
+        f"case {name} ({job[0].path}): the worker writing it stopped ({status})"
+    )
 
 
 OWNED = ("imagesTr", "labelsTr", "imagesTs", "labelsTs")

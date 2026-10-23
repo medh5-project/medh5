@@ -3367,6 +3367,131 @@ class TestWorkers:
         assert code == EXIT_USAGE
 
 
+def _content_ids(where: Path) -> dict[str, str]:
+    """Each sample a run wrote, by name, as its content: a run writes its
+    own ``created``, so two runs never write the same bytes."""
+    ids = {}
+    for path in sorted(where.glob("*.medh5")):
+        with medh5.open(path) as sample:
+            ids[path.name] = sample.content_id
+    return ids
+
+
+class TestWorkersBeyondFiles:
+    """``--workers N`` on the commands whose unit is not one file --- a
+    subject's 0.x files, a conformance case --- prints and writes what one
+    process does."""
+
+    @staticmethod
+    def legacy(where: Path) -> list[str]:
+        """Six 0.x files of four subjects, two of them seen twice, and two
+        (``P1``, ``p1``) whose ids name one file on a case-insensitive file
+        system: the parent names each output before any worker starts."""
+        where.mkdir()
+        shape = (6, 8, 10)
+        mask = np.zeros(shape, bool)
+        mask[1:4, 2:6, 3:8] = True
+        visits = [
+            ("a", "P1", "20200101"),
+            ("b", "P2", "20200101"),
+            ("c", "P1", "20210101"),
+            ("d", "P3", "20200101"),
+            ("e", "P2", "20210101"),
+            ("f", "p1", "20200101"),
+        ]
+        paths = []
+        for name, subject, date in visits:
+            path = where / f"{name}.medh5"
+            write_legacy_sample(
+                path,
+                images={"CT": np.full(shape, ord(name), np.int16)},
+                seg={"liver": mask},
+                spacing=[1.0, 1.0, 1.0],
+                extra={"patient_id": subject, "study_date": date},
+            )
+            paths.append(str(path))
+        return paths
+
+    def migrations(self, capsys, tmp_path, *extra: str) -> set[Any]:
+        paths = self.legacy(tmp_path / "old")
+        seen = set()
+        for workers in (None, 1, 3):
+            out = tmp_path / f"m{workers}"
+            flags = [] if workers is None else ["--workers", str(workers)]
+            argv = ["migrate", *paths, "-o", str(out), "--group-by", "subject"]
+            argv += ["--subject-key"]
+            code, printed = run(capsys, *argv, "extra.patient_id", *extra, *flags)
+            text = printed.out.replace(str(out), "OUT")
+            seen.add((code, text, printed.err, tuple(_content_ids(out).items())))
+        return seen
+
+    @pytest.mark.parametrize("extra", [[], ["--json"]])
+    def test_migrate_does_not_depend_on_the_worker_count(self, capsys, tmp_path, extra):
+        seen = self.migrations(capsys, tmp_path, *extra)
+        assert len(seen) == 1, sorted(seen)
+        ((code, _, _, written),) = seen
+        assert code == EXIT_OK
+        assert len(written) == 4
+        assert len({name.casefold() for name, _ in written}) == 4
+        with medh5.open(tmp_path / "m3" / written[0][0]) as sample:
+            assert len(sample.timepoints) == 2
+
+    def test_a_dying_migrate_worker_fails_only_its_subject(
+        self, capsys, tmp_path, monkeypatch
+    ):
+        paths = self.legacy(tmp_path / "old")
+        argv = ["migrate", *paths, "-o", str(tmp_path / "m")]
+        argv += ["--group-by", "subject", "--subject-key", "extra.patient_id"]
+        argv += ["--json"]
+        code, printed = run(capsys, *argv)
+        assert code == EXIT_OK
+        names = sorted(path.name for path in (tmp_path / "m").glob("*.medh5"))
+        dying = names[1]
+        monkeypatch.setenv("MEDH5_TEST_WORKERS", f"exit:{Path(dying).stem}")
+        argv[argv.index(str(tmp_path / "m"))] = str(tmp_path / "n")
+        code, printed = run(capsys, *argv, "--workers", "2")
+        assert code == EXIT_ERROR
+        report = json.loads(printed.out)
+        assert sorted(Path(p).name for p in report["outputs"]) == [
+            name for name in names if name != dying
+        ]
+        (stopped,) = [n for n in report["notes"] if n["kind"] == "failed"]
+        assert "the worker writing it stopped" in stopped["message"]
+        assert not (tmp_path / "n" / dying).exists()
+
+    def conformance(self, capsys, tmp_path, cases, *flags) -> tuple[Any, ...]:
+        out = tmp_path / f"corpus{len(list(tmp_path.iterdir()))}"
+        selected = [arg for case in cases for arg in ("--case", case)]
+        code, printed = run(capsys, "conformance", "run", str(out), *selected, *flags)
+        expected = (out / "expected.json").read_bytes()
+        return code, printed.out.replace(str(out), "OUT"), printed.err, expected
+
+    @pytest.mark.parametrize("extra", [[], ["--json"]])
+    def test_conformance_run_does_not_depend_on_the_worker_count(
+        self, capsys, tmp_path, extra
+    ):
+        cases = ["core-minimal", "seg-layers", "E001-missing-version"]
+        cases.append("E701-digest-mismatch")
+        seen = {
+            self.conformance(capsys, tmp_path, cases, *extra, *workers)
+            for workers in ([], ["--workers", "1"], ["--workers", "3"])
+        }
+        assert len(seen) == 1, sorted(seen)
+        ((code, out, _, _),) = seen
+        assert code == EXIT_OK
+        assert out
+
+    def test_a_dying_conformance_worker_fails_only_its_case(
+        self, capsys, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("MEDH5_TEST_WORKERS", "exit:seg-layers")
+        cases = ["core-minimal", "seg-layers", "E001-missing-version"]
+        code, out, _, _ = self.conformance(capsys, tmp_path, cases, "--workers", "2")
+        assert code == EXIT_ERROR
+        assert "2/3 cases pass" in out
+        assert "the worker running it stopped" in out
+
+
 # -- the converter command line: one typed flag per parameter -----------------------
 
 

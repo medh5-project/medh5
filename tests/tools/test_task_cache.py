@@ -2876,6 +2876,34 @@ class TestCommandLine:
         assert "'s.medh5c::P-01', a source" in capsys.readouterr().err
         assert shard.read_bytes() == before
 
+    def test_preflight_does_not_depend_on_the_worker_count(
+        self, setup, tmp_path: Path, capsys, monkeypatch
+    ):
+        """``task preflight --workers N`` reads the subjects in up to N
+        processes and prints what one process prints, a stale pin (T302)
+        included; a subject whose worker dies stops the command there."""
+        task, paths = setup
+        manifest = task.save(tmp_path / "cohort" / "t.task.json")
+        with medh5.amend(paths["P-02"]) as w:
+            w.add_event(
+                Event("late", "late", "other", "static", "final", available_us=0)
+            )
+        capsys.readouterr()
+        for extra in ([], ["--json"], ["--json", "--deep"]):
+            seen = set()
+            for workers in ([], ["--workers", "1"], ["--workers", "3"]):
+                code = main(["task", "preflight", str(manifest), *extra, *workers])
+                printed = capsys.readouterr()
+                seen.add((code, printed.out, printed.err))
+            assert len(seen) == 1, sorted(seen)
+            ((code, out, _),) = seen
+            assert code == EXIT_ERROR
+            assert "T302" in out
+        monkeypatch.setenv("MEDH5_TEST_WORKERS", "exit:P-03")
+        argv = ["task", "preflight", str(manifest), "--workers", "2"]
+        assert main(argv) == EXIT_ERROR
+        assert "the worker reading it stopped" in capsys.readouterr().err
+
     def test_task_validate_notes_a_defaulted_follow_up(
         self, setup, tmp_path: Path, capsys
     ):

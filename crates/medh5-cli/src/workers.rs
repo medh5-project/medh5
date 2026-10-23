@@ -1,22 +1,30 @@
-//! `--workers N`: the files of a batch command across processes.
+//! `--workers N`: the work of a batch command across processes.
 //!
 //! One HDF5 lock covers each process, filters included, so threads in one
 //! process take turns on every read and decode; parallelism belongs to
 //! processes.  The parent starts up to `N` workers --- this program again,
 //! as [`Host::worker_command`] names it, running the hidden `__worker`
-//! command --- and hands each a file at a time: a JSON line `{"index",
-//! "path"}` on its standard input, answered by one line holding the file's
-//! [`FileOutcome`].  The parent prints the outcomes in input order, so the
+//! command --- and hands each a unit at a time: a JSON line `{"index",
+//! "task"}` on its standard input, answered by one line holding the unit's
+//! [`FileOutcome`].  The parent takes the outcomes in input order, so the
 //! text, the `--json` document and the exit code are a sequential run's,
 //! byte for byte, whatever the number of workers.
 //!
+//! A unit is a file for the commands that take their files one by one
+//! (`validate`, `verify`, `fix`, `index build`, `recompress`), and for the
+//! others what the command computes without looking at another: a subject's
+//! samples (`migrate`), a subject's rows (`task preflight`), a case
+//! (`conformance run`).  What the units share is computed once, by the
+//! parent, before any worker starts, and travels in each task.
+//!
 //! An error that stops a sequential run crosses as its kind and message, is
-//! raised again at the same file, and stops this run there.  The paths a
-//! writing command (`fix`, `index build`, `recompress`) is given that name
-//! one file go to one worker, in order.  A worker that dies fails only the
-//! file it held; what it had not begun goes to the others, and when none is
-//! left, the parent runs it.  The parent opens no file before the workers
-//! start: a child must not inherit an open HDF5 file.
+//! raised again at the same unit, and stops this run there.  Units that
+//! read or write one file --- the paths a writing command is given that name
+//! one file, the inputs and output of a sample --- go to one worker, in
+//! order.  A worker that dies fails only the unit it held, as its command
+//! words such a failure; what it had not begun goes to the others, and when
+//! none is left, the parent runs it.  The parent opens no file before the
+//! workers start: a child must not inherit an open HDF5 file.
 //!
 //! [`Host::worker_command`]: crate::Host::worker_command
 
@@ -111,17 +119,78 @@ impl Default for FileOutcome {
 /// stops the run.
 pub type One = fn(&str, &ArgMatches) -> medh5::Result<FileOutcome>;
 
-/// The commands that take `--workers`: their words, their file function,
-/// and whether they write the files they are given.
-fn command(words: &str) -> Option<(One, bool)> {
+/// One unit of a command's work, as the parent hands it out.
+#[derive(Clone)]
+pub struct Unit {
+    /// What the worker is handed.
+    pub task: Value,
+    /// The files it reads or writes: for a command that writes, units that
+    /// share one go to one worker, in input order.
+    pub files: Vec<String>,
+    /// How a message names it: a path, a case, a subject.
+    pub label: String,
+}
+
+/// What runs a command's units in one process: made once per process from
+/// the command's arguments, then handed each task in turn.
+pub trait Runner {
+    fn run(&mut self, task: &Value) -> medh5::Result<FileOutcome>;
+}
+
+/// A command that takes `--workers`.
+#[derive(Clone, Copy)]
+pub struct Kind {
+    /// How a process makes its [`Runner`].
+    pub runner: fn(&ArgMatches) -> medh5::Result<Box<dyn Runner>>,
+    /// What stands for a unit whose worker stopped without answering, given
+    /// the worker's exit status: as the command words a unit that failed,
+    /// or the error that stops the run.
+    pub died: fn(&Unit, &str) -> medh5::Result<FileOutcome>,
+    /// Whether its units write files.
+    pub writes: bool,
+}
+
+/// A command whose units are its files.
+struct Files {
+    one: One,
+    m: ArgMatches,
+}
+
+impl Runner for Files {
+    fn run(&mut self, task: &Value) -> medh5::Result<FileOutcome> {
+        (self.one)(task.as_str().unwrap_or_default(), &self.m)
+    }
+}
+
+fn files(one: One, m: &ArgMatches) -> medh5::Result<Box<dyn Runner>> {
+    Ok(Box::new(Files { one, m: m.clone() }))
+}
+
+/// A file a worker stopped on fails, and the run goes on.
+fn file_died(unit: &Unit, status: &str) -> medh5::Result<FileOutcome> {
+    let error = Error::Runtime(format!("{}: the worker running it stopped ({status})", unit.label));
+    Ok(FileOutcome::failed(&unit.label, &error))
+}
+
+/// The commands that take `--workers`, by their words.
+fn command(words: &str) -> Option<Kind> {
+    let file = |runner, writes| Kind { runner, died: file_died, writes };
     Some(match words {
-        "validate" => (crate::inspect::validate_one as One, false),
-        "verify" => (crate::inspect::verify_one, false),
-        "fix" => (crate::inspect::fix_one, true),
-        "index build" => (crate::seg::index_build_one, true),
-        "recompress" => (crate::perf::recompress_one, true),
+        "validate" => file(|m| files(crate::inspect::validate_one, m), false),
+        "verify" => file(|m| files(crate::inspect::verify_one, m), false),
+        "fix" => file(|m| files(crate::inspect::fix_one, m), true),
+        "index build" => file(|m| files(crate::seg::index_build_one, m), true),
+        "recompress" => file(|m| files(crate::perf::recompress_one, m), true),
+        "migrate" => crate::convert::MIGRATE,
+        "task preflight" => crate::clinical::PREFLIGHT,
+        "conformance run" => crate::conformance::RUN,
         _ => return None,
     })
+}
+
+/// The number of processes `--workers` asks for: at least one.
+pub fn wanted(m: &ArgMatches) -> usize {
+    get_i64(m, "workers").unwrap_or(1).max(1) as usize
 }
 
 /// Run `words`'s file function over `paths`, on `--workers` processes when
@@ -129,58 +198,75 @@ fn command(words: &str) -> Option<(One, bool)> {
 /// lines as its turn comes, and return the outcomes in input order.  An
 /// error stops the run at its file, as it stops a sequential one.
 pub fn run_files(words: &str, m: &ArgMatches, ctx: &mut Ctx, paths: &[String]) -> medh5::Result<Vec<FileOutcome>> {
-    let (one, writes) = command(words).expect("a command that takes --workers");
-    let wanted = get_i64(m, "workers").unwrap_or(1).max(1) as usize;
+    let units: Vec<Unit> =
+        paths.iter().map(|p| Unit { task: json!(p), files: vec![p.clone()], label: p.clone() }).collect();
     let mut outcomes = Vec::with_capacity(paths.len());
-    if wanted > 1 && paths.len() > 1 {
+    run_units(words, m, ctx, &units, &mut |ctx, outcome| {
+        replay(ctx, &outcome);
+        outcomes.push(outcome);
+        Ok(())
+    })?;
+    Ok(outcomes)
+}
+
+/// Run `words`'s `units` on `--workers` processes when it asks for more than
+/// one and the host can start them, else here; hand each outcome to `take`
+/// in input order.  An error --- a unit's, or `take`'s --- stops the run at
+/// its unit, as it stops a sequential one.
+pub fn run_units(
+    words: &str,
+    m: &ArgMatches,
+    ctx: &mut Ctx,
+    units: &[Unit],
+    take: &mut dyn FnMut(&mut Ctx, FileOutcome) -> medh5::Result<()>,
+) -> medh5::Result<()> {
+    let kind = command(words).expect("a command that takes --workers");
+    let wanted = wanted(m);
+    let mut rest: Vec<usize> = (0..units.len()).collect();
+    if wanted > 1 && units.len() > 1 {
         match ctx.host.worker_command() {
             Some(program) => {
-                let mut pool = Pool::start(&program, words, m, wanted.min(paths.len()));
+                let mut pool = Pool::start(&program, words, m, wanted.min(units.len()));
                 if let Some(why) = pool.failed_to_start.take().filter(|_| pool.workers.is_empty()) {
                     ctx.eprint(format!("medh5: cannot start workers ({why}); running in one process"));
                 }
-                let result = pool.run(paths, writes, |outcome| {
-                    replay(ctx, &outcome);
-                    outcomes.push(outcome);
-                });
+                let result = pool.run(units, &kind, |outcome| take(ctx, outcome));
                 pool.close();
-                // Files the workers could not take, because none was left
+                // Units the workers could not take, because none was left
                 // to take them, run here.
-                for index in result? {
-                    let outcome = run_one(one, &paths[index], m)?;
-                    replay(ctx, &outcome);
-                    outcomes.push(outcome);
-                }
-                return Ok(outcomes);
+                rest = result?;
             }
             None => ctx.eprint("medh5: this host cannot start workers; running in one process"),
         }
     }
-    for path in paths {
-        let outcome = run_one(one, path, m)?;
-        replay(ctx, &outcome);
-        outcomes.push(outcome);
+    if rest.is_empty() {
+        return Ok(());
     }
-    Ok(outcomes)
+    let mut runner = (kind.runner)(m)?;
+    for index in rest {
+        let outcome = run_unit(runner.as_mut(), &units[index].label, &units[index].task)?;
+        take(ctx, outcome)?;
+    }
+    Ok(())
 }
 
-/// `one(path, m)`, but for [`test_hook`]'s `error:`.
-fn run_one(one: One, path: &str, m: &ArgMatches) -> medh5::Result<FileOutcome> {
-    if test_hook("error", path) {
-        return Err(Error::Runtime(format!("{path}: stopped here, as MEDH5_TEST_WORKERS asks")));
+/// `runner.run(task)`, but for [`test_hook`]'s `error:`.
+fn run_unit(runner: &mut dyn Runner, label: &str, task: &Value) -> medh5::Result<FileOutcome> {
+    if test_hook("error", label) {
+        return Err(Error::Runtime(format!("{label}: stopped here, as MEDH5_TEST_WORKERS asks")));
     }
-    one(path, m)
+    runner.run(task)
 }
 
 /// For the test suite only: `MEDH5_TEST_WORKERS=exit:NAME` makes a worker
-/// end as a crash would, without an answer, when it is handed the file
-/// named `NAME`; `error:NAME` makes that file's command raise an error that
-/// stops the run, in a worker and in one process alike.  Nothing else can
-/// be made to do either on demand.
-fn test_hook(what: &str, path: &str) -> bool {
+/// end as a crash would, without an answer, when it is handed the unit
+/// named `NAME` (a file by its name, a case, a subject); `error:NAME` makes
+/// that unit raise an error that stops the run, in a worker and in one
+/// process alike.  Nothing else can be made to do either on demand.
+fn test_hook(what: &str, label: &str) -> bool {
     let Some(hook) = std::env::var_os("MEDH5_TEST_WORKERS") else { return false };
     let hook = hook.to_string_lossy();
-    matches!(hook.split_once(':'), Some((w, name)) if w == what && Path::new(path).file_name() == Some(name.as_ref()))
+    matches!(hook.split_once(':'), Some((w, name)) if w == what && Path::new(label).file_name() == Some(name.as_ref()))
 }
 
 fn replay(ctx: &mut Ctx, outcome: &FileOutcome) {
@@ -195,12 +281,12 @@ fn replay(ctx: &mut Ctx, outcome: &FileOutcome) {
 // -- the worker ---------------------------------------------------------------
 
 /// The hidden `__worker` command: `args` are the command's words and its
-/// options, without its paths; the paths arrive on `input`, one JSON line
-/// each, and each file's outcome --- or the error that stops it --- goes to
+/// arguments, without its paths; the tasks arrive on `input`, one JSON line
+/// each, and each unit's outcome --- or the error that stops it --- goes to
 /// `output` as a line.  Ends at the end of `input`.
 pub fn serve(args: &[String], input: &mut dyn BufRead, output: &mut dyn Write) -> i32 {
     let words: Vec<&str> = args.iter().take_while(|a| !a.starts_with('-')).map(String::as_str).collect();
-    let Some((one, _)) = command(&words.join(" ")) else {
+    let Some(kind) = command(&words.join(" ")) else {
         let _ = writeln!(std::io::stderr(), "medh5: __worker: no command {:?} takes --workers", words.join(" "));
         return EXIT_USAGE;
     };
@@ -220,18 +306,25 @@ pub fn serve(args: &[String], input: &mut dyn BufRead, output: &mut dyn Write) -
             None => return EXIT_USAGE,
         }
     }
+    // Made at the first task: a runner that cannot be made is the error of
+    // the unit that asked for it, as it would be in one process.
+    let mut runner: Option<Box<dyn Runner>> = None;
     for line in input.lines() {
         let Ok(line) = line else { break };
         let Ok(task) = serde_json::from_str::<Value>(&line) else { continue };
-        let (Some(index), Some(path)) =
-            (task.get("index").and_then(Value::as_u64), task.get("path").and_then(Value::as_str))
+        let (Some(index), Some(label), Some(work)) =
+            (task.get("index").and_then(Value::as_u64), task.get("label").and_then(Value::as_str), task.get("task"))
         else {
             continue;
         };
-        if test_hook("exit", path) {
+        if test_hook("exit", label) {
             std::process::exit(101);
         }
-        let answer = match run_one(one, path, sub) {
+        let ran = match runner.as_mut() {
+            Some(r) => run_unit(r.as_mut(), label, work),
+            None => (kind.runner)(sub).and_then(|made| run_unit(runner.insert(made).as_mut(), label, work)),
+        };
+        let answer = match ran {
             Ok(outcome) => json!({"index": index, "outcome": outcome.to_wire()}),
             Err(e) => json!({"index": index, "error": error_to_wire(&e)}),
         };
@@ -246,13 +339,17 @@ pub fn serve(args: &[String], input: &mut dyn BufRead, output: &mut dyn Write) -
 /// its paths one at a time, on its standard input.
 fn optional_paths(grammar: clap::Command, words: &[&str]) -> clap::Command {
     match words.split_first() {
-        None => grammar.mut_arg("paths", |a| a.required(false)),
+        None if grammar.get_arguments().any(|a| a.get_id() == "paths") => {
+            grammar.mut_arg("paths", |a| a.required(false))
+        }
+        None => grammar,
         Some((first, rest)) => grammar.mut_subcommand(*first, |sub| optional_paths(sub, rest)),
     }
 }
 
-/// The options of `m` as the command line gave them, but its paths and
-/// `--workers`, for a worker to parse as the parent did.
+/// The arguments of `m` as the command line gave them, but its paths and
+/// `--workers`, for a worker to parse as the parent did: the options, then
+/// the other positional arguments after `--`.
 fn worker_args(words: &str, m: &ArgMatches) -> Vec<String> {
     let mut grammar = crate::app::command();
     let mut out: Vec<String> = words.split(' ').map(str::to_string).collect();
@@ -262,9 +359,14 @@ fn worker_args(words: &str, m: &ArgMatches) -> Vec<String> {
             None => return out,
         };
     }
+    let mut positionals = Vec::new();
     for arg in grammar.get_arguments() {
         let id = arg.get_id().as_str();
         if id == "paths" || id == "workers" || m.value_source(id) != Some(ValueSource::CommandLine) {
+            continue;
+        }
+        if arg.is_positional() {
+            positionals.extend(m.get_raw(id).into_iter().flatten().map(|v| v.to_string_lossy().into_owned()));
             continue;
         }
         let Some(long) = arg.get_long() else { continue };
@@ -275,6 +377,10 @@ fn worker_args(words: &str, m: &ArgMatches) -> Vec<String> {
         } else {
             out.push(format!("--{long}"));
         }
+    }
+    if !positionals.is_empty() {
+        out.push("--".into());
+        out.extend(positionals);
     }
     out
 }
@@ -409,23 +515,28 @@ impl Pool {
         Pool { workers, said, failed_to_start }
     }
 
-    /// Run every path; `emit` takes each outcome in input order.  Returns the
-    /// inputs no worker was left to run, for the caller to run itself, or the
+    /// Run every unit; `emit` takes each outcome in input order.  Returns the
+    /// units no worker was left to run, for the caller to run itself, or the
     /// error that stops the run.
-    fn run(&mut self, paths: &[String], writes: bool, mut emit: impl FnMut(FileOutcome)) -> medh5::Result<Vec<usize>> {
-        let mut queue: VecDeque<Vec<usize>> = units(paths, writes).into();
+    fn run(
+        &mut self,
+        units: &[Unit],
+        kind: &Kind,
+        mut emit: impl FnMut(FileOutcome) -> medh5::Result<()>,
+    ) -> medh5::Result<Vec<usize>> {
+        let mut queue: VecDeque<Vec<usize>> = batches(units, kind.writes).into();
         let mut order: Reorder<Result<FileOutcome, Error>> = Reorder::new();
         let mut done = 0;
         loop {
             for id in 0..self.workers.len() {
                 let worker = &self.workers[id];
                 if worker.alive && worker.stdin.is_some() && worker.held.is_empty() {
-                    if let Some(unit) = queue.pop_front() {
-                        self.give(id, unit, paths, &mut queue);
+                    if let Some(batch) = queue.pop_front() {
+                        self.give(id, batch, units, &mut queue);
                     }
                 }
             }
-            if done == paths.len() {
+            if done == units.len() {
                 return Ok(Vec::new());
             }
             if !self.workers.iter().any(|w| w.alive) {
@@ -444,45 +555,47 @@ impl Pool {
                     }
                     _ => continue,
                 },
-                None => self.died(id, paths, &mut queue),
+                None => self.died(id, units, kind, &mut queue),
             };
             for (index, answer) in arrived {
                 for due in order.push(index, answer) {
                     done += 1;
-                    emit(due?)
+                    emit(due?)?;
                 }
             }
         }
     }
 
-    /// Hand worker `id` a unit of inputs, one line each.
-    fn give(&mut self, id: usize, unit: Vec<usize>, paths: &[String], queue: &mut VecDeque<Vec<usize>>) {
+    /// Hand worker `id` a batch of units, one line each.
+    fn give(&mut self, id: usize, batch: Vec<usize>, units: &[Unit], queue: &mut VecDeque<Vec<usize>>) {
         let worker = &mut self.workers[id];
         let mut sent = true;
         if let Some(stdin) = worker.stdin.as_mut() {
-            for &index in &unit {
-                let line = json!({"index": index, "path": paths[index]});
+            for &index in &batch {
+                let line = json!({"index": index, "label": units[index].label, "task": units[index].task});
                 sent = sent && writeln!(stdin, "{line}").and_then(|()| stdin.flush()).is_ok();
             }
         } else {
             sent = false;
         }
         if sent {
-            worker.held.extend(unit);
+            worker.held.extend(batch);
         } else {
             // A worker that cannot take input has ended, or is ending: its
-            // output's end says which file, if any, it was running.
-            queue.push_front(unit);
+            // output's end says which unit, if any, it was running.
+            queue.push_front(batch);
             worker.stdin = None;
         }
     }
 
-    /// Worker `id`'s output has ended: it is gone.  The file it was running
-    /// fails; the rest of what it held goes back on the queue, in order.
+    /// Worker `id`'s output has ended: it is gone.  The unit it was running
+    /// fails, as `kind` words it; the rest of what it held goes back on the
+    /// queue, in order.
     fn died(
         &mut self,
         id: usize,
-        paths: &[String],
+        units: &[Unit],
+        kind: &Kind,
         queue: &mut VecDeque<Vec<usize>>,
     ) -> Vec<(usize, Result<FileOutcome, Error>)> {
         let worker = &mut self.workers[id];
@@ -494,8 +607,7 @@ impl Pool {
         if !held.is_empty() {
             queue.push_front(held.into());
         }
-        let error = Error::Runtime(format!("{}: the worker running it stopped ({status})", paths[running]));
-        vec![(running, Ok(FileOutcome::failed(&paths[running], &error)))]
+        vec![(running, (kind.died)(&units[running], &status))]
     }
 
     /// End every worker: its input closed, it finishes the file it is on and
@@ -526,28 +638,70 @@ fn parse_answer(line: &str) -> Option<(usize, Result<FileOutcome, Error>)> {
     Some((index, Ok(FileOutcome::from_wire(value.get("outcome")?)?)))
 }
 
-/// The inputs in the units workers take them: one each, but for a command
-/// that writes, every path naming one file together, in order --- two
-/// workers must not write one file at once.
-fn units(paths: &[String], writes: bool) -> Vec<Vec<usize>> {
+/// The units in the batches workers take them: one each, but for a command
+/// that writes, every unit sharing a file with another together, in input
+/// order --- two workers must not write one file at once, nor one read a
+/// file another is writing.
+fn batches(units: &[Unit], writes: bool) -> Vec<Vec<usize>> {
     if !writes {
-        return (0..paths.len()).map(|i| vec![i]).collect();
+        return (0..units.len()).map(|i| vec![i]).collect();
+    }
+    // Each unit's batch, as the first unit of it: a union of the units that
+    // name one file, kept by its earliest member.
+    let mut first: Vec<usize> = (0..units.len()).collect();
+    fn root(first: &mut [usize], mut i: usize) -> usize {
+        while first[i] != i {
+            first[i] = first[first[i]];
+            i = first[i];
+        }
+        i
+    }
+    let mut by_file: HashMap<String, usize> = HashMap::new();
+    for (index, unit) in units.iter().enumerate() {
+        for path in &unit.files {
+            let Some(key) = medh5::h5::file::file_key(Path::new(path)).or_else(|| lexical_key(path)) else { continue };
+            match by_file.get(&key) {
+                Some(&other) => {
+                    let (a, b) = (root(&mut first, other), root(&mut first, index));
+                    first[a.max(b)] = a.min(b);
+                }
+                None => {
+                    by_file.insert(key, index);
+                }
+            }
+        }
     }
     let mut out: Vec<Vec<usize>> = Vec::new();
-    let mut by_file: HashMap<String, usize> = HashMap::new();
-    for (index, path) in paths.iter().enumerate() {
-        match medh5::h5::file::file_key(Path::new(path)) {
-            Some(key) => match by_file.get(&key) {
-                Some(&unit) => out[unit].push(index),
-                None => {
-                    by_file.insert(key, out.len());
-                    out.push(vec![index]);
-                }
-            },
-            None => out.push(vec![index]),
+    let mut at: HashMap<usize, usize> = HashMap::new();
+    for index in 0..units.len() {
+        let batch = root(&mut first, index);
+        match at.get(&batch) {
+            Some(&n) => out[n].push(index),
+            None => {
+                at.insert(batch, out.len());
+                out.push(vec![index]);
+            }
         }
     }
     out
+}
+
+/// A file that does not exist yet --- an output --- by its absolute path,
+/// `.` and `..` resolved as text: two units that will write one path meet.
+fn lexical_key(path: &str) -> Option<String> {
+    let absolute = std::path::absolute(path).ok()?;
+    let mut out = std::path::PathBuf::new();
+    for part in absolute.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    // Lower case: on a file system that ignores case, two spellings are one.
+    Some(format!("path:{}", out.display()).to_lowercase())
 }
 
 #[cfg(test)]
@@ -604,10 +758,36 @@ mod tests {
         std::fs::write(&b, b"b").unwrap();
         let link = dir.path().join("link.medh5");
         std::fs::hard_link(&a, &link).unwrap();
-        let paths: Vec<String> =
-            [&a, &b, &link, &dir.path().join("missing.medh5")].iter().map(|p| p.display().to_string()).collect();
-        assert_eq!(units(&paths, true), [vec![0, 2], vec![1], vec![3]]);
-        assert_eq!(units(&paths, false), [vec![0], vec![1], vec![2], vec![3]]);
+        let units: Vec<Unit> = [&a, &b, &link, &dir.path().join("missing.medh5")]
+            .iter()
+            .map(|p| one(&[p.display().to_string()]))
+            .collect();
+        assert_eq!(batches(&units, true), [vec![0, 2], vec![1], vec![3]]);
+        assert_eq!(batches(&units, false), [vec![0], vec![1], vec![2], vec![3]]);
+    }
+
+    fn one(files: &[String]) -> Unit {
+        Unit { task: json!(files[0]), files: files.to_vec(), label: files[0].clone() }
+    }
+
+    #[test]
+    fn units_sharing_any_file_are_one_batch_for_a_writer() {
+        // Two subjects writing one output (`a/../out/x` is `out/x`), and a
+        // third unit reading a file of each: all one batch, in input order.
+        let dir = tempfile::tempdir().unwrap();
+        let at = |p: &str| dir.path().join(p).display().to_string();
+        std::fs::write(dir.path().join("in1"), b"1").unwrap();
+        std::fs::write(dir.path().join("in2"), b"2").unwrap();
+        let units = [
+            one(&[at("in1"), at("out/x.medh5")]),
+            one(&[at("in2"), at("out/y.medh5")]),
+            one(&[at("in3"), at("a/../out/x.medh5")]),
+            one(&[at("in4"), at("out/z.medh5")]),
+            one(&[at("in2"), at("out/w.medh5")]),
+        ];
+        assert_eq!(batches(&units, true), [vec![0, 2], vec![1, 4], vec![3]]);
+        let joined = [one(&[at("in1"), at("in2")]), units[0].clone(), units[1].clone()];
+        assert_eq!(batches(&joined, true), [vec![0, 1, 2]]);
     }
 
     #[test]

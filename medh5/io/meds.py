@@ -50,10 +50,10 @@ import json
 import math
 import os
 from collections import Counter
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from medh5 import _core
 from medh5._optional import require
@@ -671,6 +671,53 @@ def augment_cohort_from_meds(
     clock, ids already present --- is reported in the result, and the others
     are still written.
     """
+    return _cohort_from_meds(
+        dataset,
+        mapping,
+        out_dir=out_dir,
+        clock=clock,
+        timezone=timezone,
+        origin=origin,
+        code_system=code_system,
+        code_systems=code_systems,
+        kinds=kinds,
+        status=status,
+        day_precision=day_precision,
+        document_codes=document_codes,
+        exclude_codes=exclude_codes,
+        texts=texts,
+        both_values=both_values,
+        columns=columns,
+    )
+
+
+def _cohort_from_meds(
+    dataset: str | os.PathLike[str],
+    mapping: Mapping[int, str | os.PathLike[str]],
+    *,
+    out_dir: str | os.PathLike[str] | None = None,
+    clock: Clock | None = None,
+    timezone: str | datetime.tzinfo | None = None,
+    origin: str | datetime.datetime | None = None,
+    code_system: str | None = None,
+    code_systems: Mapping[str, str] | None = None,
+    kinds: Mapping[str, str] | None = None,
+    status: str = "unknown",
+    day_precision: Iterable[str] = (),
+    document_codes: Iterable[str] = (),
+    exclude_codes: Iterable[str] = (BIRTH,),
+    texts: bool = False,
+    both_values: str = "refuse",
+    columns: Mapping[str, str] | None = None,
+    workers: int = 1,
+) -> CohortImport:
+    """:func:`augment_cohort_from_meds`, its subjects imported on *workers*
+    processes: what ``medh5 clinical augment-cohort --workers`` runs.  The
+    dataset is scanned here, once, and each subject's rows handed out as
+    soon as they are all read; a worker reads the subject's sample and
+    writes its result."""
+    from medh5 import _workers
+
     pa = _pyarrow()
     import pyarrow.compute as pc
     import pyarrow.dataset as ds
@@ -725,22 +772,14 @@ def augment_cohort_from_meds(
 
     places = {subject: (sample, out) for subject, sample, out in targets}
     results: dict[int, SubjectImport] = {}
+    # What a worker's read needs of the scan: not the open dataset.
+    scanned = replace(scan, dataset=None)
 
-    def finish(subject: int, table: Any) -> None:
-        def read(on: Clock) -> tuple[ClinicalRecords, ConversionReport]:
-            report = ConversionReport(source=scan.source, converter="from-meds")
-            timeline = Timeline(
-                on, timezone=timezone, origin=origin, converter="from-meds"
-            )
-            records = _records(pa, rules, scan, subject, table, timeline, report)
-            return records, report
-
-        sample, out = places[subject]
-        results[subject] = _clinical.import_subject(subject, sample, out, clock, read)
-
-    pending: dict[int, list[Any]] = {}
-    read_rows: Counter[int] = Counter()
-    if expected:
+    def units() -> Iterator[tuple[str, tuple[Any, ...]]]:
+        pending: dict[int, list[Any]] = {}
+        read_rows: Counter[int] = Counter()
+        if not expected:
+            return
         for group in _row_groups(
             scan, scan.wanted, ds.field(column).isin(sorted(expected))
         ):
@@ -750,7 +789,25 @@ def augment_cohort_from_meds(
                 pending.setdefault(subject, []).append(rows)
                 read_rows[subject] += rows.num_rows
                 if read_rows[subject] == expected[subject]:
-                    finish(subject, pa.concat_tables(pending.pop(subject)))
+                    sample, out = places[subject]
+                    table = pa.concat_tables(pending.pop(subject))
+                    task = (
+                        subject,
+                        sample,
+                        out,
+                        clock,
+                        table,
+                        rules,
+                        scanned,
+                        timezone,
+                        origin,
+                    )
+                    yield str(subject), task
+
+    for result in _workers.run(
+        _import_subject, units(), workers, _clinical.subject_died
+    ):
+        results[cast(int, result.subject)] = result
     for subject, sample, out in targets:
         if subject not in results:
             # No row of it: refused as read_meds refuses it.
@@ -764,6 +821,20 @@ def augment_cohort_from_meds(
             )
         cohort.subjects.append(results[subject])
     return cohort
+
+
+def _import_subject(task: tuple[Any, ...]) -> SubjectImport:
+    """One subject of :func:`_cohort_from_meds`, its rows as read."""
+    subject, sample, out, clock, table, rules, scan, timezone, origin = task
+    pa = _pyarrow()
+
+    def read(on: Clock) -> tuple[ClinicalRecords, ConversionReport]:
+        report = ConversionReport(source=scan.source, converter="from-meds")
+        timeline = Timeline(on, timezone=timezone, origin=origin, converter="from-meds")
+        records = _records(pa, rules, scan, subject, table, timeline, report)
+        return records, report
+
+    return _clinical.import_subject(subject, sample, out, clock, read)
 
 
 def _row_groups(scan: _Scan, columns: list[str], where: Any) -> Iterable[Any]:
