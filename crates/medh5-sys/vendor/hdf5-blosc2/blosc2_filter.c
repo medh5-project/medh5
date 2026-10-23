@@ -17,6 +17,7 @@
 #include "hdf5.h"
 #include "blosc2_filter.h"
 #include "b2nd.h"
+#include "context.h"  /* medh5: a context's thread count (patch 7) */
 
 #if defined(__GNUC__)
 #define PUSH_ERR(func, minor, str, ...) H5Epush(H5E_DEFAULT, __FILE__, func, __LINE__, H5E_ERR_CLS, H5E_PLINE, minor, str, ##__VA_ARGS__)
@@ -202,7 +203,8 @@ herr_t blosc2_set_local(hid_t dcpl, hid_t type, hid_t space) {
 /* From Blosc2's "examples/get_blocksize.c". */
 int32_t compute_blosc2_blocksize(int32_t chunksize, int32_t typesize,
                                  int clevel, int compcode) {
-  static uint8_t data_dest[BLOSC2_MAX_OVERHEAD];
+  /* medh5: on the stack, not static: workers compress at once (patch 7). */
+  uint8_t data_dest[BLOSC2_MAX_OVERHEAD];
   blosc2_cparams cparams = BLOSC2_CPARAMS_DEFAULTS;
   cparams.compcode = (compcode < 0) ? DEFAULT_COMPCODE : compcode;
   cparams.clevel = clevel;
@@ -290,6 +292,219 @@ int32_t compute_b2nd_block_shape(size_t block_size,
   return nitems_new * type_size;
 }
 
+/* medh5: compression, split out of the filter function (PATCHES.md, patch 7).
+ *
+ * It calls no HDF5 function and reports a failure by its return value, so
+ * the medh5 crate's chunk writer runs it on worker threads, outside HDF5's
+ * lock; the filter calls it for every chunk HDF5 compresses, so the two store
+ * the same bytes.  It does not start Blosc2 (`blosc2_init`): the caller has.
+ * Every context it uses is its own.  With `one_thread`, they compress on the
+ * calling thread whatever BLOSC_NTHREADS says, which changes no stored byte.
+ *
+ * Returns the frame's size, the frame in `*out` for the caller to `free`, or
+ * one of the codes below. */
+#define MEDH5_COMPRESS_VALUES (-1)     /* filter values no chunk is compressed under */
+#define MEDH5_COMPRESS_CODEC (-2)      /* a compressor this Blosc2 has not got */
+#define MEDH5_COMPRESS_BLOCKSIZE (-3)  /* no block size could be suggested */
+#define MEDH5_COMPRESS_BLOCKSHAPE (-4) /* no B2ND block shape could be computed */
+#define MEDH5_COMPRESS_FAILED (-5)     /* Blosc2 or B2ND failed to compress */
+
+int64_t medh5_blosc2_compress(size_t cd_nelmts, const unsigned cd_values[],
+                              const void *in, size_t nbytes, int one_thread,
+                              void **out);
+
+/* Free a frame `medh5_blosc2_compress` returned, with the C library that
+ * allocated it: on Windows, the caller's runtime may not be this one. */
+void medh5_blosc2_free(void *frame);
+
+/* The contexts of a super-chunk compress and decompress on the calling
+ * thread: BLOSC_NTHREADS reached them when they were made, and threads start
+ * only when a context first compresses or decompresses. */
+static void medh5_one_thread(blosc2_schunk *schunk) {
+  blosc2_context *contexts[2] = {schunk->cctx, schunk->dctx};
+  for (int i = 0; i < 2; i++) {
+    if (contexts[i] != NULL) {
+      contexts[i]->nthreads = 1;
+      contexts[i]->new_nthreads = 1;
+    }
+  }
+}
+
+void medh5_blosc2_free(void *frame) {
+  free(frame);
+}
+
+int64_t medh5_blosc2_compress(size_t cd_nelmts, const unsigned cd_values[],
+                              const void *in, size_t nbytes, int one_thread,
+                              void **out) {
+  void* outbuf = NULL;
+  int64_t status = 0;
+  size_t blocksize;
+  size_t typesize;
+  size_t outbuf_size;
+  int clevel;
+  int doshuffle;
+  int compcode = DEFAULT_COMPCODE;
+
+  *out = NULL;
+  /* The filter function's checks of its values, as codes. */
+  if (cd_nelmts < 6) {
+    return MEDH5_COMPRESS_VALUES;
+  }
+  blocksize = cd_values[1];
+  typesize = cd_values[2];
+  outbuf_size = cd_values[3];
+  if (typesize == 0) {
+    return MEDH5_COMPRESS_VALUES;
+  }
+  int ndim = -1;
+  int32_t chunkshape[B2ND_MAX_DIM];
+  size_t chunksize = typesize;
+  if (cd_nelmts >= 8) {
+    ndim = cd_values[7];
+    if (ndim < 2 || ndim > B2ND_MAX_DIM || cd_nelmts < (size_t)(8 + ndim)) {
+      return MEDH5_COMPRESS_VALUES;
+    }
+    for (int i = 0; i < ndim; i++) {
+      if (cd_values[8 + i] < 1 || cd_values[8 + i] > INT32_MAX
+          || chunksize > SIZE_MAX / (size_t) cd_values[8 + i]) {
+        return MEDH5_COMPRESS_VALUES;
+      }
+      chunkshape[i] = cd_values[8 + i];
+      chunksize *= (size_t) cd_values[8 + i];
+    }
+  }
+
+  /* Compression params */
+  clevel = cd_values[4];        /* The compression level */
+  doshuffle = cd_values[5];     /* SHUFFLE, BITSHUFFLE, others */
+  if (cd_nelmts >= 7) {
+    compcode = cd_values[6];    /* The Blosc2 compressor used */
+    /* Check that we actually have support for the compressor code */
+    const char* compname;
+    if (blosc2_compcode_to_compname(compcode, &compname) == -1) {
+      return MEDH5_COMPRESS_CODEC;
+    }
+  }
+
+  blosc2_cparams cparams = BLOSC2_CPARAMS_DEFAULTS;
+  cparams.compcode = compcode;
+  cparams.typesize = (int32_t) typesize;
+  cparams.filters[BLOSC_LAST_FILTER] = doshuffle;
+  cparams.clevel = clevel;
+  // cparams.blocksize depends on dimensionality
+
+  blosc2_storage storage = {.cparams=&cparams, .contiguous=false};
+
+  if (ndim > 1 && nbytes != chunksize) {
+    BLOSC_TRACE_INFO("Filter input size %lu does not match chunk data size %lu "
+                     "(e.g. Fletcher32 checksum added before compression step), "
+                     "using plain Blosc2 instead of B2ND",
+                     nbytes, chunksize);
+    ndim = -1;
+  }
+
+  if (ndim > 1) {
+
+    b2nd_context_t *ctx = NULL;
+    b2nd_array_t *array = NULL;
+
+    if (blocksize == 0) {
+      int32_t sugg_blocksize = compute_blosc2_blocksize(outbuf_size, typesize,
+                                                        clevel, compcode);
+      if (sugg_blocksize < 0) {
+        return MEDH5_COMPRESS_BLOCKSIZE;
+      }
+      blocksize = sugg_blocksize;
+    }
+    int32_t blockdims[B2ND_MAX_DIM];
+    cparams.blocksize = compute_b2nd_block_shape(blocksize, typesize,
+                                                 ndim, chunkshape,
+                                                 blockdims);
+    if (cparams.blocksize < 0) {
+      return MEDH5_COMPRESS_BLOCKSHAPE;
+    }
+
+    int64_t chunkshape_l[B2ND_MAX_DIM];
+    for (int i = 0; i < ndim; i++) {
+      chunkshape_l[i] = chunkshape[i];
+    }
+
+    char dtype[B2ND_OPAQUE_NPDTYPE_MAXLEN];
+    snprintf(dtype, sizeof(dtype), B2ND_OPAQUE_NPDTYPE_FORMAT, typesize);
+    if (!(ctx = b2nd_create_ctx(&storage,
+                                ndim, chunkshape_l, chunkshape, blockdims,
+                                dtype, DTYPE_NUMPY_FORMAT, NULL, 0))) {
+      goto b2nd_comp_out;
+    }
+
+    /* `b2nd_from_cbuffer`, whose steps are taken here so the array's
+     * contexts can be set to one thread before anything is compressed. */
+    if (b2nd_empty(ctx, &array) < 0) {
+      goto b2nd_comp_out;
+    }
+    if (one_thread) {
+      medh5_one_thread(array->sc);
+    }
+    if ((int64_t) nbytes < array->nitems * array->sc->typesize) {
+      goto b2nd_comp_out;
+    }
+    if (array->nitems > 0) {
+      int64_t start[B2ND_MAX_DIM] = {0};
+      if (b2nd_set_slice_cbuffer(in, array->shape, (int64_t) nbytes,
+                                 start, array->shape, array) < 0) {
+        goto b2nd_comp_out;
+      }
+    }
+
+    bool needs_free;
+    if (b2nd_to_cframe(array, (uint8_t **)&outbuf, &status, &needs_free) < 0) {
+      status = 0;
+      goto b2nd_comp_out;
+    }
+
+    b2nd_comp_out:
+    if (array) b2nd_free(array);
+    if (ctx) b2nd_free_ctx(ctx);
+
+  } else {
+    cparams.blocksize = blocksize;
+
+    blosc2_context *cctx = blosc2_create_cctx(cparams);
+    blosc2_schunk* schunk = blosc2_schunk_new(&storage);
+    if (schunk == NULL) {
+      goto b2_comp_out;
+    }
+    if (one_thread) {
+      medh5_one_thread(schunk);
+    }
+
+    status = blosc2_schunk_append_buffer(schunk, in, (int32_t) nbytes);
+    if (status < 0) {
+      goto b2_comp_out;
+    }
+
+    bool needs_free;
+    status = blosc2_schunk_to_buffer(schunk, (uint8_t **)&outbuf, &needs_free);
+    if (status < 0 || !needs_free) {
+      status = 0;
+      goto b2_comp_out;
+    }
+
+    b2_comp_out:
+    if (schunk) blosc2_schunk_free(schunk);
+    if (cctx) blosc2_free_ctx(cctx);
+
+  }
+
+  if (status > 0) {
+    *out = outbuf;
+    return status;
+  }
+  if (outbuf) free(outbuf);
+  return MEDH5_COMPRESS_FAILED;
+}
+
 /* The filter function */
 size_t blosc2_filter_function(unsigned flags, size_t cd_nelmts,
                               const unsigned cd_values[], size_t nbytes,
@@ -366,146 +581,41 @@ size_t blosc2_filter_function(unsigned flags, size_t cd_nelmts,
   if (!(flags & H5Z_FLAG_REVERSE)) {
     /* We're compressing */
 
-    if (cd_nelmts < 6) {
-      PUSH_ERR("blosc2_filter", H5E_CALLBACK,
-               "Too few filter parameters for Blosc2 compression: %d", cd_nelmts);
+    /* medh5: compression is a function of its own (PATCHES.md, patch 7),
+     * which the chunk writer calls too; its codes are this filter's errors. */
+    status = medh5_blosc2_compress(cd_nelmts, cd_values, *buf, nbytes, 0, &outbuf);
+    if (status < 0) {
+      const char* compname = "?";
+      switch (status) {
+        case MEDH5_COMPRESS_VALUES:
+          PUSH_ERR("blosc2_filter", H5E_CALLBACK,
+                   "Too few filter parameters for Blosc2 compression: %d", cd_nelmts);
+          break;
+        case MEDH5_COMPRESS_CODEC:
+          blosc2_compcode_to_compname(cd_values[6], &compname);
+          PUSH_ERR("blosc2_filter", H5E_CALLBACK,
+                   "this Blosc2 library does not have support for "
+                   "the '%s' compressor, but only for: %s",
+                   compname, blosc2_list_compressors());
+          break;
+        case MEDH5_COMPRESS_BLOCKSIZE:
+          PUSH_ERR("blosc2_filter", H5E_CALLBACK, "Failed to compute suggested blocksize");
+          break;
+        case MEDH5_COMPRESS_BLOCKSHAPE:
+          PUSH_ERR("blosc2_filter", H5E_CALLBACK, "Cannot compute the B2ND block shape");
+          break;
+        default:
+          PUSH_ERR("blosc2_filter", H5E_CALLBACK, "Cannot compress the chunk");
+          break;
+      }
+      status = 0;
       goto failed;
     }
-
-    /* Compression params */
-    clevel = cd_values[4];        /* The compression level */
-    doshuffle = cd_values[5];     /* SHUFFLE, BITSHUFFLE, others */
-    if (cd_nelmts >= 7) {
-      compcode = cd_values[6];    /* The Blosc2 compressor used */
-      /* Check that we actually have support for the compressor code */
-      const char* complist = blosc2_list_compressors();
-      const char* compname;
-      int code = blosc2_compcode_to_compname(compcode, &compname);
-      if (code == -1) {
-        PUSH_ERR("blosc2_filter", H5E_CALLBACK,
-                 "this Blosc2 library does not have support for "
-                 "the '%s' compressor, but only for: %s",
-                 compname, complist);
-        goto failed;
-      }
-    }
-
-#ifdef BLOSC2_DEBUG
-    fprintf(stderr, "Blosc2: Compress %zd chunk w/buffer %zd\n",
-            nbytes, *buf_size);
-#endif
-
-    blosc2_cparams cparams = BLOSC2_CPARAMS_DEFAULTS;
-    cparams.compcode = compcode;
-    cparams.typesize = (int32_t) typesize;
-    cparams.filters[BLOSC_LAST_FILTER] = doshuffle;
-    cparams.clevel = clevel;
-    // cparams.blocksize depends on dimensionality
-
-    blosc2_storage storage = {.cparams=&cparams, .contiguous=false};
-
-    if (ndim > 1 && nbytes != chunksize) {
-      BLOSC_TRACE_INFO("Filter input size %lu does not match chunk data size %lu "
-                       "(e.g. Fletcher32 checksum added before compression step), "
-                       "using plain Blosc2 instead of B2ND",
-                       nbytes, chunksize);
-      ndim = -1;
-    }
-
-    if (ndim > 1) {
-
-      b2nd_context_t *ctx = NULL;
-      b2nd_array_t *array = NULL;
-
-      if (blocksize == 0) {
-        int32_t sugg_blocksize = compute_blosc2_blocksize(outbuf_size, typesize,
-                                                          clevel, compcode);
-        if (sugg_blocksize < 0) {
-          PUSH_ERR("blosc2_filter", H5E_CALLBACK, "Failed to compute suggested blocksize");
-          goto failed;
-        }
-        blocksize = sugg_blocksize;
-      }
-      int32_t blockdims[B2ND_MAX_DIM];
-      cparams.blocksize = compute_b2nd_block_shape(blocksize, typesize,
-                                                   ndim, chunkshape,
-                                                   blockdims);
-      if (cparams.blocksize < 0) {
-        PUSH_ERR("blosc2_filter", H5E_CALLBACK, "Cannot compute the B2ND block shape");
-        goto failed;
-      }
-
-      int64_t chunkshape_l[B2ND_MAX_DIM];
-      for (int i = 0; i < ndim; i++) {
-        chunkshape_l[i] = chunkshape[i];
-      }
-
-      char dtype[B2ND_OPAQUE_NPDTYPE_MAXLEN];
-      snprintf(dtype, sizeof(dtype), B2ND_OPAQUE_NPDTYPE_FORMAT, typesize);
-      if (!(ctx = b2nd_create_ctx(&storage,
-                                  ndim, chunkshape_l, chunkshape, blockdims,
-                                  dtype, DTYPE_NUMPY_FORMAT, NULL, 0))) {
-        PUSH_ERR("blosc2_filter", H5E_CALLBACK, "Cannot create B2ND context");
-        goto b2nd_comp_out;
-      }
-
-      if (b2nd_from_cbuffer(ctx, &array, *buf, nbytes) < 0) {
-        PUSH_ERR("blosc2_filter", H5E_CALLBACK, "Cannot compress buffer into B2ND array");
-        goto b2nd_comp_out;
-      }
-
-      bool needs_free;
-      if (b2nd_to_cframe(array, (uint8_t **)&outbuf, &status, &needs_free) < 0) {
-        PUSH_ERR("blosc2_filter", H5E_CALLBACK, "Cannot convert B2ND array to buffer");
-        goto b2nd_comp_out;
-      }
-
-      b2nd_comp_out:
-      if (array) b2nd_free(array);
-      if (ctx) b2nd_free_ctx(ctx);
-
-    } else {
-      cparams.blocksize = blocksize;
-
-      blosc2_context *cctx = blosc2_create_cctx(cparams);
-      blosc2_schunk* schunk = blosc2_schunk_new(&storage);
-      if (schunk == NULL) {
-        PUSH_ERR("blosc2_filter", H5E_CALLBACK, "Cannot create a super-chunk");
-        goto b2_comp_out;
-      }
-
-      status = blosc2_schunk_append_buffer(schunk, *buf, (int32_t) nbytes);
-      if (status < 0) {
-        PUSH_ERR("blosc2_filter", H5E_CALLBACK, "Cannot append buffer to super-chunk");
-        goto b2_comp_out;
-      }
-
-      bool needs_free;
-      status = blosc2_schunk_to_buffer(schunk, (uint8_t **)&outbuf, &needs_free);
-      if (status < 0 || !needs_free) {
-        PUSH_ERR("blosc2_filter", H5E_CALLBACK, "Cannot convert super-chunk to buffer");
-        goto b2_comp_out;
-      }
-
-      b2_comp_out:
-      if (schunk) blosc2_schunk_free(schunk);
-      if (cctx) blosc2_free_ctx(cctx);
-
-    }
-
-    if (status > 0) {
-      /* The cframe returned by Blosc2 is exactly `status` bytes long.  Report
-       * its real size instead of the precomputed guess: when the frame is
-       * larger than the guess (e.g. incompressible data), HDF5 >= 2.2.0
-       * rejects the write if the reported buffer size is smaller than the
-       * returned data size. */
-      outbuf_size = (size_t) status;
-    }
-
-#ifdef BLOSC2_DEBUG
-    fprintf(stderr, "Blosc2: Compressed into %zd bytes\n", status);
-#endif
-
+    /* The frame is exactly `status` bytes long.  Its real size is reported
+     * instead of the precomputed guess: when the frame is larger than the
+     * guess (e.g. incompressible data), HDF5 >= 2.2.0 rejects the write if
+     * the reported buffer size is smaller than the returned data size. */
+    outbuf_size = (size_t) status;
   } else {
     /* We're decompressing */
     /* declare dummy variables */

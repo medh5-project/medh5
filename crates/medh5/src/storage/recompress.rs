@@ -18,6 +18,7 @@ use super::codecs::{
 use crate::array::{Index, Slice};
 use crate::geometry::grid::{read_grids, Grid};
 use crate::h5::attrs;
+use crate::h5::chunks::Chunks;
 use crate::h5::data::{self, Kind};
 use crate::h5::file::{atomic_rewrite, open_read};
 use crate::h5::graph::{copy_stored, CopyHooks, GraphCopy};
@@ -112,6 +113,7 @@ pub fn recompress(path: &Path, profile: &str, out: Option<&Path>, rechunk: bool)
     let mut result =
         RecompressResult { path: target.to_string_lossy().into_owned(), profile: profile.into(), ..Default::default() };
     result.bytes_before = std::fs::metadata(path)?.len();
+    let threads = crate::parallel::threads()?;
     let before = atomic_rewrite(path, Some(target), |src, dst| {
         stage!("recompress.rewrite");
         require_major(src, path)?;
@@ -119,7 +121,8 @@ pub fn recompress(path: &Path, profile: &str, out: Option<&Path>, rechunk: bool)
         let src_root = src.as_group()?;
         ops::refuse_references(&src_root, "recompression")?;
         let dst_root = dst.as_group()?;
-        let mut hooks = Recode { codec: &codec, rechunk, result: &mut result, layouts: Vec::new(), roots: Vec::new() };
+        let mut hooks =
+            Recode { codec: &codec, rechunk, threads, result: &mut result, layouts: Vec::new(), roots: Vec::new() };
         GraphCopy::new(&src_root, &dst_root).members(&src_root, &dst_root, &[], &mut hooks)?;
         for key in attrs::names(&src_root)? {
             attrs::copy_raw(&src_root, &dst_root, &key)?;
@@ -301,6 +304,8 @@ impl Layout {
 struct Recode<'a> {
     codec: &'a CodecProfile,
     rechunk: bool,
+    /// How many threads compress each dataset's chunks.
+    threads: usize,
     result: &'a mut RecompressResult,
     /// One entry per group entered: the layout of the sample root it is,
     /// when it is one.
@@ -326,7 +331,7 @@ impl CopyHooks for Recode<'_> {
         // The innermost sample root, and its layout, as the walk nests them.
         let root = self.roots.iter().rev().find_map(Option::as_deref).unwrap_or("/");
         let layout = self.layouts.iter_mut().rev().find_map(Option::as_mut);
-        copy_dataset(src, name, dst, self.codec, self.rechunk, self.result, layout, root)
+        copy_dataset(src, name, dst, self.codec, self.rechunk, self.threads, self.result, layout, root)
     }
 }
 
@@ -348,6 +353,7 @@ fn copy_dataset(
     dst: &hdf5::Group,
     codec: &CodecProfile,
     rechunk: bool,
+    threads: usize,
     result: &mut RecompressResult,
     layout: Option<&mut Layout>,
     root: &str,
@@ -386,11 +392,28 @@ fn copy_dataset(
     }
     let before = describe_filters(&ds)?;
     let out = data::create_empty(dst, name, dtype, &shape, &new_layout)?;
-    for (start, stop) in slabs(&shape, dtype.itemsize(), 64 << 20) {
+    // Blosc2 compresses whole chunks on workers, outside HDF5's lock, from
+    // slabs cut on the new chunks' boundaries; anything else is written
+    // through HDF5, which compresses under its lock.  So is a dataset whose
+    // one row of chunks is over the slab budget: a slab of whole rows would
+    // read more than the budget at once.
+    let (budget, plane) = (slab_budget(), plane_bytes(&shape, dtype.itemsize()));
+    let direct = Chunks::of(&out, dtype).filter(|w| !through_hdf5() && w.chunk()[0].saturating_mul(plane) <= budget);
+    #[cfg(test)]
+    DIRECT.with(|n| n.set(n.get() + usize::from(direct.is_some())));
+    let rows = direct.as_ref().map_or(1, |w| w.chunk()[0]);
+    for (start, stop) in slabs(&shape, dtype.itemsize(), budget, rows) {
+        #[cfg(test)]
+        MOST_READ.set(MOST_READ.get().max((stop - start) * plane));
         let block = data::read_region(&ds, &[Index::Slice(Slice::new(start as i64, stop as i64))])?;
-        let mut starts = vec![0usize; shape.len()];
-        starts[0] = start;
-        data::write_region(&out, &block, &starts)?;
+        match &direct {
+            Some(writer) => writer.write_rows(&block, start, threads)?,
+            None => {
+                let mut starts = vec![0usize; shape.len()];
+                starts[0] = start;
+                data::write_region(&out, &block, &starts)?;
+            }
+        }
     }
     for key in attrs::names(&ds)? {
         attrs::copy_raw(&ds, &out, &key)?;
@@ -403,14 +426,49 @@ fn copy_dataset(
     Ok(())
 }
 
-/// Row windows covering a dataset, each under `budget` bytes.
-fn slabs(shape: &[usize], itemsize: usize, budget: usize) -> Vec<(usize, usize)> {
+#[cfg(test)]
+thread_local! {
+    /// Every dataset written through HDF5, for the tests that a direct write
+    /// stores what HDF5's would.
+    static THROUGH_HDF5: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The datasets written a chunk at a time.
+    static DIRECT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The slab budget, when a test sets one (0: the default).
+    static BUDGET: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The most bytes one slab read.
+    static MOST_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn through_hdf5() -> bool {
+    #[cfg(test)]
+    return THROUGH_HDF5.get();
+    #[cfg(not(test))]
+    false
+}
+
+/// The bytes one slab reads at most, unless one plane is more.
+fn slab_budget() -> usize {
+    #[cfg(test)]
+    if BUDGET.get() > 0 {
+        return BUDGET.get();
+    }
+    64 << 20
+}
+
+/// The bytes of one index of a dataset's first axis.
+fn plane_bytes(shape: &[usize], itemsize: usize) -> usize {
+    (shape.get(1..).unwrap_or(&[]).iter().product::<usize>().max(1) * itemsize).max(1)
+}
+
+/// Row windows covering a dataset, each under `budget` bytes, and each a
+/// whole number of `rows` (a chunk's first extent) but the last.
+fn slabs(shape: &[usize], itemsize: usize, budget: usize, rows: usize) -> Vec<(usize, usize)> {
     if shape.is_empty() || shape[0] == 0 {
         return vec![(0, shape.first().copied().unwrap_or(0))];
     }
-    let trailing: usize = shape[1..].iter().product::<usize>().max(1);
-    let per_plane = (trailing * itemsize).max(1);
-    let step = (budget / per_plane).clamp(1, shape[0]);
+    let per_plane = plane_bytes(shape, itemsize);
+    let rows = rows.max(1);
+    let step = ((budget / per_plane) / rows * rows).clamp(rows, shape[0].max(rows));
     let mut out = Vec::new();
     let mut start = 0;
     while start < shape[0] {
@@ -461,6 +519,97 @@ mod tests {
     use super::*;
     use crate::array::{DType, NdArray};
     use crate::sample::{create, GridOptions, ImageOptions};
+
+    /// A sample of two images, one of noise, and a mask, under
+    /// `profile`, with edge chunks on every axis.
+    fn sample(path: &Path, profile: &str) {
+        let mut writer = create(path, Some("s"), None, profile, &[]).unwrap();
+        let shape = [37usize, 70, 83];
+        writer.add_grid("g", &[37, 70, 83], &[1.0, 1.0, 1.0], GridOptions::default()).unwrap();
+        let n: usize = shape.iter().product();
+        let ct = NdArray::from_vec(&shape, (0..n).map(|i| ((i / 7) % 300) as f64 - 100.0).collect()).unwrap();
+        writer.add_image("CT", &ct.astype(DType::I16), "g", "CT", ImageOptions::default()).unwrap();
+        let mut rng = crate::rng::Rng::new(5);
+        let pet = NdArray::from_vec(&shape, (0..n).map(|_| 9.0 * rng.random()).collect()).unwrap();
+        writer.add_image("PET", &pet.astype(DType::F32), "g", "PT", ImageOptions::default()).unwrap();
+        let mask =
+            ndarray::ArrayD::from_shape_fn(ndarray::IxDyn(&shape), |i| (i[0] / 9 + i[1] / 20 + i[2] / 30) % 3 == 0);
+        writer.add_mask("fov", mask, "g", "other", None, None).unwrap();
+        writer.commit(true).unwrap();
+    }
+
+    /// A recompression stores, at one thread and at four, exactly the chunks
+    /// HDF5's own write of the same values stores --- every chunk's bytes and
+    /// filter mask, under each profile from each --- and the same
+    /// `content_id`.
+    #[test]
+    fn s14_2_a_recompression_stores_hdf5s_chunks_at_any_thread_count() {
+        let _serial = crate::parallel::tests::serial();
+        let dir = tempfile::tempdir().unwrap();
+        for from in ["portable", "training"] {
+            let source = dir.path().join(format!("{from}.medh5"));
+            sample(&source, from);
+            for profile in ["training", "balanced", "archive", "portable"] {
+                for rechunk in [false, true] {
+                    let mut outputs = Vec::new();
+                    for (threads, hdf5) in [(1, true), (1, false), (4, false)] {
+                        let out = dir.path().join(format!("{from}-{profile}-{rechunk}-{threads}-{hdf5}.medh5"));
+                        let _threads = crate::parallel::for_this_run(threads).unwrap();
+                        THROUGH_HDF5.set(hdf5);
+                        DIRECT.set(0);
+                        let result = recompress(&source, profile, Some(&out), rechunk);
+                        THROUGH_HDF5.set(false);
+                        let result = result.unwrap();
+                        assert!(result.ok(), "{result:?}");
+                        // Both images, unless HDF5 writes them; the mask
+                        // is a `bool`, an enumeration HDF5 maps.
+                        let direct = if hdf5 || profile == "portable" { 0 } else { 2 };
+                        assert_eq!(DIRECT.get(), direct, "{from} to {profile}");
+                        outputs.push((result.content_id.clone(), crate::h5::chunks::tests::stored_chunks(&out)));
+                    }
+                    let (reference, rest) = outputs.split_first().unwrap();
+                    assert!(!reference.1.is_empty());
+                    for other in rest {
+                        assert_eq!(other.0, reference.0, "{from} to {profile}");
+                        assert_eq!(other.1, reference.1, "{from} to {profile}, rechunk {rechunk}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A dataset whose one row of chunks is over the slab budget is written
+    /// through HDF5, a budget at a time: a slab of whole chunk rows would
+    /// read the row whole.  The file is the one a direct write gives.
+    #[test]
+    fn s14_2_a_chunk_row_over_the_slab_budget_is_written_through_hdf5() {
+        let _serial = crate::parallel::tests::serial();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("s.medh5");
+        sample(&source, "portable");
+        // Each image is one chunk of 37 planes; four planes of the f32 PET.
+        let budget = 4 * 70 * 83 * 4;
+        let mut ids = Vec::new();
+        for (n, set) in [(0, false), (1, true)] {
+            let out = dir.path().join(format!("{n}.medh5"));
+            let _threads = crate::parallel::for_this_run(4).unwrap();
+            BUDGET.set(if set { budget } else { 0 });
+            DIRECT.set(0);
+            MOST_READ.set(0);
+            let result = recompress(&source, "archive", Some(&out), false);
+            BUDGET.set(0);
+            let result = result.unwrap();
+            assert!(result.ok(), "{result:?}");
+            if set {
+                assert_eq!(DIRECT.get(), 0);
+                assert!(MOST_READ.get() <= budget, "{} > {budget}", MOST_READ.get());
+            } else {
+                assert_eq!(DIRECT.get(), 2);
+            }
+            ids.push(result.content_id);
+        }
+        assert_eq!(ids[0], ids[1]);
+    }
 
     /// What the check of a recompressed file cannot read is reported in the
     /// result: the file has been replaced by then, and an error raised there

@@ -149,7 +149,9 @@ fn release() {
 /// (`crate::parallel::Sections`), so letting them go touches no queue.
 ///
 /// The command line's runs end here: the child is in none of the parent's
-/// (`crate::parallel::end_runs_in_child`).
+/// (`crate::parallel::end_runs_in_child`).  And this thread is marked as the
+/// one that forked, which on macOS starts no worker in the child
+/// (`crate::parallel::forked_here`).
 fn release_in_child() {
     // SAFETY: only the raw lock's address is used, the key parking_lot
     // queues its waiters under.
@@ -159,6 +161,7 @@ fn release_in_child() {
     unsafe { parking_lot_core::unpark_all(hdf5, parking_lot_core::DEFAULT_UNPARK_TOKEN) };
     release();
     crate::parallel::end_runs_in_child();
+    crate::parallel::forked_here();
 }
 
 #[cfg(test)]
@@ -383,6 +386,149 @@ mod tests {
         other.join().unwrap();
         assert_eq!(crate::parallel::threads().unwrap(), before);
         assert_eq!(statuses, [0, 0], "a child was in a run of its parent's");
+    }
+
+    /// A fork from another thread while its workers compress chunks waits
+    /// until they have joined, and leaves a child that opens, writes and
+    /// reads files, with threads and without.
+    ///
+    /// The other thread compresses and stores nothing: a thread that meets
+    /// HDF5's lock held for the fork can leave parking_lot's table held in
+    /// the child (#106), which is not what this test is about.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_forked_during_threaded_compression_opens_writes_and_reads() {
+        use crate::array::{DType, NdArray};
+        use crate::h5::chunks::{native_bytes, Chunks};
+        use crate::h5::data::{self, Layout};
+        use crate::storage::codecs::{resolve_profile, Role};
+        let _serial = crate::parallel::tests::serial();
+        install();
+        crate::h5::init();
+        let dir = tempfile::tempdir().unwrap();
+        let shape = [48usize, 64, 64];
+        let values = NdArray::from_vec(&shape, (0..48 * 64 * 64).map(|i| (i % 1000) as f64).collect())
+            .unwrap()
+            .astype(DType::I16);
+        let layout = Layout {
+            chunks: Some(vec![8, 32, 32]),
+            filters: resolve_profile(Some("archive")).unwrap().codec(Role::Image).filters(),
+        };
+        let write = |path: &std::path::Path, threads: usize| -> crate::Result<()> {
+            let file = crate::h5::file::create_truncate(path)?;
+            let ds = data::create_empty(&file, "d", DType::I16, &shape, &layout)?;
+            Chunks::of(&ds, DType::I16).expect("a Blosc2 dataset").write_rows(&values, 0, threads)
+        };
+        let read = |path: &std::path::Path| data::read(&crate::h5::file::open_read(path)?.dataset("d")?);
+        // The chunks of `values`, as a write would cut and compress them.
+        let source = crate::h5::file::create_truncate(&dir.path().join("source.h5")).unwrap();
+        let chunks = Chunks::of(&data::create_empty(&source, "d", DType::I16, &shape, &layout).unwrap(), DType::I16)
+            .expect("a Blosc2 dataset");
+        let (codec, bytes, origins) = (chunks.codec(), native_bytes(&values), chunks.origins(0..shape[0]));
+        let stop = AtomicBool::new(false);
+        let failed = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(Ordering::SeqCst) {
+                    crate::parallel::ordered(
+                        4,
+                        origins.iter(),
+                        |origin| codec.compress(codec.cut(&bytes, &shape, &[0, 0, 0], origin)),
+                        |chunk| {
+                            drop(chunk);
+                            Ok::<_, ()>(())
+                        },
+                    )
+                    .unwrap();
+                }
+            });
+            let mut failed = Vec::new();
+            for k in 0..20 {
+                std::thread::sleep(std::time::Duration::from_millis(3));
+                let path = dir.path().join(format!("child-{k}.h5"));
+                // SAFETY: the child writes and reads files of its own and exits.
+                let pid = unsafe { fork() };
+                if pid == 0 {
+                    // SAFETY: an alarm ends a child that waits forever.
+                    unsafe { libc::alarm(10) };
+                    let failed =
+                        [2, 1].into_iter().find_map(|threads| match write(&path, threads).and_then(|()| read(&path)) {
+                            Ok(read) if read == values => None,
+                            Ok(_) => Some(format!("{threads} thread(s): read back other values\n")),
+                            Err(e) => Some(format!("{threads} thread(s): {e}\n")),
+                        });
+                    if let Some(why) = &failed {
+                        // SAFETY: writes the reason to stderr, taking no lock
+                        // a parent's thread may hold.
+                        unsafe { libc::write(2, why.as_ptr().cast(), why.len()) };
+                    }
+                    let ok = failed.is_none();
+                    // SAFETY: the child ends without running the parent's exit handlers.
+                    unsafe { libc::_exit(if ok { 0 } else { 1 }) };
+                }
+                match exit_status(pid) {
+                    0 => {}
+                    status if libc::WIFSIGNALED(status) => failed.push(format!("signal {}", libc::WTERMSIG(status))),
+                    status => failed.push(format!("exit {}", libc::WEXITSTATUS(status))),
+                }
+            }
+            stop.store(true, Ordering::SeqCst);
+            failed
+        });
+        assert_eq!(failed, Vec::<String>::new(), "a child could not write and read");
+    }
+
+    /// A child forked by a thread that had parked runs threaded calls to
+    /// the end, ordered and streamed, on that thread alone on macOS.
+    ///
+    /// There a thread parks on a libdispatch semaphore, a Mach port made the
+    /// first time it parks, which the child does not inherit: waiting for
+    /// its workers in the child, the thread waited on a port that is not
+    /// there, and libdispatch stopped the child with `SIGTRAP`.  The work is
+    /// slow enough that the caller parks for it.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_forked_by_a_thread_that_parked_runs_a_threaded_call() {
+        use crate::parallel::STARTED;
+        let _serial = crate::parallel::tests::serial();
+        install();
+        std::thread::park_timeout(std::time::Duration::from_millis(1));
+        let slow = |i: usize| {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            i
+        };
+        crate::parallel::ordered(4, 0..8usize, slow, |_| Ok::<_, ()>(())).unwrap();
+        // SAFETY: the child runs a threaded call, which makes no HDF5 call,
+        // and exits.
+        let pid = unsafe { fork() };
+        if pid == 0 {
+            // SAFETY: an alarm ends a child that waits forever.
+            unsafe { libc::alarm(10) };
+            let (sum, before) = (std::sync::atomic::AtomicUsize::new(0), STARTED.load(Ordering::SeqCst));
+            let ran = crate::parallel::ordered(4, 0..8usize, slow, |i| {
+                sum.fetch_add(i, Ordering::SeqCst);
+                Ok::<_, ()>(())
+            });
+            let streamed = crate::parallel::streams(
+                4,
+                vec![0usize; 2],
+                |feed| (0..8).for_each(|i| feed.push(i % 2, i)),
+                |i| Ok::<_, ()>(slow(i)),
+                |total, i| {
+                    *total += i;
+                    Ok(())
+                },
+            );
+            let workers = if cfg!(target_vendor = "apple") { 0 } else { 8 };
+            let ok = ran.is_ok()
+                && sum.load(Ordering::SeqCst) == 28
+                && streamed == [(12, None), (16, None)]
+                && STARTED.load(Ordering::SeqCst) == before + workers;
+            // SAFETY: the child ends without running the parent's exit handlers.
+            unsafe { libc::_exit(if ok { 0 } else { 1 }) };
+        }
+        let status = exit_status(pid);
+        assert!(!libc::WIFSIGNALED(status), "the child was stopped by signal {}", libc::WTERMSIG(status));
+        assert_eq!(libc::WEXITSTATUS(status), 0, "the child's call did not run to the end on the threads it may use");
     }
 
     /// A fork made while a call holds the parallel sections and waits for

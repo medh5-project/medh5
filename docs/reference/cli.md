@@ -54,8 +54,9 @@ reads only.
 may use for its work outside HDF5 (default: `MEDH5_THREADS`, else 1; `0` is
 refused). Every process the command starts — a `--workers` process, or the
 Python that runs a converter — is given the same count, so `--workers 4
---threads 2` can keep eight threads busy. A command with no threaded work runs
-as before. [Threads inside one call](../explanation/concurrency.md#threads-inside-one-call)
+--threads 2` can keep eight threads busy. `recompress` and `resample` compress
+the chunks they write on the threads; a command with no threaded work runs as
+before. [Which calls use them](../explanation/concurrency.md#which-calls-use-them)
 says what the threads do.
 
 A command that changes a file in place — `fix`, `index build`, `seg convert`,

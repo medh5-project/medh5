@@ -6,6 +6,7 @@
 //! model (atomic create, copy-on-write amend, unknown-object preservation).
 
 pub mod attrs;
+pub(crate) mod chunks;
 pub mod data;
 pub mod file;
 #[doc(hidden)]

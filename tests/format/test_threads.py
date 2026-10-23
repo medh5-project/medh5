@@ -14,8 +14,10 @@ import os
 import re
 import select
 import signal
+import sys
 import threading
 import time
+import traceback
 import warnings
 from collections.abc import Callable
 from pathlib import Path
@@ -1135,29 +1137,44 @@ class TestShared:
 
     @staticmethod
     def _ends_in_a_forked_child(call: Callable[[], object]) -> bool:
-        """Whether *call* ends in a child forked now, within ten seconds."""
+        """Whether *call* ends in a child forked now, within ten seconds.  A
+        child that does not says why on stderr: its traceback, a hang, or
+        how it exited."""
         read, write = os.pipe()
         with warnings.catch_warnings():
             # Forking a process with threads is what is under test.
             warnings.simplefilter("ignore", DeprecationWarning)
             pid = os.fork()
         if pid == 0:  # pragma: no cover - the child reports through the pipe
-            ok = False
+            report = b"0 the child ended before it reported"
             try:
                 os.close(read)
                 call()
-                ok = True
+                report = b"1"
+            except BaseException:
+                report = b"0 " + traceback.format_exc().encode()
             finally:
-                os.write(write, b"1" if ok else b"0")
+                os.write(write, report)
                 os._exit(0)
         os.close(write)
-        ready, _, _ = select.select([read], [], [], 10)
-        if not ready:  # pragma: no cover - the failure: the child hangs
+        report = b""
+        while select.select([read], [], [], 10)[0]:
+            part = os.read(read, 1 << 16)
+            if not part:
+                break
+            report += part
+        else:  # pragma: no cover - the failure: the child hangs
             os.kill(pid, signal.SIGKILL)
-        ended = bool(ready) and os.read(read, 1) == b"1"
+            report = b"0 the child hung"
         os.close(read)
-        os.waitpid(pid, 0)
-        return ended
+        _, status = os.waitpid(pid, 0)
+        if report == b"1":
+            return True
+        print(  # pragma: no cover - the failure, explained
+            f"child {pid}, status {status}: {report[2:].decode(errors='replace')}",
+            file=sys.stderr,
+        )
+        return False  # pragma: no cover
 
     def _runs_in_a_child_forked_while_held(
         self, lock: Any, call: Callable[[], object]
@@ -1254,6 +1271,45 @@ class TestShared:
         with medh5.open(write_sample(tmp_path / "s.medh5")) as s:
             image = s.images["CT_tp0"]
             assert self._runs_in_children_forked_during(image.read, read)
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX: fork")
+    def test_a_child_forked_after_a_threaded_recompression_recompresses(
+        self, tmp_path: Path
+    ):
+        """A child forked after a recompression at four threads recompresses
+        and reads at two and one: the parent's workers and runs are not the
+        child's.
+
+        A fork *during* one is held in Rust (`h5::fork`), by a thread that
+        compresses on workers and never takes HDF5's lock.  Here the thread
+        would take it, and a fork while it waits for the lock leaves the child
+        parking_lot's queue in a state it cannot unwind: about one child in
+        500 hangs (#106)."""
+        from medh5.storage import recompress
+
+        shape = (40, 72, 72)
+        values = np.random.default_rng(29).integers(-1000, 1500, shape)
+        with medh5.create(tmp_path / "s.medh5", codec="balanced") as w:
+            w.add_grid("g", shape=shape, spacing=(1.0, 1.0, 1.0))
+            w.add_image("CT", values.astype(np.int16), grid="g", modality="CT")
+
+        def child() -> None:
+            for n in (2, 1):
+                medh5.set_threads(n)
+                out = tmp_path / f"child-{os.getpid()}-{n}.medh5"
+                assert recompress(tmp_path / "s.medh5", "training", out=out).ok
+                with medh5.open(out) as s:
+                    np.testing.assert_array_equal(s.images["CT"].read(), values)
+
+        threads = medh5.get_threads()
+        try:
+            medh5.set_threads(4)
+            for n in range(3):
+                out = tmp_path / f"parent-{n}.medh5"
+                assert recompress(tmp_path / "s.medh5", "training", out=out).ok
+                assert self._ends_in_a_forked_child(child)
+        finally:
+            medh5.set_threads(threads)
 
     @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX: fork")
     def test_a_fork_during_another_threads_loads_leaves_the_child_a_registry(self):

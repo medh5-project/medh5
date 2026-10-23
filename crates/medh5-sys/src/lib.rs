@@ -62,6 +62,8 @@ unsafe extern "C" {
 
     fn blosc2_init();
 
+    fn blosc2_set_threads_callback(callback: Option<ThreadsCallback>, callback_data: *mut c_void);
+
     /// Decompress the slice `[start, stop)` of one stored chunk --- a B2ND
     /// frame of `frame_len` bytes --- into `out`, in C order, touching only
     /// the blocks the slice covers.
@@ -101,15 +103,80 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
+/// C-Blosc2's threads callback: `dojob` on each of `numjobs` job records of
+/// `jobdata_elsize` bytes from `jobdata`, returning when every one is done.
+type ThreadsCallback = unsafe extern "C" fn(
+    callback_data: *mut c_void,
+    dojob: unsafe extern "C" fn(*mut c_void),
+    numjobs: c_int,
+    jobdata_elsize: usize,
+    jobdata: *mut c_void,
+);
+
+/// Run C-Blosc2's parallel jobs on threads started for them, joined before
+/// it returns.
+///
+/// Without a callback, a context of more than one thread starts its threads
+/// when it is first used, whether or not the work is large enough to share:
+/// the frame Blosc2 builds around every chunk the filter compresses
+/// compresses its index with a context of its own, of four threads (or
+/// `BLOSC_NTHREADS`), so every chunk started and stopped four threads that
+/// had nothing to do.  With it, threads are started only for work that is
+/// shared out: none for a chunk's index, and none in a worker of the chunk
+/// writer, whose contexts are of one thread.  A user's `BLOSC_NTHREADS` still
+/// spreads a large chunk's blocks over that many threads.
+///
+/// The jobs take blocks from one queue until it is empty, so one that cannot
+/// be given a thread runs here, after the others have started.
+unsafe extern "C" fn run_jobs(
+    _callback_data: *mut c_void,
+    dojob: unsafe extern "C" fn(*mut c_void),
+    numjobs: c_int,
+    jobdata_elsize: usize,
+    jobdata: *mut c_void,
+) {
+    let base = jobdata as usize;
+    let job = move |i: usize| {
+        // SAFETY: Blosc2 hands `numjobs` records of `jobdata_elsize` bytes,
+        // each the argument of one call of `dojob`, until this returns; each
+        // thread is joined before it does, and `dojob` cannot unwind.
+        unsafe { dojob((base + i * jobdata_elsize) as *mut c_void) }
+    };
+    // Threads joined one by one rather than a scope, whose end parks this
+    // thread while one still runs.  On macOS a thread parks on a libdispatch
+    // semaphore, a Mach port made the first time it parks, which a forked
+    // child does not inherit: a child's first scope, on a thread that had
+    // parked in the parent, stopped the child (`SIGTRAP`).  A join parks
+    // nothing.
+    let mut here = vec![0];
+    let mut started = Vec::new();
+    for i in 1..numjobs.max(1) as usize {
+        match std::thread::Builder::new().spawn(move || job(i)) {
+            Ok(handle) => started.push(handle),
+            Err(_) => here.push(i),
+        }
+    }
+    for i in here {
+        job(i);
+    }
+    for handle in started {
+        let _ = handle.join();
+    }
+}
+
 /// Start C-Blosc2, once per process.  `blosc2_init` is not safe to enter
 /// from two threads at once: a call that finds the library not yet started
 /// registers the codecs afresh and initialises the global context's mutex,
 /// under any other thread doing the same.  Later calls (the filter makes one
-/// per chunk) return at once.
+/// per chunk) return at once.  The threads callback ([`run_jobs`]) is set
+/// first, as Blosc2 asks, before any other Blosc2 call.
 fn start_blosc2() {
     static STARTED: std::sync::Once = std::sync::Once::new();
     // SAFETY: C-Blosc2's own initialisation, entered by one thread only.
-    STARTED.call_once(|| unsafe { blosc2_init() });
+    STARTED.call_once(|| unsafe {
+        blosc2_set_threads_callback(Some(run_jobs), std::ptr::null_mut());
+        blosc2_init();
+    });
 }
 
 /// Register the HDF5-Blosc2 filter with the process's HDF5 library.
@@ -477,5 +544,52 @@ mod tests {
             blosc2_init();
             assert_eq!(blosc2_compname_to_compcode(name.as_ptr()), 250);
         }
+    }
+
+    /// A child forked by a thread that had parked runs Blosc2's jobs on
+    /// threads, each to the end.  On macOS a thread parks on a libdispatch
+    /// semaphore, a Mach port the child does not inherit, so the jobs'
+    /// threads are joined, which parks nothing: the end of a scope parked
+    /// the thread on that port, and libdispatch stopped the child
+    /// (`SIGTRAP`).  The jobs are slow enough that it would.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_forked_by_a_thread_that_parked_runs_blosc2s_jobs() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        unsafe extern "C" {
+            fn fork() -> c_int;
+            fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
+            fn alarm(seconds: c_uint) -> c_uint;
+            fn _exit(code: c_int) -> !;
+        }
+        static SUM: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn dojob(record: *mut c_void) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            // SAFETY: each record is one `usize` of `records`.
+            SUM.fetch_add(unsafe { *record.cast::<usize>() }, Ordering::SeqCst);
+        }
+        let mut records: Vec<usize> = (1..=4).collect();
+        let run = |records: &mut Vec<usize>| {
+            SUM.store(0, Ordering::SeqCst);
+            // SAFETY: four records of one `usize` each, alive for the call.
+            unsafe { run_jobs(std::ptr::null_mut(), dojob, 4, size_of::<usize>(), records.as_mut_ptr().cast()) };
+            SUM.load(Ordering::SeqCst)
+        };
+        std::thread::park_timeout(std::time::Duration::from_millis(1));
+        assert_eq!(run(&mut records), 10);
+        // SAFETY: the child runs the jobs, which make no HDF5 call, and exits.
+        let pid = unsafe { fork() };
+        if pid == 0 {
+            // SAFETY: an alarm ends a child that waits forever; the child
+            // ends without running the parent's exit handlers.
+            unsafe {
+                alarm(10);
+                _exit(if run(&mut records) == 10 { 0 } else { 1 })
+            }
+        }
+        let mut status = 0;
+        // SAFETY: waits for the child just forked.
+        assert_eq!(unsafe { waitpid(pid, &mut status, 0) }, pid);
+        assert_eq!(status, 0, "the child did not run the jobs to the end (wait status {status})");
     }
 }

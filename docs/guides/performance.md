@@ -412,6 +412,31 @@ only with its `asm` feature, which medh5 does not enable, so every aarch64
 build hashes in software. On a CPU that hashes several times faster the
 digests' share, and so what threads give them, is smaller.
 
+### Threads in `recompress` and `resample`
+
+With `--threads N`, `recompress` and `resample` compress the chunks they
+write on *N* threads, and `resample` maps and interpolates each chunk on the
+thread that compresses it
+([Which calls use them](../explanation/concurrency.md#which-calls-use-them)).
+The same sample and machine as above, an ordinary release build, seconds,
+median of three:
+
+| Command | 2.2.2 | 1 thread | 2 threads | 4 threads |
+|---|---|---|---|---|
+| `recompress --profile archive` | 116.3 | 90.5 | 48.2 | 29.5 |
+| `recompress --profile training` | 8.5 | 7.9 | 8.2 | 7.5 |
+| `resample`, nearest, no annotation | 15.7 | 15.3 | 15.4 | 14.1 |
+| `resample`, linear, carrying the annotation | 43.4 | 40.0 | 33.4 | 29.1 |
+
+Compression is nearly all of an archive recompression, so it is the command
+threads shorten most. One thread is faster than 2.2.2 there too: 2.2.2 with
+`BLOSC_NTHREADS=1` took 104.6 s, so about 12 s of its time was Blosc2
+starting threads it never used, which it no longer does. A `training`
+recompression and a nearest resample spend little time compressing, and most
+of the rest is digests: these figures were taken before the digests used
+threads, which the next section measures. Every file written at four threads
+holds the bytes one thread writes.
+
 ### Threads in the digests
 
 With `--threads N`, every command that commits a sample, `verify` and
