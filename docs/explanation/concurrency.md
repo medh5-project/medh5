@@ -122,6 +122,16 @@ its first read would wait for it forever. medh5 has `fork` itself take HDF5's lo
 (`pthread_atfork`) and let it go on both sides as it returns, and the locks medh5 keeps in Python
 (the handle caches, the vocabulary registry, documents' live views) are made anew in the child.
 
+One case is left ([#106](https://github.com/medh5-project/medh5/issues/106)). If another thread
+starts waiting for HDF5's lock at the very moment of the fork, the child can hang before any of its
+own code runs. The lock queues its waiters in a table shared across the process, and that thread
+can be partway into the table when the fork copies it. Measured with one thread recompressing at
+four threads while another forked over and over, the hang came about once in 500 forks. A
+`DataLoader` forks its workers when its iterator is made, so it meets this only if another thread
+of yours is calling medh5 at that moment. To rule it out, fork while no other thread is calling
+medh5, or start child processes with `spawn` or `forkserver` instead
+(`multiprocessing_context="spawn"` for a `DataLoader`).
+
 `exec` is the other half. HDF5 opens files without close-on-exec, so a program started while a
 sample was open used to inherit the descriptor, and with it HDF5's file lock. medh5 now marks each
 file it opens close-on-exec, on every platform, so a child process neither keeps the file locked
