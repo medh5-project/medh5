@@ -65,11 +65,11 @@ fn digests_in_slabs(threads: usize, budget: usize, mut jobs: Vec<Job<'_>>) -> Ve
         let inspect = job.inspect.take();
         match plan(job, budget) {
             Ok((hasher, plan)) => {
-                states.push(Stream { hasher: Some(hasher), inspect });
+                states.push(Stream { hasher: Some(hasher), inspect, slab: None });
                 plans.push(Ok(plan));
             }
             Err(e) => {
-                states.push(Stream { hasher: None, inspect });
+                states.push(Stream { hasher: None, inspect, slab: None });
                 plans.push(Err(e));
             }
         }
@@ -113,6 +113,8 @@ struct Stream<'a> {
     /// `None` for a dataset that failed before its first byte.
     hasher: Option<Hasher>,
     inspect: Option<Inspector<'a>>,
+    /// The slab whose bands are being placed, until its last is.
+    slab: Option<NdArray>,
 }
 
 /// What one slab is when the calling thread has read it.
@@ -123,12 +125,28 @@ enum Item {
     Values(NdArray),
     /// Bytes hashed as they are: strings, other fixed-size types.
     Bytes(Vec<u8>),
+    /// One band of a slab whose stored chunks come to more than the budget
+    /// ([`feed_bands`]): its stored chunks, or its values where they too
+    /// would, and where it goes in the slab.
+    Band(Box<Item>, Place),
+}
+
+/// Where a band's values go in its slab.
+struct Place {
+    /// The slab's shape.
+    shape: Vec<usize>,
+    /// The slab's axis the bands cut, and where along it this one starts.
+    axis: usize,
+    at: usize,
+    /// Whether this band completes the slab.
+    last: bool,
 }
 
 /// What one slab is when a worker has decompressed it.
 enum Decoded {
     Values(NdArray),
     Bytes(Vec<u8>),
+    Band(NdArray, Place),
 }
 
 /// Why a dataset has no digest from the workers.
@@ -260,6 +278,11 @@ impl Cursor {
 /// Read every dataset and hand each slab to its stream: up to `threads`
 /// numeric datasets at once, a slab of each in turn, so that as many are
 /// hashed at once; the others whole, at their turn.
+///
+/// The largest datasets are begun first.  A dataset is one hash, on one
+/// worker at a time, so the largest bounds the call however many workers
+/// there are; begun last, as the sample orders its paths, it ran alone at the
+/// end.  The order of the results is the order of `jobs`.
 fn feed_all(
     feed: &crate::parallel::Feed<'_, Stream<'_>, Item, Decoded, Failure>,
     threads: usize,
@@ -267,7 +290,9 @@ fn feed_all(
     jobs: &[Job<'_>],
     plans: Vec<Result<Plan>>,
 ) {
-    let mut waiting: VecDeque<(usize, Result<Plan>)> = plans.into_iter().enumerate().collect();
+    let mut waiting: Vec<(usize, Result<Plan>)> = plans.into_iter().enumerate().collect();
+    waiting.sort_by_key(|(s, _)| std::cmp::Reverse(values_bytes(&jobs[*s].ds)));
+    let mut waiting: VecDeque<(usize, Result<Plan>)> = waiting.into();
     let mut open: Vec<(usize, Cursor)> = Vec::new();
     loop {
         while open.len() < threads {
@@ -290,11 +315,8 @@ fn feed_all(
                 return false;
             }
             let Some(index) = cursor.next() else { return false };
-            match read_slab(&jobs[*s].ds, &index, budget) {
-                Ok(item) => {
-                    feed.push(*s, item);
-                    true
-                }
+            match feed_slab(feed, *s, &jobs[*s].ds, &index, budget) {
+                Ok(()) => true,
                 Err(e) => {
                     feed.fail(*s, Failure::Error(e));
                     false
@@ -302,6 +324,13 @@ fn feed_all(
             }
         });
     }
+}
+
+/// The bytes a dataset's values take, as near as its shape and type say;
+/// 0 where they do not.
+fn values_bytes(ds: &hdf5::Dataset) -> usize {
+    let size = ds.dtype().map(|t| t.size()).unwrap_or(0);
+    ds.shape().iter().try_fold(size, |n, e| n.checked_mul(*e)).unwrap_or(usize::MAX)
 }
 
 /// A dataset that is not read a numeric slab at a time, fed whole.
@@ -336,14 +365,82 @@ fn feed_whole(
     Ok(())
 }
 
-/// One slab: its stored chunks, where a worker can decompress them all and
-/// they hold no more than `budget` bytes, else its values, read here.
-fn read_slab(ds: &hdf5::Dataset, index: &[Index], budget: usize) -> Result<Item> {
-    Ok(match data::read_region_stored(ds, index, budget)? {
+/// Feed stream `s` one slab: its stored chunks, where a worker can
+/// decompress them all and they hold no more than `budget` bytes; where they
+/// hold more, the slab a band at a time ([`feed_bands`]); else its values,
+/// read here.
+fn feed_slab(
+    feed: &crate::parallel::Feed<'_, Stream<'_>, Item, Decoded, Failure>,
+    s: usize,
+    ds: &hdf5::Dataset,
+    index: &[Index],
+    budget: usize,
+) -> Result<()> {
+    let item = match data::read_region_stored(ds, index, budget)? {
         Region::Values(values) => Item::Values(values),
-        Region::Stored(frames, axes) if frames.fit() => Item::Frames(frames, axes),
-        Region::Stored(_, axes) => Item::Values(data::read_axes(ds, &axes)?),
+        Region::Stored(frames, axes) => stored_or_read(ds, frames, axes)?,
+        Region::Over(axes) => match feed_bands(feed, s, ds, &axes, budget)? {
+            true => return Ok(()),
+            false => Item::Values(data::read_axes(ds, &axes)?),
+        },
+    };
+    feed.push(s, item);
+    Ok(())
+}
+
+/// Stored chunks a worker can decompress, else the values HDF5 reads.
+fn stored_or_read(ds: &hdf5::Dataset, frames: Frames, axes: Vec<(usize, usize, usize, bool)>) -> Result<Item> {
+    Ok(match frames.fit() {
+        true => Item::Frames(frames, axes),
+        false => Item::Values(data::read_axes(ds, &axes)?),
     })
+}
+
+/// Feed stream `s` the slab `axes`, whose stored chunks hold more than
+/// `budget` bytes, cut along its second kept axis at that axis's chunk
+/// edges: each band's stored chunks, or its values where they too hold more,
+/// for the stream to place in the slab and hash once it is whole.  `false`,
+/// with nothing fed, where the slab cannot be cut so.
+///
+/// A slab lies across a band of the chunks of its first axis, so the chunks
+/// it touches can hold several times its values --- all of a 26-row slab's
+/// 128-row chunks.  HDF5 read such a slab under its lock, decompressing each
+/// chunk whole, once for every slab across it; a band is read as the
+/// sequential pass reads a slab, its covered blocks decompressed on a worker.
+fn feed_bands(
+    feed: &crate::parallel::Feed<'_, Stream<'_>, Item, Decoded, Failure>,
+    s: usize,
+    ds: &hdf5::Dataset,
+    axes: &[(usize, usize, usize, bool)],
+    budget: usize,
+) -> Result<bool> {
+    let kept: Vec<usize> = (0..axes.len()).filter(|d| axes[*d].3).collect();
+    let Some(&d) = kept.get(1) else { return Ok(false) };
+    let Some(chunk) = data::chunks(ds).and_then(|c| c.get(d).copied()).filter(|c| *c > 0) else {
+        return Ok(false);
+    };
+    let (start, count, step, _) = axes[d];
+    if step != 1 || count <= chunk {
+        return Ok(false);
+    }
+    let dtype = data::dtype(ds)?;
+    let shape: Vec<usize> = kept.iter().map(|k| axes[*k].1).collect();
+    let end = start + count;
+    let mut lo = start;
+    while lo < end && !feed.failed(s) {
+        let hi = (lo / chunk + 1).saturating_mul(chunk).min(end);
+        let mut band = axes.to_vec();
+        band[d] = (lo, hi - lo, 1, true);
+        let out: Vec<usize> = band.iter().filter(|a| a.3).map(|a| a.1).collect();
+        let item = match crate::h5::window::read_frames(ds, dtype, &band, &out, budget) {
+            Some(frames) => stored_or_read(ds, frames, band)?,
+            None => Item::Values(data::read_axes(ds, &band)?),
+        };
+        let place = Place { shape: shape.clone(), axis: 1, at: lo - start, last: hi == end };
+        feed.push(s, Item::Band(Box::new(item), place));
+        lo = hi;
+    }
+    Ok(true)
 }
 
 /// A worker's first step: the slab's values out of its stored chunks.
@@ -356,23 +453,46 @@ fn decode(item: Item) -> std::result::Result<Decoded, Failure> {
         },
         Item::Values(values) => Ok(Decoded::Values(values)),
         Item::Bytes(bytes) => Ok(Decoded::Bytes(bytes)),
+        Item::Band(item, place) => match decode(*item)? {
+            Decoded::Values(values) => Ok(Decoded::Band(values, place)),
+            _ => unreachable!("a band is stored chunks or values"),
+        },
     }
 }
 
 /// A worker's second step, one stream at a time and in its order: inspect
 /// the slab and hash it.
 fn consume(stream: &mut Stream<'_>, decoded: Decoded) -> std::result::Result<(), Failure> {
-    let hasher = stream.hasher.as_mut().expect("a stream fed slabs has its hasher");
-    match decoded {
-        Decoded::Values(values) => {
-            if let Some(inspect) = stream.inspect.as_mut() {
-                inspect(&values).map_err(Failure::Error)?;
-            }
-            values.for_each_le_piece(LE_PIECE_BYTES, &mut |bytes| hasher.update(bytes));
+    let values = match decoded {
+        Decoded::Values(values) => values,
+        Decoded::Bytes(bytes) => {
+            stream.hasher.as_mut().expect("a stream fed slabs has its hasher").update(&bytes);
+            return Ok(());
         }
-        Decoded::Bytes(bytes) => hasher.update(&bytes),
+        Decoded::Band(values, place) => {
+            let slab = stream.slab.get_or_insert_with(|| NdArray::zeros(values.dtype(), &place.shape));
+            put_band(slab, &place, &values);
+            if !place.last {
+                return Ok(());
+            }
+            stream.slab.take().expect("placed above")
+        }
+    };
+    if let Some(inspect) = stream.inspect.as_mut() {
+        inspect(&values).map_err(Failure::Error)?;
     }
+    let hasher = stream.hasher.as_mut().expect("a stream fed slabs has its hasher");
+    values.for_each_le_piece(LE_PIECE_BYTES, &mut |bytes| hasher.update(bytes));
     Ok(())
+}
+
+/// Copy a band's values into its place in the slab.
+fn put_band(slab: &mut NdArray, place: &Place, band: &NdArray) {
+    crate::with_array!(slab, into => {
+        let band = band.as_typed().expect("a band has its slab's type");
+        let span = ndarray::Slice::from(place.at..place.at + band.shape()[place.axis]);
+        into.slice_axis_mut(ndarray::Axis(place.axis), span).assign(band);
+    })
 }
 
 #[cfg(test)]
@@ -571,6 +691,45 @@ mod tests {
         assert_eq!(seen(4), seen(1));
     }
 
+    /// A slab whose stored chunks hold more than the budget is read a band
+    /// of its next axis at a time, each band's blocks decompressed on a
+    /// worker, and never through HDF5, which decompressed each chunk whole
+    /// under its lock, once for every slab across it.  The digest, and the
+    /// blocks an inspector sees, are the sequential pass's.
+    #[test]
+    fn s13_1_a_slab_past_the_budget_is_read_a_band_at_a_time() {
+        let _serial = crate::parallel::tests::serial();
+        crate::h5::init();
+        let dir = tempfile::tempdir().unwrap();
+        let file = crate::h5::file::create_truncate(&dir.path().join("b.h5")).unwrap();
+        let mut rng = Rng::new(17);
+        // A slab is one band of chunks, 8 rows of 8 KiB, twice the budget,
+        // as `Slabs` allows; its sixteen chunks hold more than the budget.
+        let ds =
+            data::create(&file, "d", &volume(&[24, 64, 64], DType::I16, &mut rng), &layout("training", &[8, 16, 16]))
+                .unwrap();
+        let budget = 32 * 1024;
+        let first = [Index::Slice(Slice::new(0, 8))];
+        assert!(matches!(data::read_region_stored(&ds, &first, budget).unwrap(), Region::Over(_)));
+        let blocks = |threads: usize| -> (Vec<std::result::Result<String, String>>, Vec<NdArray>) {
+            let mut seen = Vec::new();
+            let mut job = Job::new(ds.clone(), "d", "sha256");
+            job.inspect = Some(Box::new(|block: &NdArray| {
+                seen.push(block.clone());
+                Ok(())
+            }));
+            let digests = shown(digests_in_slabs(threads, budget, vec![job]));
+            (digests, seen)
+        };
+        let expected = blocks(1);
+        // The calling thread makes every read.
+        data::hyperslabs_here();
+        assert_eq!(blocks(4), expected);
+        assert_eq!(data::hyperslabs_here(), 0, "a slab was read through HDF5");
+        let dataset = dataset_digest_inspected(&ds, "d", "sha256", STREAM_BYTES, None).unwrap();
+        assert_eq!(expected.0, vec![Ok(dataset)]);
+    }
+
     /// A chunk whose blocks do not decompress fails its dataset with HDF5's
     /// error, as the sequential pass does, and only its dataset.
     #[test]
@@ -600,7 +759,7 @@ mod tests {
         .unwrap()
         {
             Region::Stored(frames, _) => Some(frames),
-            Region::Values(_) => None,
+            Region::Values(_) | Region::Over(_) => None,
         };
         let (_, original) = crate::h5::ops::read_raw_chunk(&bad, &[6, 0, 0]).unwrap();
         let damaged = (0..original.len()).step_by(16).find_map(|at| {
