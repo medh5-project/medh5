@@ -9,14 +9,3 @@
 # tests/project/python_api.txt prints it) or `cli` (`medh5 COMMAND --flag`,
 # checked against the parser).  Emptied by the first pull request after the
 # release that ships these names, when they are the baseline.
-rust	medh5::parallel	D6
-rust	medh5::parallel::set_threads	D6
-rust	medh5::parallel::threads	D6
-python	medh5.set_threads	D6
-python	medh5.get_threads	D6
-cli	medh5 --threads	D6
-cli	medh5 migrate --workers	D7
-cli	medh5 convert to-nnunet --workers	D7
-cli	medh5 conformance run --workers	D7
-cli	medh5 task preflight --workers	D7
-cli	medh5 clinical augment-cohort --workers	D7
