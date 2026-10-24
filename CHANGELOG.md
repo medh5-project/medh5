@@ -6,6 +6,91 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.3] — 2026-10-24
+
+**A patch release, with no format change.** Threads inside one call, and
+processes across files: the format stays 1.2, the diagnostic code table
+keeps its codes, and every object 2.2.2 wrote, 2.2.3 writes with the same
+digest, at any thread count. `--threads N`, `medh5.set_threads(n)` or
+`MEDH5_THREADS` lets one call compress the chunks it writes and hash its
+digests on N threads, outside HDF5's lock; one thread, the default, starts
+none. On a 576 MiB sample with four threads, `recompress --profile archive`
+took 23.2 s instead of 2.2.2's 95.9 s, a linear `resample` 15.5 s instead of
+36.0 s, and `verify` 2.1 s instead of 4.8 s. Five more commands take
+`--workers N`. The thread setting and those flags are the release's only new
+names, added in a patch by the maintainer's decision.
+
+### Added
+
+- **`medh5.set_threads(n)` and `medh5.get_threads()` say how many threads one
+  call may use for its work outside HDF5.** The count is what `set_threads`
+  set, else the `MEDH5_THREADS` environment variable, else 1, which starts no
+  thread; a value that is not a positive integer is refused, never guessed.
+  Rust has the same as `medh5::parallel::set_threads` and `threads`. New in
+  a patch release by the maintainer's decision, as the one setting 2.2.3's
+  parallel work needs.
+  `medh5.torch.worker_init_fn` sets one thread in each `DataLoader` worker.
+  On macOS, the thread that forked a child runs each call by itself in the
+  child: it would wait for threads on a Mach port made before the fork, which
+  the child does not inherit.
+- **`--threads N`, before or after any command name, sets the thread count
+  for the one command.** Every process the command starts, a `--workers`
+  process or a Python converter, is given it as `MEDH5_THREADS`. With it, a
+  long option of `agree` shortened to `--th`, `--thr` or `--thre` names two
+  options; spell `--threshold` out.
+- **`migrate`, `convert to-nnunet`, `conformance run`, `task preflight` and
+  `clinical augment-cohort` take `--workers N`.** Each runs its units in up
+  to N processes and prints what one process prints, byte for byte: a
+  subject's 0.x files for `migrate`, a case for `to-nnunet` and `conformance
+  run`, a subject for the other two. What the run shares (the label set, the
+  case names, the one pass over the source) is worked out first, and units
+  that touch one file go to one process. Over 32 files on four cores, with
+  four workers: `migrate` 3.7 times faster, `conformance run` 3.5,
+  `task preflight` 3.6, `to-nnunet` 2.4, `augment-cohort` 1.6. A process
+  that dies fails only its unit. `scrub`, `splits`, `labels check` and
+  `dataset check --deep` take milliseconds there, and take no `--workers`;
+  the performance guide gives their numbers.
+
+### Performance
+
+- **Digests are hashed on the threads `--threads` (or `medh5.set_threads`)
+  allows, outside HDF5's lock.** A commit, `verify` and `validate --level
+  integrity` read each dataset's stored chunks on the calling thread and
+  decompress and hash them on the others, several datasets at once. Each
+  digest is still one hash over its dataset's bytes in order, so it is the
+  one a single thread computes, and every report line, finding and refusal
+  comes out in the same order and words. The largest datasets are begun
+  first, and a slab whose stored chunks hold far more than it does is read
+  a band of chunks at a time, on the workers. On a 576 MiB sample with four
+  threads, `verify` took 0.8 s instead of 2.9 s, an amendment 2.1 s instead
+  of 6.6 s, and a nearest `resample` 6.5 s instead of 9.7 s.
+- **`recompress` and `resample` compress the chunks they write on the
+  threads `--threads` (or `medh5.set_threads`) allows, outside HDF5's
+  lock.** A worker compresses one whole chunk with the Blosc2 filter's own
+  code, and the calling thread stores it with `H5Dwrite_chunk`, in order, so
+  the file holds the bytes HDF5's write stores, at any thread count; a
+  resample's workers also map and interpolate the chunk. On a 576 MiB sample
+  with four threads, `recompress --profile archive` took 29.5 s instead of
+  116.3 s, and a linear `resample` 29.1 s instead of 43.4 s. What the writer
+  cannot store exactly as HDF5 would (`portable`, boolean masks, a dataset
+  stored without chunks) goes through HDF5's write as before. A row of
+  chunks past the 64 MiB a recompression reads at once is read and written
+  a band of chunk columns at a time.
+- **Blosc2 no longer starts threads for work it does not share out.** The
+  frame around every chunk compressed its index with a context of four
+  threads, started and stopped for each chunk; Blosc2 now starts threads only
+  when it hands blocks to them, and a worker of the chunk writer compresses
+  with one, whatever `BLOSC_NTHREADS` says.
+
+### Documentation
+
+- **The performance guide says where each heavy command's time goes.**
+  `docs/examples/bench_phases.py` runs `resample`, `convert from-nifti`, an
+  amendment, `recompress`, `verify` and `validate` through a native CLI built
+  with `--cfg medh5_phase_timings`, and reports the seconds inside HDF5's lock
+  and outside it. The cfg is for measuring only: no profile sets it, and a
+  build without it is unchanged.
+
 ## [2.2.2] — 2026-10-22
 
 **A patch release, with no format change.** Memory and time, and two fixes

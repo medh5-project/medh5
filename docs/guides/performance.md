@@ -476,6 +476,31 @@ carrying the annotation took 14.9 s with four threads and 21.2 s with two,
 against 18.3 s and 24.5 s reading so, median of five; the other rows did
 not change.
 
+### 2.2.3 at one, two and four threads
+
+Every command above, on 2.2.3's code with `--threads` 1, 2 and 4, beside
+2.2.2, which has no threads of its own: native release builds, the same
+576 MiB sample, a Linux x86_64 container with four vCPUs and no SHA
+extensions, seconds, median of three, the four builds interleaved:
+
+| Command | 2.2.2 | 1 thread | 2 threads | 4 threads |
+|---|---|---|---|---|
+| `resample`, nearest, no annotation | 14.5 | 14.2 | 9.5 | 7.6 |
+| `resample`, linear, carrying the annotation | 36.0 | 35.1 | 21.8 | 15.5 |
+| `convert from-nifti` | 13.7 | 13.6 | 11.1 | 10.7 |
+| an amendment (`dataset split --write-claims`) | 9.7 | 9.7 | 5.5 | 4.6 |
+| `recompress --profile archive` | 95.9 | 76.8 | 40.3 | 23.2 |
+| `recompress --profile training` | 8.0 | 7.1 | 5.3 | 4.4 |
+| `verify` | 4.8 | 4.9 | 2.6 | 2.1 |
+| `validate --level integrity` | 4.7 | 4.9 | 2.5 | 2.0 |
+
+One thread is 2.2.2 within the spread of the runs, but for the
+recompressions, where it no longer starts Blosc2 threads it does not use.
+The PET's rows of chunks hold 128 MiB, past the 64 MiB a recompression reads
+at once, so it reads and writes them a band of chunk columns at a time, on
+the workers as the rest. A NIfTI import gains least, because its gzip is one
+stream, inflated in order.
+
 ## Related
 
 - **[Storage](../reference/storage.md)** — codec profiles, chunking and the index in full.
