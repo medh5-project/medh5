@@ -202,6 +202,17 @@ pub(crate) fn read_frames(
     Some(Frames { window, stored })
 }
 
+/// Whether the window `axes` is one [`read_frames`] reads, however many
+/// bytes its chunks hold: `false` where HDF5 must read it.
+pub(crate) fn readable(
+    ds: &hdf5::Dataset,
+    dtype: DType,
+    axes: &[(usize, usize, usize, bool)],
+    out_shape: &[usize],
+) -> bool {
+    Window::new(ds, dtype, axes, out_shape).is_some()
+}
+
 /// What [`read_frames`] counts against its cap for one chunk: its stored
 /// bytes and their bookkeeping, so that many small chunks count too.
 fn holding(frame_len: usize, rank: usize) -> usize {
@@ -518,7 +529,8 @@ mod tests {
 
     /// Frames held for a worker decode to the window's bytes, and are not
     /// held past their cap: a thin window across many chunks holds the
-    /// chunks' stored bytes, many times its values, and HDF5 reads it.
+    /// chunks' stored bytes, many times its values, and is handed back
+    /// unread.
     #[test]
     fn s14_2_held_frames_decode_to_the_window_and_stop_at_their_cap() {
         crate::h5::init();
@@ -543,7 +555,11 @@ mod tests {
         assert!(read_frames(&ds, DType::I16, &axes, &out, held - 1).is_none());
         assert!(read_frames(&ds, DType::I16, &axes, &out, held).is_some());
         match data::read_region_stored(&ds, &thin, values).unwrap() {
-            data::Region::Values(read) => assert_eq!(read, through_hdf5(&ds, &thin)),
+            data::Region::Over(over) => {
+                assert_eq!(over, axes);
+                assert_eq!(data::read_axes(&ds, &over).unwrap(), through_hdf5(&ds, &thin));
+            }
+            data::Region::Values(_) => panic!("read through HDF5, where the caller can read it in parts"),
             data::Region::Stored(..) => panic!("held past the cap"),
         }
     }

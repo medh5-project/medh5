@@ -463,6 +463,19 @@ digests run after it writes, and what it writes, compresses and, for a
 conversion, inflates is outside them. Every digest is the one a single
 thread computes.
 
+A dataset is one hash, on one worker at a time, so the largest one a
+command keeps bounds its digests however many threads there are; the
+largest are begun first. A slab of a dataset whose rows are long lies
+across a band of chunks that holds several times its bytes: a 26-row slab
+of a 512×513×513 `float32` image touches all of its band's 128-row chunks.
+Each band of the slab's next axis is then read and decompressed on its
+own, on the workers. Before that, HDF5 read such a slab under its lock,
+decompressing every chunk of the band once for each slab across it. On a
+machine like the first (four vCPUs, no SHA extensions), a linear `resample`
+carrying the annotation took 14.9 s with four threads and 21.2 s with two,
+against 18.3 s and 24.5 s reading so, median of five; the other rows did
+not change.
+
 ## Related
 
 - **[Storage](../reference/storage.md)** — codec profiles, chunking and the index in full.

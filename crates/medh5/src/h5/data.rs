@@ -463,12 +463,17 @@ pub(crate) enum Region {
     /// worker to ([`super::window::Frames::decode`]); the axes read it
     /// through HDF5 ([`read_hyperslab`]) where that cannot.
     Stored(super::window::Frames, Vec<(usize, usize, usize, bool)>),
+    /// The axes of a region the Blosc2 blocks could give, whose stored
+    /// chunks come to more than the cap: none of it is returned, and the
+    /// caller reads it in parts ([`super::window::read_frames`]) or through
+    /// HDF5 ([`read_axes`]).
+    Over(Vec<(usize, usize, usize, bool)>),
 }
 
 /// [`read_region`], but for a region it would read through the Blosc2 blocks
 /// it covers: that one's stored chunks are returned as they are, so that the
 /// blocks can be decompressed on another thread --- unless they come to more
-/// than `max_stored` bytes, when HDF5 reads the region.
+/// than `max_stored` bytes, when only its axes are ([`Region::Over`]).
 pub(crate) fn read_region_stored(ds: &hdf5::Dataset, index: &[Index], max_stored: usize) -> Result<Region> {
     super::alive(ds)?;
     let dtype = dtype(ds)?;
@@ -481,6 +486,9 @@ pub(crate) fn read_region_stored(ds: &hdf5::Dataset, index: &[Index], max_stored
         if let Some(frames) = super::window::read_frames(ds, dtype, &axes, &out_shape, max_stored) {
             counted(Read::Window);
             return Ok(Region::Stored(frames, axes));
+        }
+        if super::window::readable(ds, dtype, &axes, &out_shape) {
+            return Ok(Region::Over(axes));
         }
     }
     // Where the blocks are not to be had, as `read_region` reads it.
@@ -506,6 +514,20 @@ pub(crate) fn read_axes(ds: &hdf5::Dataset, axes: &[(usize, usize, usize, bool)]
     read_hyperslab(ds, dtype(ds)?, axes, &out_shape)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The reads through HDF5's filter pipeline this thread has made, for
+    /// a test of which reads a call makes, beside other tests' reads.
+    static HYPERSLABS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The reads through HDF5's filter pipeline this thread has made since the
+/// last call ([`read_hyperslab`]).
+#[cfg(test)]
+pub(crate) fn hyperslabs_here() -> u64 {
+    HYPERSLABS.replace(0)
+}
+
 /// [`read_region`] through HDF5's filter pipeline: whole chunks, decompressed
 /// under HDF5's lock.
 pub(crate) fn read_hyperslab(
@@ -515,6 +537,8 @@ pub(crate) fn read_hyperslab(
     out_shape: &[usize],
 ) -> Result<NdArray> {
     phase!(Read);
+    #[cfg(test)]
+    HYPERSLABS.set(HYPERSLABS.get() + 1);
     let selection: Vec<SliceOrIndex> = axes
         .iter()
         .map(|(start, count, step, kept)| {
