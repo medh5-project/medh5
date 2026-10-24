@@ -396,6 +396,17 @@ It is the API the exception allows ([D6](#decisions-the-maintainer)).
   - One large dataset is pipelined: the next slab's chunks are read and
     decompressed while this slab is hashed, so the hash never waits on the
     lock.
+  - **Dropped, measured (2026-10-24).** The overlap below was not built.
+    #107 shipped the parallel hashing and deferred it; measuring its ceiling
+    then found the digests reading a slab past its budget through HDF5,
+    each chunk decompressed up to five times under the lock, and #109 read
+    such slabs a band at a time on the workers and began the largest
+    datasets first. After that, at four threads a commit's digests are
+    bound by its largest dataset, one hash on one worker, which in
+    `resample` is the image the call writes and an early hash cannot reach:
+    the overlap's ceiling was about 0.5 s of a linear resample's 14.9 s,
+    and about nothing on the other rows. The maintainer dropped it on
+    2026-10-24 (D1). What follows is the design as planned.
   - **Overlap stays inside one call** (D3: no thread outlives the call that
     started it). A command that amends and commits in one call
     (`resample`, `scrub`, `fix`, `recompress`, an import) hashes what it
@@ -642,7 +653,9 @@ maintainer answers it, and the plan is updated with the answer.
   that hashing parallel, overlapped with the edit inside commands that amend
   and commit in one call. Not chosen: keeping the stored digests of
   unchanged copies (a damaged source dataset would be carried rather than
-  refused), and an opt-out flag.
+  refused), and an opt-out flag. The overlap was dropped by the maintainer
+  on 2026-10-24, on its measured ceiling (about 3 % of a linear resample;
+  P22-13); the parallel hashing and the guarantee stand.
 - **D2 Scope.** Settled by the maintainer on 2026-10-22: parallelism and
   digests only. The MEDS export moves to a later minor (Out of scope).
 - **D3 The thread setting.** Proposed: one process-wide count, default 1, no
