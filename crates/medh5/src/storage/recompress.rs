@@ -394,24 +394,46 @@ fn copy_dataset(
     let out = data::create_empty(dst, name, dtype, &shape, &new_layout)?;
     // Blosc2 compresses whole chunks on workers, outside HDF5's lock, from
     // slabs cut on the new chunks' boundaries; anything else is written
-    // through HDF5, which compresses under its lock.  So is a dataset whose
-    // one row of chunks is over the slab budget: a slab of whole rows would
-    // read more than the budget at once.
-    let (budget, plane) = (slab_budget(), plane_bytes(&shape, dtype.itemsize()));
-    let direct = Chunks::of(&out, dtype).filter(|w| !through_hdf5() && w.chunk()[0].saturating_mul(plane) <= budget);
+    // through HDF5, which compresses under its lock.  A row of chunks over
+    // the slab budget is read and written a band of its chunk columns at a
+    // time; one chunk column over it is written through HDF5, since a slab
+    // of whole chunks would read more than the budget at once.
+    let budget = slab_budget();
+    #[cfg(test)]
+    let plane = plane_bytes(&shape, dtype.itemsize());
+    let direct = Chunks::of(&out, dtype)
+        .and_then(|w| Some((band(w.chunk(), &shape, dtype.itemsize(), budget)?, w)))
+        .filter(|_| !through_hdf5());
     #[cfg(test)]
     DIRECT.with(|n| n.set(n.get() + usize::from(direct.is_some())));
-    let rows = direct.as_ref().map_or(1, |w| w.chunk()[0]);
+    let rows = direct.as_ref().map_or(1, |(_, w)| w.chunk()[0]);
     for (start, stop) in slabs(&shape, dtype.itemsize(), budget, rows) {
-        #[cfg(test)]
-        MOST_READ.set(MOST_READ.get().max((stop - start) * plane));
-        let block = data::read_region(&ds, &[Index::Slice(Slice::new(start as i64, stop as i64))])?;
+        let rows = Slice::new(start as i64, stop as i64);
         match &direct {
-            Some(writer) => writer.write_rows(&block, start, threads)?,
-            None => {
-                let mut starts = vec![0usize; shape.len()];
-                starts[0] = start;
-                data::write_region(&out, &block, &starts)?;
+            Some((columns, writer)) if shape.len() > 1 && *columns < shape[1] => {
+                for at in (0..shape[1]).step_by(*columns) {
+                    let end = (at + columns).min(shape[1]);
+                    #[cfg(test)]
+                    MOST_READ.set(MOST_READ.get().max((stop - start) * (end - at) * plane / shape[1]));
+                    let cols = Slice::new(at as i64, end as i64);
+                    let block = data::read_region(&ds, &[Index::Slice(rows), Index::Slice(cols)])?;
+                    let mut origin = vec![0usize; shape.len()];
+                    (origin[0], origin[1]) = (start, at);
+                    writer.write_block(&block, &origin, threads)?;
+                }
+            }
+            direct => {
+                #[cfg(test)]
+                MOST_READ.set(MOST_READ.get().max((stop - start) * plane));
+                let block = data::read_region(&ds, &[Index::Slice(rows)])?;
+                match direct {
+                    Some((_, writer)) => writer.write_rows(&block, start, threads)?,
+                    None => {
+                        let mut starts = vec![0usize; shape.len()];
+                        starts[0] = start;
+                        data::write_region(&out, &block, &starts)?;
+                    }
+                }
             }
         }
     }
@@ -453,6 +475,23 @@ fn slab_budget() -> usize {
         return BUDGET.get();
     }
     64 << 20
+}
+
+/// The columns (indices of the second axis) a slab of whole chunks may
+/// take at once under `budget`: all of them when a row of chunks is within
+/// it, else as many whole chunk columns as are, and `None` when not even one
+/// chunk column is.
+fn band(chunk: &[usize], shape: &[usize], itemsize: usize, budget: usize) -> Option<usize> {
+    let row = chunk[0].saturating_mul(plane_bytes(shape, itemsize));
+    if row <= budget {
+        return Some(shape.get(1).copied().unwrap_or(0));
+    }
+    if shape.len() < 2 {
+        return None;
+    }
+    let column = chunk[0].saturating_mul(plane_bytes(&shape[1..], itemsize));
+    let columns = (budget / column) / chunk[1] * chunk[1];
+    (columns > 0).then_some(columns)
 }
 
 /// The bytes of one index of a dataset's first axis.
@@ -578,16 +617,16 @@ mod tests {
         }
     }
 
-    /// A dataset whose one row of chunks is over the slab budget is written
-    /// through HDF5, a budget at a time: a slab of whole chunk rows would
-    /// read the row whole.  The file is the one a direct write gives.
+    /// A dataset whose one chunk column is over the slab budget is written
+    /// through HDF5, a budget at a time: a slab of whole chunks would read
+    /// the column whole.  The file is the one a direct write gives.
     #[test]
-    fn s14_2_a_chunk_row_over_the_slab_budget_is_written_through_hdf5() {
+    fn s14_2_a_chunk_column_over_the_slab_budget_is_written_through_hdf5() {
         let _serial = crate::parallel::tests::serial();
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("s.medh5");
         sample(&source, "portable");
-        // Each image is one chunk of 37 planes; four planes of the f32 PET.
+        // Four planes of the f32 PET, less than one chunk column of 37 planes.
         let budget = 4 * 70 * 83 * 4;
         let mut ids = Vec::new();
         for (n, set) in [(0, false), (1, true)] {
@@ -609,6 +648,47 @@ mod tests {
             ids.push(result.content_id);
         }
         assert_eq!(ids[0], ids[1]);
+    }
+
+    /// A row of chunks over the slab budget, whose chunk columns are within
+    /// it, is written directly a band of columns at a time, never reading
+    /// more than the budget, and stores the chunks a whole-row write does.
+    #[test]
+    fn s14_2_a_chunk_row_over_the_slab_budget_is_written_a_band_at_a_time() {
+        let _serial = crate::parallel::tests::serial();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("s.medh5");
+        let shape = [20usize, 400, 150];
+        let mut writer = create(&source, Some("s"), None, "portable", &[]).unwrap();
+        writer.add_grid("g", &[20, 400, 150], &[1.0, 1.0, 1.0], GridOptions::default()).unwrap();
+        let n: usize = shape.iter().product();
+        let mut rng = crate::rng::Rng::new(7);
+        let pet = NdArray::from_vec(&shape, (0..n).map(|_| 9.0 * rng.random()).collect()).unwrap();
+        writer.add_image("PET", &pet.astype(DType::F32), "g", "PT", ImageOptions::default()).unwrap();
+        writer.commit(true).unwrap();
+        let whole = dir.path().join("whole.medh5");
+        let _threads = crate::parallel::for_this_run(4).unwrap();
+        let reference = recompress(&source, "archive", Some(&whole), false).unwrap();
+        let chunk = {
+            let file = crate::h5::file::marked(|| hdf5::File::open(&whole)).unwrap();
+            Chunks::of(&file.dataset("images/PET").unwrap(), DType::F32).unwrap().chunk().to_vec()
+        };
+        assert!(chunk[1] * 2 < shape[1], "{chunk:?}: the test needs several chunk columns");
+        // Two chunk columns: under a row, over one column.
+        let budget = chunk[0] * 2 * chunk[1] * shape[2] * 4;
+        let out = dir.path().join("bands.medh5");
+        BUDGET.set(budget);
+        DIRECT.set(0);
+        MOST_READ.set(0);
+        let result = recompress(&source, "archive", Some(&out), false);
+        BUDGET.set(0);
+        let result = result.unwrap();
+        assert!(result.ok(), "{result:?}");
+        assert_eq!(DIRECT.get(), 1);
+        assert!(MOST_READ.get() <= budget, "{} > {budget}", MOST_READ.get());
+        assert_eq!(result.content_id, reference.content_id);
+        let stored = crate::h5::chunks::tests::stored_chunks;
+        assert_eq!(stored(&out), stored(&whole));
     }
 
     /// What the check of a recompressed file cannot read is reported in the

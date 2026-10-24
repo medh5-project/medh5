@@ -229,16 +229,26 @@ impl Chunks {
 
     /// The origins of the chunks whose first coordinate lies in `rows`, in C
     /// order: the chunks a slab of those rows covers.
+    #[cfg(test)]
     pub(crate) fn origins(&self, rows: std::ops::Range<usize>) -> Vec<Vec<usize>> {
+        let mut start = vec![0; self.codec.shape.len()];
+        let mut extent = self.codec.shape.clone();
+        (start[0], extent[0]) = (rows.start, rows.end.saturating_sub(rows.start));
+        self.within(&start, &extent)
+    }
+
+    /// The origins of the chunks whose coordinates lie in the block from
+    /// `start` over `extent`, on every axis, in C order.
+    fn within(&self, start: &[usize], extent: &[usize]) -> Vec<Vec<usize>> {
         let (chunk, shape) = (&self.codec.chunk, &self.codec.shape);
-        let first = rows.start.div_ceil(chunk[0]) * chunk[0];
-        let mut lead: Vec<usize> = (first..rows.end.min(shape[0])).step_by(chunk[0]).collect();
-        let mut out: Vec<Vec<usize>> = lead.drain(..).map(|r| vec![r]).collect();
-        for a in 1..shape.len() {
+        let mut out: Vec<Vec<usize>> = vec![Vec::new()];
+        for a in 0..shape.len() {
+            let first = start[a].div_ceil(chunk[a]) * chunk[a];
+            let end = (start[a] + extent[a]).min(shape[a]);
             out = out
                 .into_iter()
                 .flat_map(|o| {
-                    (0..shape[a]).step_by(chunk[a]).map(move |c| {
+                    (first..end).step_by(chunk[a]).map(move |c| {
                         let mut o = o.clone();
                         o.push(c);
                         o
@@ -299,17 +309,24 @@ impl Chunks {
     /// other axis --- chunk by chunk, compressed on up to `threads` workers.
     /// The slab starts on a chunk boundary and ends on one or at the extent.
     pub(crate) fn write_rows(&self, slab: &NdArray, start: usize, threads: usize) -> Result<()> {
-        let slab_shape = slab.shape();
-        let rows = start..start + slab_shape[0];
-        let mut slab_start = vec![0usize; slab_shape.len()];
-        slab_start[0] = start;
-        let bytes = native_bytes(slab);
-        let origins = self.origins(rows);
+        let mut at = vec![0; self.codec.shape.len()];
+        at[0] = start;
+        self.write_block(slab, &at, threads)
+    }
+
+    /// Write `block` --- the dataset's values from `start` over the block's
+    /// shape --- chunk by chunk, compressed on up to `threads` workers.  On
+    /// every axis the block starts on a chunk boundary and ends on one or at
+    /// the extent.
+    pub(crate) fn write_block(&self, block: &NdArray, start: &[usize], threads: usize) -> Result<()> {
+        let block_shape = block.shape();
+        let bytes = native_bytes(block);
+        let origins = self.within(start, &block_shape);
         let codec = &self.codec;
         crate::parallel::ordered(
             threads,
             origins.iter(),
-            |origin| codec.compress(codec.cut(&bytes, &slab_shape, &slab_start, origin)),
+            |origin| codec.compress(codec.cut(&bytes, &block_shape, start, origin)),
             {
                 let mut each = origins.iter();
                 move |chunk| self.store(each.next().expect("one origin per chunk"), chunk)

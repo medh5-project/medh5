@@ -10,7 +10,9 @@
   with four threads, `recompress --profile archive` took 29.5 s instead of
   116.3 s, and a linear `resample` 29.1 s instead of 43.4 s. What the writer
   cannot store exactly as HDF5 would (`portable`, boolean masks, a dataset
-  stored without chunks) goes through HDF5's write as before.
+  stored without chunks) goes through HDF5's write as before. A row of
+  chunks past the 64 MiB a recompression reads at once is read and written
+  a band of chunk columns at a time.
 - **Blosc2 no longer starts threads for work it does not share out.** The
   frame around every chunk compressed its index with a context of four
   threads, started and stopped for each chunk; Blosc2 now starts threads only
