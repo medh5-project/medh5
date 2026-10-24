@@ -451,40 +451,13 @@ def test_an_exceptions_line_is_kind_name_and_decision(
         api.exceptions("python\tmedh5.x\tD6\npython\tmedh5.x\tD7\n")
 
 
-def test_the_exceptions_are_the_thread_setting_and_the_workers_flags(
+def test_the_exceptions_are_empty_once_their_release_is_out(
     api: ModuleType,
 ) -> None:
-    """The list holds the names the maintainer's decisions allow in 2.2.3 and
-    nothing else: the thread setting (D6), and command line flags (D6, D7),
-    each of which the parser has."""
-    from medh5._core import cli_command_tree
-
+    """2.2.3 shipped the names its list allowed (D6, D7), so they are the
+    baseline and the list holds none until a patch release needs one."""
     allowed = api.exceptions(api.EXCEPTIONS.read_text(encoding="utf-8"))
-    assert allowed["rust"] == {
-        "medh5::parallel": "D6",
-        "medh5::parallel::set_threads": "D6",
-        "medh5::parallel::threads": "D6",
-    }
-    assert allowed["python"] == {"medh5.set_threads": "D6", "medh5.get_threads": "D6"}
-    snapshot = api.parse(
-        (ROOT / "tests" / "project" / "python_api.txt").read_text(encoding="utf-8")
-    )
-    assert set(allowed["python"]) <= set(snapshot)
-    workers = ("migrate", "convert to-nnunet", "conformance run", "task preflight")
-    assert allowed["cli"] == {
-        "medh5 --threads": "D6",
-        **{f"medh5 {words} --workers": "D7" for words in workers},
-        "medh5 clinical augment-cohort --workers": "D7",
-    }
-    tree = cli_command_tree()
-    for flag, decision in allowed["cli"].items():
-        assert decision in ("D6", "D7"), flag
-        program, *words, option = flag.split(" ")
-        assert program == "medh5" and option.startswith("--"), flag
-        node = tree
-        for word in words:
-            node = node["commands"][word]
-        assert option in node["options"], flag
+    assert allowed == {kind: {} for kind in api.EXCEPTION_KINDS}
 
 
 # --- Rust additions ---
