@@ -18,8 +18,8 @@ medh5 --version
 ```
 
 The rest of this page is for when you need more: an extra for PyTorch, MONAI
-or DICOM, the command line without Python, the Rust crate, or a system that
-pip has no ready-built package for.
+or DICOM, the command line without Python, the viewer for the Mac, the Rust
+crate, or a system that pip has no ready-built package for.
 
 ## Add what you connect it to
 
@@ -157,6 +157,36 @@ libraries. For those it runs a Python that has medh5 installed:
 `python3` (`python` on Windows), or the interpreter named by the
 `MEDH5_PYTHON` environment variable. When there is none, it says what to
 install.
+
+## A viewer and editor for the Mac
+
+[medh5 Viewer](https://github.com/medh5-project/medh5-viewer) is a native
+macOS app for looking at a sample and editing it. It opens a sample (`.medh5`)
+or a collection (`.medh5c`) and shows what the file holds: every timepoint and
+image, every annotation kind with its coverage, images on other grids and
+frames placed through the stored transforms, the curation records and, from
+format 1.1, the clinical history. It edits too: it paints and refines
+segmentations, draws boxes, points, polylines and contours, edits the sample
+document and the label set, and imports and exports NIfTI. Saving amends the
+file copy-on-write through the engine, which validates the result before it
+replaces the original, and the validator and digest checks of `medh5 validate`
+and `medh5 verify` are in its Tools menu.
+
+The app reads and writes through the [`medh5` crate](reference/rust.md), so
+what it saves is the bytes the Python package and the command line write. It
+is a separate project with its own releases, each built on a released engine;
+the first, 1.0.0, is built on 2.2.3 and reads and writes formats 1.0, 1.1 and
+1.2.
+
+To install it, download the disk image from its
+[latest release](https://github.com/medh5-project/medh5-viewer/releases/latest),
+open it and drag **medh5 Viewer** to Applications. It needs a Mac with Apple
+silicon and macOS 14 (Sonoma) or later. If macOS says it cannot verify the app
+the first time it opens, open **System Settings ▸ Privacy & Security** and
+click **Open Anyway**; the viewer's
+[install guide](https://github.com/medh5-project/medh5-viewer/blob/main/docs/INSTALL.md)
+has the other ways. No file at hand? **Help ▸ Open Demo Sample** writes a
+synthetic two-visit sample holding every kind of annotation and opens it.
 
 ## In a Rust project
 

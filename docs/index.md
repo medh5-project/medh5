@@ -27,6 +27,9 @@ crate are on the [install page](install.md).
 One format engine, written in Rust, with three frontends that read and write
 the same bytes: the [Python package](reference/python-api.md), the
 [Rust crate](reference/rust.md) and the [command line](reference/cli.md).
+On a Mac, [medh5 Viewer](install.md#a-viewer-and-editor-for-the-mac) is built
+on the same engine: a native app that shows everything a sample holds and edits
+it.
 
 ## Where to start
 

@@ -123,6 +123,10 @@ classes carry no ontology code (`codes=` on each `LabelClass`).
 are addressed — it is the gate for a dataset you publish, not for a first
 sample.
 
+On a Mac, [medh5 Viewer](../install.md#a-viewer-and-editor-for-the-mac) opens
+the same file and draws the liver and the lesion over the CT, and runs the
+same validator from its Tools menu.
+
 ## Build a sampling index
 
 One more command before the file goes near a training loop:

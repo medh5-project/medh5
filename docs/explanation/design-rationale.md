@@ -270,7 +270,10 @@ Python users and nobody else: a Rust pipeline, a viewer, or a cluster node
 without a Python environment had the specification and the conformance
 corpus, but no implementation to call. 2.0 moved the implementation, not the
 format. It has no C interface yet: a C or C++ program runs the `medh5` binary,
-or reads the HDF5 itself.
+or reads the HDF5 itself. [medh5 Viewer](https://github.com/medh5-project/medh5-viewer),
+a native macOS app, is the viewer that wanted one: it links the crate through
+a small C interface of its own, and so writes the bytes the other frontends
+write.
 
 | Decision | Why |
 |---|---|

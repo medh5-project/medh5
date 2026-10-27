@@ -70,6 +70,15 @@ package and the command line run the same code, so all three read and write
 the same bytes. Building it compiles HDF5, which needs Rust 1.85.1 or later, a
 C compiler and CMake.
 
+**Looking at files on a Mac?** [medh5 Viewer](https://github.com/medh5-project/medh5-viewer)
+is a native macOS viewer and editor. It shows everything a sample holds —
+every timepoint and image, every annotation kind, the registrations between
+visits, the clinical history — and edits it: paint and refine segmentations,
+draw annotations, curate the label set, with every save validated by the
+engine. It is built on the `medh5` crate, so it writes the same bytes. Download
+it from its [latest release](https://github.com/medh5-project/medh5-viewer/releases/latest);
+it needs Apple silicon and macOS 14 or later.
+
 Other systems, building from source, the 1.x line and troubleshooting are on the
 [install page](https://medh5.readthedocs.io/en/stable/install/).
 
