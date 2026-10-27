@@ -18,7 +18,8 @@ each file's `content_id`. The script ends by loading a training batch, so it nee
 (`pip install "medh5[torch]"`). The examples below amend only copies, so the cohort stays as the
 task pins it.
 
-Nothing changes for imaging-only data: a sample without clinical records is still written as 1.0.
+Nothing changes for imaging-only data: a sample without clinical records is still written as 1.0,
+or as 1.2 if it holds open curves.
 
 ## Write a history
 
@@ -208,8 +209,8 @@ medh5 clinical augment case.medh5 case-records.json --out case-1.1.medh5
 
 Removing the clinical profile is the imaging projection (1.1 §2.1, §10), and only ever a requested
 operation: the result is a different sample, with its own `content_id`, written at the lowest
-version what remains needs — 1.0 for imaging alone. `medh5 clinical strip` writes it to a new file
-and reports the loss:
+version what remains needs — 1.0 for imaging alone, 1.2 with open curves. `medh5 clinical strip`
+writes it to a new file and reports the loss:
 
 ```bash
 medh5 clinical strip cohort/P-03.medh5 --out P-03-imaging.medh5

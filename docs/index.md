@@ -136,10 +136,11 @@ The **format** is versioned by `medh5_version`: [1.0](spec/medh5-1.0.md);
 [1.1](spec/medh5-1.1.md), which adds the optional `clinical` profile and
 nothing else; and [1.2](spec/medh5-1.2.md), which adds the `polylines`
 annotation kind and nothing else. A sample is written at the lowest version its
-content needs, so imaging-only data is still 1.0. A minor version may add optional objects,
-profiles, encodings and diagnostic codes; it may not change what an existing
-one means, and a reader opens a later minor as a projection — validated for
-what it knows, never amended. See spec §16, 1.1 §2 and 1.2 §2.
+content needs, so imaging data without open curves is still 1.0. A minor
+version may add optional objects, profiles, encodings and diagnostic codes; it
+may not change what an existing one means, and a reader opens a later minor as
+a projection — validated for what it knows, never amended. See spec §16, 1.1 §2
+and 1.2 §2.
 
 The **package** follows semantic versioning from 1.0.0. `medh5.__version__` is
 the package; `medh5.FORMAT_VERSION` is the newest format it writes.

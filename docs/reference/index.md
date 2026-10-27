@@ -17,8 +17,8 @@ What everything is, rather than how to do anything. For task-shaped answers, see
 
 | | |
 |---|---|
-| **[Annotation kinds](annotations.md)** | Thirteen kinds: six voxel kinds (five encodings and `mask`), boxes, oriented boxes, keypoints, points, contours, meshes, classification. |
-| **[Converters](converters.md)** | NIfTI, DICOM, DICOM SEG, RTSTRUCT, nnU-Net v2, and 0.x migration. |
+| **[Annotation kinds](annotations.md)** | Fourteen kinds: six voxel kinds (five encodings and `mask`), boxes, oriented boxes, keypoints, points, contours, polylines, meshes, classification. |
+| **[Converters](converters.md)** | NIfTI, DICOM, DICOM SEG, RTSTRUCT, nnU-Net v2, ITK transforms, MEDS and FHIR R4, and 0.x migration. |
 | **[Curation records](curation.md)** | Provenance, quality, agreement, identity, de-identification. |
 | **[Storage](storage.md)** | On-disk layout, codec profiles, chunking, integrity, collections. |
 
@@ -31,6 +31,7 @@ What everything is, rather than how to do anything. For task-shaped answers, see
 | **[Task manifest schema](task-schema.md)** | Every field of a `medh5.task/1` manifest. |
 | **[Cache manifest schema](cache-schema.md)** | Every field of a `medh5.cache/1` manifest. |
 | **[Diagnostic codes](diagnostic-codes.md)** | All 100 codes `medh5 validate` can report. |
+| **[The cohort manifest](cohort-manifest.md)** | Every field of a `medh5.dataset/1` manifest, which `medh5 dataset index` writes. |
 | **[Cohort check codes](cohort-checks.md)** | The `C1xx`–`C5xx` codes `medh5 dataset check` reports. |
 | **[Task and cache codes](../spec/task-cache-1.md#9-finding-codes)** | The `T1xx`–`T4xx` codes `medh5 task` and `medh5 cache` report. |
 | **[Profiles and validation levels](profiles-and-levels.md)** | What to check, and how much. |

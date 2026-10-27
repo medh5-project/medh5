@@ -209,9 +209,10 @@ medh5 1.x is pure Python over h5py, and writes format 1.0:
 pip install "medh5<2"
 ```
 
-Use it where 2.x has no wheel and cannot be built. It does not have the
-`clinical` profile of format 1.1. A sample without clinical history is format
-1.0 whichever line writes it, so 1.x reads what 2.x writes for imaging alone.
+Use it where 2.x has no wheel and cannot be built. It has neither the
+`clinical` profile of format 1.1 nor the `polylines` annotations of 1.2. A
+sample with neither is format 1.0 whichever line writes it, so 1.x reads what
+2.x writes for imaging without open curves.
 Moving code from 1.x to 2.x? 2.0 changed the Python API where it meets HDF5;
 [the changelog](changelog.md) lists every change.
 
