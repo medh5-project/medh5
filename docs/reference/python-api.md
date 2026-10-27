@@ -597,7 +597,7 @@ line's processes.
 from medh5.clinical import HOUR
 
 with medh5.open("cohort/P-03.medh5") as s:
-    s.version                          # "1.1"; imaging-only samples stay "1.0"
+    s.version                          # "1.1"; "1.0" with no history or open curves
     s.support                          # "full", or "projection" for a later minor
     c = s.clinical                     # -> Clinical, or None without the profile
     c.clock                            # Clock(id, reference, origin_description, unit)

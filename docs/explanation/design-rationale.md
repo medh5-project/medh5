@@ -270,7 +270,10 @@ Python users and nobody else: a Rust pipeline, a viewer, or a cluster node
 without a Python environment had the specification and the conformance
 corpus, but no implementation to call. 2.0 moved the implementation, not the
 format. It has no C interface yet: a C or C++ program runs the `medh5` binary,
-or reads the HDF5 itself.
+or reads the HDF5 itself. [medh5 Viewer](https://github.com/medh5-project/medh5-viewer),
+a native macOS app, is the viewer that wanted one: it links the crate through
+a small C interface of its own, and so writes the bytes the other frontends
+write.
 
 | Decision | Why |
 |---|---|
@@ -280,7 +283,7 @@ or reads the HDF5 itself.
 | **NIfTI moved into the engine (2.2.0)** | NIfTI is a fixed header (348 bytes, or 540 for NIfTI-2) and an array, unlike DICOM, so the engine can own it. Owning it gives the standalone binary NIfTI conversion with no Python, removes nibabel from the runtime, and runs every converter that writes NIfTI (ITK fields, nnU-Net) through one writer. The contract is parity: a corpus recorded from 2.1.0's Python converter holds the engine to the same objects, `/meta`, reports and refusals (decision E3). |
 | **HDF5 compiled in, statically** | A wheel, a crate and a binary that need nothing installed, and one HDF5 and one Blosc2 everywhere — so a chunk one frontend writes is the chunk the others read. |
 | **Reads below the filter pipeline** | HDF5 decompresses every chunk a window touches, whole, under its global lock; a Blosc2 chunk is a grid of separately compressed blocks. The engine reads the stored chunk and decompresses only the blocks the window covers, outside the lock — a random 64³ label patch about three times faster, and threads that decompress at once. The bytes are HDF5's or the read goes through HDF5. |
-| **The format stayed 1.x** | Nothing in the file needed to change: a new major format would have bought nothing and cost every 1.x reader. What 2.0 adds to the format is a minor version, 1.1, for the optional clinical profile alone (below): a sample of imaging alone is still written as 1.0. The package is 2.0 because its Python API changed at the HDF5 boundary — it no longer hands out `h5py` objects — and semantic versioning says so. |
+| **The format stayed 1.x** | Nothing in the file needed to change: a new major format would have bought nothing and cost every 1.x reader. What 2.x adds to the format is two minor versions, each for one thing alone: 1.1 for the optional clinical profile (below), and 1.2 for open curves. A sample with neither is still written as 1.0. The package is 2.0 because its Python API changed at the HDF5 boundary — it no longer hands out `h5py` objects — and semantic versioning says so. |
 
 Re-implementing the format was also a test of the specification: three
 clauses turned out to name a Python function where they meant bytes, and are

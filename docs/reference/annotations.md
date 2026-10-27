@@ -1,6 +1,6 @@
 # Annotation kinds
 
-Thirteen kinds, one contract. This page is what each stores and how to read it;
+Fourteen kinds, one contract. This page is what each stores and how to read it;
 spec §6–§9 is the normative version.
 
 ## The common header

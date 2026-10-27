@@ -70,6 +70,15 @@ package and the command line run the same code, so all three read and write
 the same bytes. Building it compiles HDF5, which needs Rust 1.85.1 or later, a
 C compiler and CMake.
 
+**Looking at files on a Mac?** [medh5 Viewer](https://github.com/medh5-project/medh5-viewer)
+is a native macOS viewer and editor. It shows everything a sample holds —
+every timepoint and image, every annotation kind, the registrations between
+visits, the clinical history — and edits it: paint and refine segmentations,
+draw annotations, curate the label set, with every save validated by the
+engine. It is built on the `medh5` crate, so it writes the same bytes. Download
+it from its [latest release](https://github.com/medh5-project/medh5-viewer/releases/latest);
+it needs Apple silicon and macOS 14 or later.
+
 Other systems, building from source, the 1.x line and troubleshooting are on the
 [install page](https://medh5.readthedocs.io/en/stable/install/).
 
@@ -227,8 +236,10 @@ medh5 cache validate reports.medh5cache --task progression.task.json
 | **NIfTI** | affine and voxels bit-identical on round trip; RAS↔LPS is a sign flip, never a resample |
 | **DICOM** | slices ordered by geometry, spacing measured between origins, modality LUT stored not applied, tags on an explicit allow-list; slices that disagree about orientation, spacing or rescale are refused rather than read off the first one |
 | **DICOM SEG** | frames placed by geometry; segments matched by label, not number; import preserves overlap and `FRACTIONAL`, export writes `BINARY` |
-| **RTSTRUCT** | contours stay contours; rasterisation is opt-in and recorded in provenance |
+| **RTSTRUCT** | contours stay contours, and open curves become polylines on request; rasterisation is opt-in and recorded in provenance |
 | **nnU-Net v2** | class ids kept; region labels become label-set DAG parents; `dataset.json` round-trips |
+| **ITK transforms** | text, HDF5 and ANTs `.mat` files, with displacement fields; the caller names the fixed and moving grids, since a transform file names no image |
+| **MEDS, FHIR R4** | a subject's clinical history into the `clinical` profile; no zone, origin, unit or availability invented |
 | **MONAI** | `to_metatensor` gives a `MetaTensor` with the correct affine |
 | **0.x** | `medh5 migrate`, reporting every decision and every guess |
 
@@ -256,14 +267,15 @@ with h5py.File("case_0001.medh5") as f:
 
 ## Versioning
 
-The **format** is 1.1: 1.0 plus the optional `clinical` profile, and nothing
-else. A sample is written at the lowest version its content needs, so
-imaging-only data is still 1.0, which 1.x reads; a reader opens a later minor
-as a projection, never amending it. A minor version may add optional objects,
-profiles, encodings and diagnostic codes; it may not change what an existing
-one means (spec §16). The **package** follows semantic versioning from 1.0.0:
-2.0 moved the implementation to the Rust engine and changed the Python API at
-the HDF5 boundary ([what changed](https://medh5.readthedocs.io/en/stable/changelog/)).
+The **format** is 1.2: 1.1 adds the optional `clinical` profile to 1.0, and
+1.2 the `polylines` annotation kind (open curves), each and nothing else. A
+sample is written at the lowest version its content needs, so imaging data
+without open curves is still 1.0, which 1.x reads; a reader opens a later
+minor as a projection, never amending it. A minor version may add optional
+objects, profiles, encodings and diagnostic codes; it may not change what an
+existing one means (spec §16). The **package** follows semantic versioning
+from 1.0.0: 2.0 moved the implementation to the Rust engine and changed the
+Python API at the HDF5 boundary ([what changed](https://medh5.readthedocs.io/en/stable/changelog/)).
 
 0.x files are not readable by 1.0 and are not meant to be — `medh5 migrate`
 converts them once. See [Migrate from 0.x](https://medh5.readthedocs.io/en/stable/guides/migrate-0x/).

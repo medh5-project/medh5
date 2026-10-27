@@ -4,7 +4,10 @@ The format is implemented once, in Rust. The [`medh5`](https://crates.io/crates/
 crate is that implementation — the data model, HDF5 I/O, validation, chunked
 access, compression, geometry and transforms, annotations, provenance and
 integrity — and the Python package and the `medh5` command line are frontends
-over it. All three read and write the same bytes.
+over it. All three read and write the same bytes. So does
+[medh5 Viewer](https://github.com/medh5-project/medh5-viewer), a macOS app in
+Swift that links the crate through a C interface of its own
+([its bridge](https://github.com/medh5-project/medh5-viewer/blob/main/docs/BRIDGE.md)).
 
 ```toml
 [dependencies]
