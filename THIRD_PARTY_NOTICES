@@ -31,10 +31,10 @@ C libraries
 The Rust standard library
 -------------------------
 
-  std, core and alloc                          MIT OR Apache-2.0                [54]
+  std, core and alloc                          MIT OR Apache-2.0                [53]
 
 
-Rust crates (132)
+Rust crates (131)
 -----------------
 
   adler2 2.0.1                                 0BSD OR MIT OR Apache-2.0        [12, 13, 14]
@@ -60,7 +60,7 @@ Rust crates (132)
   clap_lex 1.1.1                               MIT OR Apache-2.0                [22, 34]
   colorchoice 1.0.5                            MIT OR Apache-2.0                [21, 22]
   cpufeatures 0.2.17                           MIT OR Apache-2.0                [28, 35]
-  crc32fast 1.5.2                              MIT OR Apache-2.0                [21, 36]
+  crc32fast 1.5.3                              MIT OR Apache-2.0                [21, 36]
   crypto-common 0.1.7                          MIT OR Apache-2.0                [28, 37]
   data-encoding 2.11.1                         MIT                              [38]
   digest 0.10.7                                MIT OR Apache-2.0                [28, 39]
@@ -75,100 +75,99 @@ Rust crates (132)
   fraction 0.17.0                              MIT OR Apache-2.0                [15, 27]
   generic-array 0.14.7                         MIT                              [47]
   getrandom 0.3.4                              MIT OR Apache-2.0                [48, 49]
-  getrandom 0.4.3                              MIT OR Apache-2.0                [48, 50]
-  half 2.7.1                                   MIT OR Apache-2.0                [51, 52]
-  hashbrown 0.17.1                             MIT OR Apache-2.0                [15, 53]
-  hdf5-metno 0.15.0                            MIT OR Apache-2.0                [54]
-  hdf5-metno-derive 0.10.2                     MIT OR Apache-2.0                [54]
+  half 2.7.1                                   MIT OR Apache-2.0                [50, 51]
+  hashbrown 0.17.1                             MIT OR Apache-2.0                [15, 52]
+  hdf5-metno 0.15.0                            MIT OR Apache-2.0                [53]
+  hdf5-metno-derive 0.10.2                     MIT OR Apache-2.0                [53]
   hdf5-metno-src 0.10.4                        see the text                     [1]
-  hdf5-metno-sys 0.12.4                        MIT OR Apache-2.0                [54]
-  hdf5-metno-types 0.11.1                      MIT OR Apache-2.0                [54]
-  heck 0.5.0                                   MIT OR Apache-2.0                [15, 55]
-  hex 0.4.3                                    MIT OR Apache-2.0                [21, 56]
-  indexmap 2.14.2                              Apache-2.0 OR MIT                [15, 57]
+  hdf5-metno-sys 0.12.4                        MIT OR Apache-2.0                [53]
+  hdf5-metno-types 0.11.1                      MIT OR Apache-2.0                [53]
+  heck 0.5.0                                   MIT OR Apache-2.0                [15, 54]
+  hex 0.4.3                                    MIT OR Apache-2.0                [21, 55]
+  indexmap 2.14.2                              Apache-2.0 OR MIT                [15, 56]
   is_terminal_polyfill 1.70.2                  MIT OR Apache-2.0                [21, 22]
   itoa 1.0.18                                  MIT OR Apache-2.0                [14, 20]
-  jsonschema 0.58.6                            MIT                              [58]
-  jsonschema-regex 0.58.6                      MIT                              [54]
-  jsonschema-value 0.58.6                      MIT                              [54]
-  libc 0.2.190                                 MIT OR Apache-2.0                [20, 59]
-  libz-sys 1.1.29                              MIT OR Apache-2.0                [15, 60]
-  linux-raw-sys 0.12.1                         Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT [14, 15, 61, 62]
-  lock_api 0.4.14                              MIT OR Apache-2.0                [15, 63]
-  lz4-sys 1.11.1+lz4-1.10.0                    MIT                              [64]
-  matrixmultiply 0.3.11                        MIT/Apache-2.0                   [15, 65]
+  jsonschema 0.58.6                            MIT                              [57]
+  jsonschema-regex 0.58.6                      MIT                              [53]
+  jsonschema-value 0.58.6                      MIT                              [53]
+  libc 0.2.191                                 MIT OR Apache-2.0                [20, 58]
+  libz-sys 1.1.29                              MIT OR Apache-2.0                [15, 59]
+  linux-raw-sys 0.12.1                         Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT [14, 15, 60, 61]
+  lock_api 0.4.14                              MIT OR Apache-2.0                [15, 62]
+  lz4-sys 1.11.1+lz4-1.10.0                    MIT                              [63]
+  matrixmultiply 0.3.11                        MIT/Apache-2.0                   [15, 64]
   memchr 2.8.3                                 Unlicense OR MIT                 [17, 18, 19]
-  micromap 0.3.0                               MIT                              [66]
-  miniz_oxide 0.9.1                            MIT OR Zlib OR Apache-2.0        [51, 67, 68, 69]
-  ndarray 0.17.2                               MIT OR Apache-2.0                [15, 70]
+  micromap 0.3.0                               MIT                              [65]
+  miniz_oxide 0.9.1                            MIT OR Zlib OR Apache-2.0        [50, 66, 67, 68]
+  ndarray 0.17.2                               MIT OR Apache-2.0                [15, 69]
   num 0.4.3                                    MIT OR Apache-2.0                [15, 27]
   num-bigint 0.4.8                             MIT OR Apache-2.0                [15, 27]
-  num-cmp 0.1.0                                MIT/Apache-2.0                   [71]
+  num-cmp 0.1.0                                MIT/Apache-2.0                   [70]
   num-complex 0.4.6                            MIT OR Apache-2.0                [15, 27]
   num-integer 0.1.47                           MIT OR Apache-2.0                [15, 27]
   num-iter 0.1.46                              MIT OR Apache-2.0                [15, 27]
   num-rational 0.4.2                           MIT OR Apache-2.0                [15, 27]
   num-traits 0.2.19                            MIT OR Apache-2.0                [15, 27]
-  numpy 0.29.0                                 BSD-2-Clause                     [72]
+  numpy 0.29.0                                 BSD-2-Clause                     [71]
   once_cell 1.21.4                             MIT OR Apache-2.0                [14, 15]
   once_cell_polyfill 1.70.2                    MIT OR Apache-2.0                [21, 22]
-  outref 0.5.2                                 MIT                              [73]
-  parking_lot 0.12.5                           MIT OR Apache-2.0                [15, 63]
-  parking_lot_core 0.9.12                      MIT OR Apache-2.0                [15, 63]
+  outref 0.5.2                                 MIT                              [72]
+  parking_lot 0.12.5                           MIT OR Apache-2.0                [15, 62]
+  parking_lot_core 0.9.12                      MIT OR Apache-2.0                [15, 62]
   pastey 0.2.3                                 MIT OR Apache-2.0                [14, 20]
-  percent-encoding 2.3.2                       MIT OR Apache-2.0                [15, 74]
+  percent-encoding 2.3.2                       MIT OR Apache-2.0                [15, 73]
   proc-macro-crate 3.5.0                       MIT OR Apache-2.0                [13, 14]
   proc-macro2 1.0.107                          MIT OR Apache-2.0                [14, 20]
-  pyo3 0.29.3                                  MIT OR Apache-2.0                [75, 76]
-  pyo3-ffi 0.29.3                              MIT OR Apache-2.0                [75, 76]
-  pyo3-macros 0.29.3                           MIT OR Apache-2.0                [75, 76]
-  pyo3-macros-backend 0.29.3                   MIT OR Apache-2.0                [75, 76]
+  pyo3 0.29.3                                  MIT OR Apache-2.0                [74, 75]
+  pyo3-ffi 0.29.3                              MIT OR Apache-2.0                [74, 75]
+  pyo3-macros 0.29.3                           MIT OR Apache-2.0                [74, 75]
+  pyo3-macros-backend 0.29.3                   MIT OR Apache-2.0                [74, 75]
   quote 1.0.47                                 MIT OR Apache-2.0                [14, 20]
-  rawpointer 0.2.1                             MIT/Apache-2.0                   [15, 77]
+  rawpointer 0.2.1                             MIT/Apache-2.0                   [15, 76]
   ref-cast 1.0.27                              MIT OR Apache-2.0                [14, 20]
   ref-cast-impl 1.0.27                         MIT OR Apache-2.0                [14, 20]
-  referencing 0.58.6                           MIT                              [58]
+  referencing 0.58.6                           MIT                              [57]
   regex 1.13.1                                 MIT OR Apache-2.0                [15, 27]
   regex-automata 0.4.18                        MIT OR Apache-2.0                [15, 27]
   regex-syntax 0.8.11                          MIT OR Apache-2.0                [15, 27]
   rustc-hash 2.1.3                             Apache-2.0 OR MIT                [14, 20]
-  rustix 1.1.5                                 Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT [14, 15, 62, 78]
-  scopeguard 1.2.0                             MIT OR Apache-2.0                [15, 79]
+  rustix 1.1.5                                 Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT [14, 15, 61, 77]
+  scopeguard 1.2.0                             MIT OR Apache-2.0                [15, 78]
   serde 1.0.229                                MIT OR Apache-2.0                [14, 20]
   serde_core 1.0.229                           MIT OR Apache-2.0                [14, 20]
   serde_derive 1.0.229                         MIT OR Apache-2.0                [14, 20]
   serde_json 1.0.154                           MIT OR Apache-2.0                [14, 20]
-  sha2 0.10.9                                  MIT OR Apache-2.0                [28, 80]
-  simd-adler32 0.3.10                          MIT                              [81]
-  smallvec 1.16.3                              MIT OR Apache-2.0                [15, 82]
-  strsim 0.11.1                                MIT                              [83]
-  strum 0.28.0                                 MIT                              [84]
-  strum_macros 0.28.0                          MIT                              [84]
-  subtle 2.6.1                                 BSD-3-Clause                     [85]
+  sha2 0.10.9                                  MIT OR Apache-2.0                [28, 79]
+  simd-adler32 0.3.10                          MIT                              [80]
+  smallvec 1.16.4                              MIT OR Apache-2.0                [15, 81]
+  strsim 0.11.1                                MIT                              [82]
+  strum 0.28.0                                 MIT                              [83]
+  strum_macros 0.28.0                          MIT                              [83]
+  subtle 2.6.1                                 BSD-3-Clause                     [84]
   syn 2.0.119                                  MIT OR Apache-2.0                [14, 20]
   syn 3.0.9                                    MIT OR Apache-2.0                [14, 20]
-  tempfile 3.27.0                              MIT OR Apache-2.0                [15, 86]
-  terminal_size 0.4.4                          MIT OR Apache-2.0                [21, 87]
+  tempfile 3.27.0                              MIT OR Apache-2.0                [15, 85]
+  terminal_size 0.4.4                          MIT OR Apache-2.0                [21, 86]
   thiserror 2.0.21                             MIT OR Apache-2.0                [14, 20]
   thiserror-impl 2.0.21                        MIT OR Apache-2.0                [14, 20]
-  tinyvec 1.13.3                               Zlib OR Apache-2.0 OR MIT        [88, 89, 90]
+  tinyvec 1.13.3                               Zlib OR Apache-2.0 OR MIT        [87, 88, 89]
   toml_datetime 1.1.2+spec-1.1.0               MIT OR Apache-2.0                [22, 34]
   toml_edit 0.25.17+spec-1.1.0                 MIT OR Apache-2.0                [22, 34]
   toml_parser 1.1.5+spec-1.1.0                 MIT OR Apache-2.0                [22, 34]
-  typenum 1.20.1                               MIT OR Apache-2.0                [91, 92, 93]
+  typenum 1.20.1                               MIT OR Apache-2.0                [90, 91, 92]
   unicode-general-category 1.1.0               Apache-2.0                       [21]
-  unicode-ident 1.0.27                         (MIT OR Apache-2.0) AND Unicode-3.0 [14, 20, 94]
-  unicode-normalization 0.1.26                 (MIT OR Apache-2.0) AND Unicode-3.0 [15, 55, 94, 95]
-  utf8parse 0.2.2                              Apache-2.0 OR MIT                [20, 96]
-  uuid-simd 0.8.0                              MIT                              [54]
-  vsimd 0.8.0                                  MIT                              [54]
-  windows-link 0.2.1                           MIT OR Apache-2.0                [97, 98]
-  windows-sys 0.61.2                           MIT OR Apache-2.0                [97, 98]
-  winnow 1.0.4                                 MIT                              [99]
-  zerocopy 0.8.63                              BSD-2-Clause OR Apache-2.0 OR MIT [100, 101, 102]
-  zerocopy-derive 0.8.63                       BSD-2-Clause OR Apache-2.0 OR MIT [100, 101, 102]
+  unicode-ident 1.0.27                         (MIT OR Apache-2.0) AND Unicode-3.0 [14, 20, 93]
+  unicode-normalization 0.1.26                 (MIT OR Apache-2.0) AND Unicode-3.0 [15, 54, 93, 94]
+  utf8parse 0.2.2                              Apache-2.0 OR MIT                [20, 95]
+  uuid-simd 0.8.0                              MIT                              [53]
+  vsimd 0.8.0                                  MIT                              [53]
+  windows-link 0.2.1                           MIT OR Apache-2.0                [96, 97]
+  windows-sys 0.61.2                           MIT OR Apache-2.0                [96, 97]
+  winnow 1.0.4                                 MIT                              [98]
+  zerocopy 0.8.63                              BSD-2-Clause OR Apache-2.0 OR MIT [99, 100, 101]
+  zerocopy-derive 0.8.63                       BSD-2-Clause OR Apache-2.0 OR MIT [99, 100, 101]
   zmij 1.0.23                                  MIT                              [14]
-  zstd-sys 2.1.0+zstd.1.5.7                    BSD-3-Clause                     [103, 104]
+  zstd-sys 2.1.0+zstd.1.5.7                    BSD-3-Clause                     [102, 103]
 
 
 Licence texts
@@ -860,7 +859,7 @@ DEALINGS IN THE SOFTWARE.
     LICENSE-APACHE; rawpointer 0.2.1: LICENSE-APACHE; regex 1.13.1:
     LICENSE-APACHE; regex-automata 0.4.18: LICENSE-APACHE; regex-syntax 0.8.11:
     LICENSE-APACHE; rustix 1.1.5: LICENSE-APACHE; scopeguard 1.2.0:
-    LICENSE-APACHE; smallvec 1.16.3: LICENSE-APACHE; tempfile 3.27.0:
+    LICENSE-APACHE; smallvec 1.16.4: LICENSE-APACHE; tempfile 3.27.0:
     LICENSE-APACHE; unicode-normalization 0.1.26: LICENSE-APACHE
 -------------------------------------------------------------------------------
 
@@ -1161,7 +1160,7 @@ For more information, please refer to <http://unlicense.org/>
 
 -------------------------------------------------------------------------------
 [20] allocator-api2 0.2.21: LICENSE-APACHE; itoa 1.0.18: LICENSE-APACHE; libc
-    0.2.190: LICENSE-APACHE; pastey 0.2.3: LICENSE-APACHE; proc-macro2 1.0.107:
+    0.2.191: LICENSE-APACHE; pastey 0.2.3: LICENSE-APACHE; proc-macro2 1.0.107:
     LICENSE-APACHE; quote 1.0.47: LICENSE-APACHE; ref-cast 1.0.27:
     LICENSE-APACHE; ref-cast-impl 1.0.27: LICENSE-APACHE; rustc-hash 2.1.3:
     LICENSE-APACHE; serde 1.0.229: LICENSE-APACHE; serde_core 1.0.229:
@@ -1352,7 +1351,7 @@ END OF TERMS AND CONDITIONS
 [21] anstream 1.0.0: LICENSE-APACHE; anstyle 1.0.14: LICENSE-APACHE;
     anstyle-parse 1.0.0: LICENSE-APACHE; anstyle-query 1.1.5: LICENSE-APACHE;
     anstyle-wincon 3.0.11: LICENSE-APACHE; bytecount 0.6.9: LICENSE.Apache2;
-    colorchoice 1.0.5: LICENSE-APACHE; crc32fast 1.5.2: LICENSE-APACHE; hex
+    colorchoice 1.0.5: LICENSE-APACHE; crc32fast 1.5.3: LICENSE-APACHE; hex
     0.4.3: LICENSE-APACHE; is_terminal_polyfill 1.70.2: LICENSE-APACHE;
     once_cell_polyfill 1.70.2: LICENSE-APACHE; terminal_size 0.4.4:
     LICENSE-APACHE; unicode-general-category 1.1.0: LICENSE
@@ -2680,7 +2679,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[36] crc32fast 1.5.2: LICENSE-MIT
+[36] crc32fast 1.5.3: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 MIT License
@@ -3011,7 +3010,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-[48] getrandom 0.3.4: LICENSE-APACHE; getrandom 0.4.3: LICENSE-APACHE
+[48] getrandom 0.3.4: LICENSE-APACHE
 -------------------------------------------------------------------------------
 
                               Apache License
@@ -3248,38 +3247,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[50] getrandom 0.4.3: LICENSE-MIT
--------------------------------------------------------------------------------
-
-Copyright (c) 2018-2026 The rust-random Project Developers
-Copyright (c) 2014 The Rust Project Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
--------------------------------------------------------------------------------
-[51] half 2.7.1: LICENSE-APACHE; miniz_oxide 0.9.1: LICENSE-APACHE.md
+[50] half 2.7.1: LICENSE-APACHE; miniz_oxide 0.9.1: LICENSE-APACHE.md
 -------------------------------------------------------------------------------
 
                                  Apache License
@@ -3460,7 +3428,7 @@ DEALINGS IN THE SOFTWARE.
    END OF TERMS AND CONDITIONS
 
 -------------------------------------------------------------------------------
-[52] half 2.7.1: LICENSE-MIT
+[51] half 2.7.1: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 MIT License
@@ -3484,7 +3452,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-[53] hashbrown 0.17.1: LICENSE-MIT
+[52] hashbrown 0.17.1: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2016 Amanieu d'Antras
@@ -3514,7 +3482,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[54] hdf5-metno 0.15.0: no licence file; the manifest declares MIT;
+[53] hdf5-metno 0.15.0: no licence file; the manifest declares MIT;
     hdf5-metno-derive 0.10.2: no licence file; the manifest declares MIT;
     hdf5-metno-sys 0.12.4: no licence file; the manifest declares MIT;
     hdf5-metno-types 0.11.1: no licence file; the manifest declares MIT;
@@ -3544,7 +3512,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-[55] heck 0.5.0: LICENSE-MIT; unicode-normalization 0.1.26: LICENSE-MIT
+[54] heck 0.5.0: LICENSE-MIT; unicode-normalization 0.1.26: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2015 The Rust Project Developers
@@ -3574,7 +3542,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[56] hex 0.4.3: LICENSE-MIT
+[55] hex 0.4.3: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2013-2014 The Rust Project Developers.
@@ -3599,7 +3567,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-[57] indexmap 2.14.2: LICENSE-MIT
+[56] indexmap 2.14.2: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2016--2017
@@ -3629,7 +3597,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[58] jsonschema 0.58.6: LICENSE; referencing 0.58.6: LICENSE
+[57] jsonschema 0.58.6: LICENSE; referencing 0.58.6: LICENSE
 -------------------------------------------------------------------------------
 
 MIT License
@@ -3655,7 +3623,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-[59] libc 0.2.190: LICENSE-MIT
+[58] libc 0.2.191: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) The Rust Project Developers
@@ -3685,7 +3653,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[60] libz-sys 1.1.29: LICENSE-MIT
+[59] libz-sys 1.1.29: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2014 Alex Crichton
@@ -3716,7 +3684,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[61] linux-raw-sys 0.12.1: COPYRIGHT
+[60] linux-raw-sys 0.12.1: COPYRIGHT
 -------------------------------------------------------------------------------
 
 Short version for non-lawyers:
@@ -3750,7 +3718,7 @@ is licensed under:
 at your option.
 
 -------------------------------------------------------------------------------
-[62] linux-raw-sys 0.12.1: LICENSE-Apache-2.0_WITH_LLVM-exception; rustix
+[61] linux-raw-sys 0.12.1: LICENSE-Apache-2.0_WITH_LLVM-exception; rustix
     1.1.5: LICENSE-Apache-2.0_WITH_LLVM-exception
 -------------------------------------------------------------------------------
 
@@ -3974,7 +3942,7 @@ the License, but only in their entirety and only with respect to the Combined
 Software.
 
 -------------------------------------------------------------------------------
-[63] lock_api 0.4.14: LICENSE-MIT; parking_lot 0.12.5: LICENSE-MIT;
+[62] lock_api 0.4.14: LICENSE-MIT; parking_lot 0.12.5: LICENSE-MIT;
     parking_lot_core 0.9.12: LICENSE-MIT
 -------------------------------------------------------------------------------
 
@@ -4005,7 +3973,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[64] lz4-sys 1.11.1+lz4-1.10.0: LICENSE
+[63] lz4-sys 1.11.1+lz4-1.10.0: LICENSE
 -------------------------------------------------------------------------------
 
 The MIT License (MIT)
@@ -4031,7 +3999,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-[65] matrixmultiply 0.3.11: LICENSE-MIT
+[64] matrixmultiply 0.3.11: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2016 - 2023 Ulrik Sverdrup "bluss"
@@ -4063,7 +4031,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[66] micromap 0.3.0: LICENSE.txt
+[65] micromap 0.3.0: LICENSE.txt
 -------------------------------------------------------------------------------
 
 Copyright (c) 2023-2026 Yegor Bugayenko
@@ -4087,7 +4055,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-[67] miniz_oxide 0.9.1: LICENSE
+[66] miniz_oxide 0.9.1: LICENSE
 -------------------------------------------------------------------------------
 
 MIT License
@@ -4117,7 +4085,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-[68] miniz_oxide 0.9.1: LICENSE-MIT.md
+[67] miniz_oxide 0.9.1: LICENSE-MIT.md
 -------------------------------------------------------------------------------
 
 MIT License
@@ -4146,7 +4114,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-[69] miniz_oxide 0.9.1: LICENSE-ZLIB.md
+[68] miniz_oxide 0.9.1: LICENSE-ZLIB.md
 -------------------------------------------------------------------------------
 
 Copyright 2013-2014 RAD Game Tools and Valve Software
@@ -4165,7 +4133,7 @@ Permission is granted to anyone to use this software for any purpose, including 
 3. This notice may not be removed or altered from any source distribution.
 
 -------------------------------------------------------------------------------
-[70] ndarray 0.17.2: LICENSE-MIT
+[69] ndarray 0.17.2: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2015 - 2021 Ulrik Sverdrup "bluss",
@@ -4197,7 +4165,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[71] num-cmp 0.1.0: LICENSE.txt
+[70] num-cmp 0.1.0: LICENSE.txt
 -------------------------------------------------------------------------------
 
 The author of num-cmp, Kang Seonghoon, disclaims copyright to
@@ -4591,7 +4559,7 @@ limitations under the License.
 ~~~~
 
 -------------------------------------------------------------------------------
-[72] numpy 0.29.0: LICENSE
+[71] numpy 0.29.0: LICENSE
 -------------------------------------------------------------------------------
 
 BSD 2-Clause License
@@ -4621,7 +4589,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 -------------------------------------------------------------------------------
-[73] outref 0.5.2: LICENSE
+[72] outref 0.5.2: LICENSE
 -------------------------------------------------------------------------------
 
 MIT License
@@ -4647,7 +4615,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-[74] percent-encoding 2.3.2: LICENSE-MIT
+[73] percent-encoding 2.3.2: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2013-2025 The rust-url developers
@@ -4677,7 +4645,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[75] pyo3 0.29.3: LICENSE-APACHE; pyo3-ffi 0.29.3: LICENSE-APACHE; pyo3-macros
+[74] pyo3 0.29.3: LICENSE-APACHE; pyo3-ffi 0.29.3: LICENSE-APACHE; pyo3-macros
     0.29.3: LICENSE-APACHE; pyo3-macros-backend 0.29.3: LICENSE-APACHE
 -------------------------------------------------------------------------------
 
@@ -4861,7 +4829,7 @@ TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
 END OF TERMS AND CONDITIONS
 
 -------------------------------------------------------------------------------
-[76] pyo3 0.29.3: LICENSE-MIT; pyo3-ffi 0.29.3: LICENSE-MIT; pyo3-macros
+[75] pyo3 0.29.3: LICENSE-MIT; pyo3-ffi 0.29.3: LICENSE-MIT; pyo3-macros
     0.29.3: LICENSE-MIT; pyo3-macros-backend 0.29.3: LICENSE-MIT
 -------------------------------------------------------------------------------
 
@@ -4892,7 +4860,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[77] rawpointer 0.2.1: LICENSE-MIT
+[76] rawpointer 0.2.1: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2015
@@ -4922,7 +4890,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[78] rustix 1.1.5: COPYRIGHT
+[77] rustix 1.1.5: COPYRIGHT
 -------------------------------------------------------------------------------
 
 Short version for non-lawyers:
@@ -4956,7 +4924,7 @@ is licensed under:
 at your option.
 
 -------------------------------------------------------------------------------
-[79] scopeguard 1.2.0: LICENSE-MIT
+[78] scopeguard 1.2.0: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2016-2019 Ulrik Sverdrup "bluss" and scopeguard developers
@@ -4986,7 +4954,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[80] sha2 0.10.9: LICENSE-MIT
+[79] sha2 0.10.9: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2006-2009 Graydon Hoare
@@ -5018,7 +4986,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[81] simd-adler32 0.3.10: LICENSE.md
+[80] simd-adler32 0.3.10: LICENSE.md
 -------------------------------------------------------------------------------
 
 MIT License
@@ -5044,7 +5012,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-[82] smallvec 1.16.3: LICENSE-MIT
+[81] smallvec 1.16.4: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2018 The Servo Project Developers
@@ -5074,7 +5042,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[83] strsim 0.11.1: LICENSE
+[82] strsim 0.11.1: LICENSE
 -------------------------------------------------------------------------------
 
 The MIT License (MIT)
@@ -5102,7 +5070,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-[84] strum 0.28.0: LICENSE; strum_macros 0.28.0: LICENSE
+[83] strum 0.28.0: LICENSE; strum_macros 0.28.0: LICENSE
 -------------------------------------------------------------------------------
 
 MIT License
@@ -5128,7 +5096,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-[85] subtle 2.6.1: LICENSE
+[84] subtle 2.6.1: LICENSE
 -------------------------------------------------------------------------------
 
 Copyright (c) 2016-2017 Isis Agora Lovecruft, Henry de Valence. All rights reserved.
@@ -5162,7 +5130,7 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 -------------------------------------------------------------------------------
-[86] tempfile 3.27.0: LICENSE-MIT
+[85] tempfile 3.27.0: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2015 Steven Allen
@@ -5192,7 +5160,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[87] terminal_size 0.4.4: LICENSE-MIT
+[86] terminal_size 0.4.4: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2015 The terminal-size Developers
@@ -5216,7 +5184,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-[88] tinyvec 1.13.3: LICENSE-APACHE.md
+[87] tinyvec 1.13.3: LICENSE-APACHE.md
 -------------------------------------------------------------------------------
 
                                  Apache License
@@ -5422,7 +5390,7 @@ SOFTWARE.
    limitations under the License.
 
 -------------------------------------------------------------------------------
-[89] tinyvec 1.13.3: LICENSE-MIT.md
+[88] tinyvec 1.13.3: LICENSE-MIT.md
 -------------------------------------------------------------------------------
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
@@ -5432,7 +5400,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[90] tinyvec 1.13.3: LICENSE-ZLIB.md
+[89] tinyvec 1.13.3: LICENSE-ZLIB.md
 -------------------------------------------------------------------------------
 
 Copyright (c) 2019 Daniel "Lokathor" Gee.
@@ -5448,13 +5416,13 @@ Permission is granted to anyone to use this software for any purpose, including 
 3. This notice may not be removed or altered from any source distribution.
 
 -------------------------------------------------------------------------------
-[91] typenum 1.20.1: LICENSE
+[90] typenum 1.20.1: LICENSE
 -------------------------------------------------------------------------------
 
 MIT OR Apache-2.0
 
 -------------------------------------------------------------------------------
-[92] typenum 1.20.1: LICENSE-APACHE
+[91] typenum 1.20.1: LICENSE-APACHE
 -------------------------------------------------------------------------------
 
                               Apache License
@@ -5660,7 +5628,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 -------------------------------------------------------------------------------
-[93] typenum 1.20.1: LICENSE-MIT
+[92] typenum 1.20.1: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 The MIT License (MIT)
@@ -5686,7 +5654,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-[94] unicode-ident 1.0.27: LICENSE-UNICODE; unicode-normalization 0.1.26:
+[93] unicode-ident 1.0.27: LICENSE-UNICODE; unicode-normalization 0.1.26:
     LICENSE-UNICODE
 -------------------------------------------------------------------------------
 
@@ -5731,7 +5699,7 @@ dealings in these Data Files or Software without prior written
 authorization of the copyright holder.
 
 -------------------------------------------------------------------------------
-[95] unicode-normalization 0.1.26: COPYRIGHT
+[94] unicode-normalization 0.1.26: COPYRIGHT
 -------------------------------------------------------------------------------
 
 Licensed under the Apache License, Version 2.0
@@ -5743,7 +5711,7 @@ notice may not be copied, modified, or distributed except
 according to those terms.
 
 -------------------------------------------------------------------------------
-[96] utf8parse 0.2.2: LICENSE-MIT
+[95] utf8parse 0.2.2: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2016 Joe Wilm
@@ -5773,7 +5741,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[97] windows-link 0.2.1: license-apache-2.0; windows-sys 0.61.2:
+[96] windows-link 0.2.1: license-apache-2.0; windows-sys 0.61.2:
     license-apache-2.0
 -------------------------------------------------------------------------------
 
@@ -5980,7 +5948,7 @@ DEALINGS IN THE SOFTWARE.
    limitations under the License.
 
 -------------------------------------------------------------------------------
-[98] windows-link 0.2.1: license-mit; windows-sys 0.61.2: license-mit
+[97] windows-link 0.2.1: license-mit; windows-sys 0.61.2: license-mit
 -------------------------------------------------------------------------------
 
     MIT License
@@ -6006,7 +5974,7 @@ DEALINGS IN THE SOFTWARE.
     SOFTWARE
 
 -------------------------------------------------------------------------------
-[99] winnow 1.0.4: LICENSE-MIT
+[98] winnow 1.0.4: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Permission is hereby granted, free of charge, to any person obtaining
@@ -6029,7 +5997,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[100] zerocopy 0.8.63: LICENSE-APACHE; zerocopy-derive 0.8.63: LICENSE-APACHE
+[99] zerocopy 0.8.63: LICENSE-APACHE; zerocopy-derive 0.8.63: LICENSE-APACHE
 -------------------------------------------------------------------------------
 
                                  Apache License
@@ -6235,7 +6203,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
    limitations under the License.
 
 -------------------------------------------------------------------------------
-[101] zerocopy 0.8.63: LICENSE-BSD; zerocopy-derive 0.8.63: LICENSE-BSD
+[100] zerocopy 0.8.63: LICENSE-BSD; zerocopy-derive 0.8.63: LICENSE-BSD
 -------------------------------------------------------------------------------
 
 Copyright 2019 The Fuchsia Authors.
@@ -6264,7 +6232,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 -------------------------------------------------------------------------------
-[102] zerocopy 0.8.63: LICENSE-MIT; zerocopy-derive 0.8.63: LICENSE-MIT
+[101] zerocopy 0.8.63: LICENSE-MIT; zerocopy-derive 0.8.63: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright 2023 The Fuchsia Authors
@@ -6294,7 +6262,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[103] zstd-sys 2.1.0+zstd.1.5.7: LICENSE
+[102] zstd-sys 2.1.0+zstd.1.5.7: LICENSE
 -------------------------------------------------------------------------------
 
 BSD 3-Clause License
@@ -6327,7 +6295,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 -------------------------------------------------------------------------------
-[104] zstd-sys 2.1.0+zstd.1.5.7: LICENSE.BSD-3-Clause
+[103] zstd-sys 2.1.0+zstd.1.5.7: LICENSE.BSD-3-Clause
 -------------------------------------------------------------------------------
 
 The auto-generated bindings are under the 3-clause BSD license:
