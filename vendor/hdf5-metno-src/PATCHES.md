@@ -22,9 +22,19 @@ updated.
    `H5F__drvrinfo_prefix_decode`). A driver info block lies within the file.
    One whose stated size runs past the file's end is refused before the
    metadata cache reads it, rather than read to that size and refused after.
+4. **Chunks copied from the chunk cache** (`ext/hdf5/src/H5Dchunk.c`,
+   `H5D__chunk_copy_cb`). `H5Ocopy` takes a chunk that a handle open in the
+   process has cached from the cache, unfiltered and at its full size, into
+   the buffer it sized for the chunk as stored, which the output pipeline of
+   the chunk before may have left as small as that chunk compressed. The
+   buffer grows to the full size first, as it does for a chunk read from the
+   file, rather than taking the chunk past its end. HDF5's `develop` has the
+   same code.
 
 The first and third changes are held by the
 `global-heap-object-smaller-than-its-header` and
 `driver-info-block-past-the-end` fixtures of the robustness corpus
 (`crates/medh5/src/conformance/robustness.rs`), which CI reports through every
-wheel and every binary it builds.
+wheel and every binary it builds. The fourth is held by
+`s14_4_a_dataset_a_reader_holds_open_copies_whole`
+(`crates/medh5/src/h5/graph.rs`), whose copy writes past its buffer without it.

@@ -350,4 +350,37 @@ mod tests {
         };
         assert_eq!(type_of("a"), type_of("b"));
     }
+
+    /// An amend copies a dataset a reader of the source holds open, as a
+    /// verify on another thread does between its block reads. HDF5 takes the
+    /// chunks the reader has cached from its cache, at their full size, into a
+    /// buffer sized for the chunk as stored: after a chunk before had been
+    /// compressed into a smaller buffer, it wrote past that buffer's end
+    /// (`vendor/hdf5-metno-src/PATCHES.md`, change 4).
+    #[test]
+    fn s14_4_a_dataset_a_reader_holds_open_copies_whole() {
+        use crate::array::{DType, NdArray};
+        use crate::h5::data::{self, Layout};
+        use crate::storage::codecs::{self, Role};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("src.h5");
+        let shape = [8usize, 128, 128];
+        let values: Vec<u16> = (0..shape.iter().product::<usize>()).map(|i| (i / 97 % 13) as u16).collect();
+        {
+            let file = crate::h5::file::create_truncate(&path).unwrap();
+            let filters = codecs::resolve_profile(None).unwrap().codec(Role::Label).filters();
+            let layout = Layout { chunks: Some(vec![1, 128, 128]), filters };
+            let ds = data::create_empty(&file.as_group().unwrap(), "labels", DType::U16, &shape, &layout).unwrap();
+            data::write_region(&ds, &NdArray::from_vec(&shape, values.clone()).unwrap(), &[0, 0, 0]).unwrap();
+        }
+        // The reader: every chunk read into its cache, the dataset still open.
+        let src = crate::h5::file::open_read(&path).unwrap();
+        let held = src.dataset("labels").unwrap();
+        data::read(&held).unwrap();
+        let out = crate::h5::file::create_truncate(&dir.path().join("out.h5")).unwrap();
+        copy_stored(&src.as_group().unwrap(), "labels", &out.as_group().unwrap()).unwrap();
+        assert_eq!(data::read(&out.dataset("labels").unwrap()).unwrap(), NdArray::from_vec(&shape, values).unwrap());
+        drop(held);
+    }
 }
