@@ -6984,6 +6984,22 @@ H5D__chunk_copy_cb(const H5D_chunk_rec_t *chunk_rec, void *_udata)
             assert(H5_addr_defined(ent->chunk_block.offset));
 
             H5_CHECKED_ASSIGN(nbytes, size_t, shared_fo->layout.u.chunk.size, hsize_t);
+
+            /* medh5: the cached chunk is unfiltered, larger than the stored
+             * chunk the buffer was sized for above, and the output pipeline
+             * may have left a smaller buffer from the chunk before
+             * (vendor/hdf5-metno-src/PATCHES.md)
+             */
+            if (nbytes > udata->buf_size) {
+                void *new_buf; /* New buffer for data */
+
+                if (NULL == (new_buf = H5MM_realloc(udata->buf, nbytes)))
+                    HGOTO_ERROR(H5E_RESOURCE, H5E_NOSPACE, H5_ITER_ERROR,
+                                "memory allocation failed for raw data chunk");
+                udata->buf      = new_buf;
+                udata->buf_size = nbytes;
+            } /* end if */
+
             H5MM_memcpy(udata->buf, ent->chunk, nbytes);
         }
         else {
