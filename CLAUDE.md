@@ -201,7 +201,7 @@ it into every file's `generator`. The crates' `=X.Y.Z` pins on each other in
   line's `--json` (`write_preflight`), once built as one tree, took 12 GB at
   200 subjects.
 - **The native inventory follows the lock.** RustSec sees crates, not the C
-  libraries they compile (zlib 1.3.2 ships as `libz-sys` 1.1.29). `SECURITY.md`
+  libraries they compile (zlib 1.3.2 ships as `libz-sys` 1.1.31). `SECURITY.md`
   lists each statically linked library and dispositions every advisory against
   it, with a VEX statement in `vex/`; a `-sys` bump or vendored update changes
   its row (a test compares) and re-reads its advisories. `advisories.yml`

@@ -39,8 +39,8 @@ hdf5-metno-sys = { version = "0.12.4", features = ["static", "zlib"] }
 # crate rather than fetched at configure time (C-Blosc2's CMake would fetch
 # them from the network).
 lz4-sys = "1.11.1"
-zstd-sys = { version = "2.1.0", default-features = false, features = ["zdict_builder"] }
-libz-sys = { version = "1.1.29", default-features = false, features = ["libc", "static"] }
+zstd-sys = { version = "2.1.2", default-features = false, features = ["zdict_builder"] }
+libz-sys = { version = "1.1.31", default-features = false, features = ["libc", "static"] }
 
 [build-dependencies]
 cc = "1.2"

@@ -15,9 +15,9 @@ C libraries
 -----------
 
   HDF5                                 hdf5-metno-src 0.10.4          [1]
-  zlib                                 libz-sys 1.1.29                [2]
+  zlib                                 libz-sys 1.1.31                [2]
   LZ4                                  lz4-sys 1.11.1+lz4-1.10.0      [3]
-  Zstandard                            zstd-sys 2.1.0+zstd.1.5.7      [4]
+  Zstandard                            zstd-sys 2.1.2+zstd.1.5.7      [4]
   C-Blosc2                             vendored                       [5]
   BitShuffle, in C-Blosc2              vendored                       [6]
   FastLZ, in C-Blosc2                  vendored                       [7]
@@ -91,7 +91,7 @@ Rust crates (131)
   jsonschema-regex 0.58.6                      MIT                              [53]
   jsonschema-value 0.58.6                      MIT                              [53]
   libc 0.2.191                                 MIT OR Apache-2.0                [20, 58]
-  libz-sys 1.1.29                              MIT OR Apache-2.0                [15, 59]
+  libz-sys 1.1.31                              MIT OR Apache-2.0                [15, 59]
   linux-raw-sys 0.12.1                         Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT [14, 15, 60, 61]
   lock_api 0.4.14                              MIT OR Apache-2.0                [15, 62]
   lz4-sys 1.11.1+lz4-1.10.0                    MIT                              [63]
@@ -167,7 +167,7 @@ Rust crates (131)
   zerocopy 0.8.63                              BSD-2-Clause OR Apache-2.0 OR MIT [99, 100, 101]
   zerocopy-derive 0.8.63                       BSD-2-Clause OR Apache-2.0 OR MIT [99, 100, 101]
   zmij 1.0.23                                  MIT                              [14]
-  zstd-sys 2.1.0+zstd.1.5.7                    BSD-3-Clause                     [102, 103]
+  zstd-sys 2.1.2+zstd.1.5.7                    BSD-3-Clause                     [102, 103]
 
 
 Licence texts
@@ -291,7 +291,7 @@ Foundation under Federal Award No. 2534078.
 -----------------------------------------------------------------------------
 
 -------------------------------------------------------------------------------
-[2] zlib (libz-sys 1.1.29: src/zlib/LICENSE)
+[2] zlib (libz-sys 1.1.31: src/zlib/LICENSE)
 -------------------------------------------------------------------------------
 
 Copyright notice:
@@ -348,7 +348,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 -------------------------------------------------------------------------------
-[4] Zstandard (zstd-sys 2.1.0+zstd.1.5.7: zstd/LICENSE)
+[4] Zstandard (zstd-sys 2.1.2+zstd.1.5.7: zstd/LICENSE)
 -------------------------------------------------------------------------------
 
 BSD License
@@ -848,7 +848,7 @@ DEALINGS IN THE SOFTWARE.
     LICENSE-APACHE; fastrand 2.5.0: LICENSE-APACHE; flate2 1.1.10:
     LICENSE-APACHE; fraction 0.17.0: LICENSE-APACHE; hashbrown 0.17.1:
     LICENSE-APACHE; heck 0.5.0: LICENSE-APACHE; indexmap 2.14.2:
-    LICENSE-APACHE; libz-sys 1.1.29: LICENSE-APACHE; linux-raw-sys 0.12.1:
+    LICENSE-APACHE; libz-sys 1.1.31: LICENSE-APACHE; linux-raw-sys 0.12.1:
     LICENSE-APACHE; lock_api 0.4.14: LICENSE-APACHE; matrixmultiply 0.3.11:
     LICENSE-APACHE; ndarray 0.17.2: LICENSE-APACHE; num 0.4.3: LICENSE-APACHE;
     num-bigint 0.4.8: LICENSE-APACHE; num-complex 0.4.6: LICENSE-APACHE;
@@ -3653,7 +3653,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[59] libz-sys 1.1.29: LICENSE-MIT
+[59] libz-sys 1.1.31: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2014 Alex Crichton
@@ -6262,7 +6262,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[102] zstd-sys 2.1.0+zstd.1.5.7: LICENSE
+[102] zstd-sys 2.1.2+zstd.1.5.7: LICENSE
 -------------------------------------------------------------------------------
 
 BSD 3-Clause License
@@ -6295,7 +6295,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 -------------------------------------------------------------------------------
-[103] zstd-sys 2.1.0+zstd.1.5.7: LICENSE.BSD-3-Clause
+[103] zstd-sys 2.1.2+zstd.1.5.7: LICENSE.BSD-3-Clause
 -------------------------------------------------------------------------------
 
 The auto-generated bindings are under the 3-clause BSD license:

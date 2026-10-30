@@ -534,7 +534,7 @@ class TestRepositoryGates:
 
     def test_the_native_inventory_is_what_the_lock_builds(self):
         """RustSec sees crates, not the C libraries they compile: zlib 1.3.2
-        reaches every wheel as `libz-sys` 1.1.29, a version no zlib advisory
+        reaches every wheel as `libz-sys` 1.1.31, a version no zlib advisory
         names.  SECURITY.md lists each library with the crate or the vendored
         source that builds it, so a bump that changes a library changes its
         row --- and with it the reading of each advisory against it."""

@@ -6,6 +6,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.4] — 2026-10-30
+
+**A patch release, with no format change.** One fix, in the HDF5 the wheels
+and binaries build: the documented API is unchanged, the format stays 1.2 and
+the diagnostic code table keeps its codes, and every object 2.2.3 wrote, 2.2.4
+writes with the same digest. An amendment, pack, unpack, extract, repack or
+recompression no longer corrupts memory when the process holds open a dataset
+it copies, through a kept `Dataset` or a read on another thread. Two crates
+that build C libraries move past advisories that did not reach medh5, and still
+build zlib 1.3.2 and Zstandard 1.5.7. The concurrency page says when a forked
+child can still hang, the README and the site point to medh5 Viewer, and the
+pages that predate format 1.2 account for it.
+
+### Security
+
+- **The wheels and binaries build with `libz-sys` 1.1.31 and `zstd-sys` 2.1.2,
+  past two advisories that did not reach them.** RUSTSEC-2026-0418: through
+  1.1.30, the `libz-sys` build script printed the build's environment, secrets
+  included, into the output Cargo keeps under `target/`, but only from its
+  probe for a system zlib, which a `static` build such as medh5's skips.
+  RUSTSEC-2026-0410: on wasm32, the `zstd-sys` allocator shim wrote to
+  address 0 when an allocation failed, and medh5 builds nothing for wasm32.
+  The libraries they build are unchanged, zlib 1.3.2 and Zstandard 1.5.7, and
+  `medh5-sys` now requires the fixed versions, so a build from crates.io takes
+  them too.
+
+### Fixed
+
+- **Copying a dataset the process holds open no longer corrupts memory.** An
+  amendment, pack, unpack, extract or repack copies datasets as stored, and a
+  recompression the ones it leaves as they are. HDF5 took the chunks an open
+  handle had cached into a buffer sized for a compressed chunk, at their full
+  size: with a `Dataset` from `Sample.root` kept, or the file read on another
+  thread, the copy wrote past the buffer's end, and the process crashed or ran
+  on with its heap damaged. HDF5 is now built with a fix
+  (`vendor/hdf5-metno-src/PATCHES.md`); the wheels and the release binaries
+  carry it, and a build from crates.io does not until HDF5 releases the fix.
+
+### Documentation
+
+- **The concurrency page says when a forked child can still hang.** A thread
+  that starts waiting for HDF5's lock at the moment of a `fork` can leave the
+  child waiting forever, about once in 500 forks made while another thread
+  recompresses (#106). A `DataLoader` meets it only if another thread is
+  calling medh5 as its iterator is made; forking while no thread is calling
+  medh5, or `spawn` and `forkserver`, rule it out.
+- **The README and the site point to medh5 Viewer, a native macOS viewer and
+  editor built on the engine.** The install page says what it shows and
+  edits, what it needs (Apple silicon, macOS 14 or later) and where to
+  download it; the front page, the first tutorial and the Rust crate's page
+  link it.
+- **The pages that predate format 1.2 account for it.** The README called the
+  format 1.1, the annotation pages counted thirteen kinds, and several pages
+  said a sample without clinical history is written as 1.0, which open curves
+  make 1.2. The README's interoperability table adds ITK transforms and MEDS
+  and FHIR, and the reference index the cohort manifest.
+
 ## [2.2.3] — 2026-10-24
 
 **A patch release, with no format change.** Threads inside one call, and

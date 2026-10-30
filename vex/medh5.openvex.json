@@ -2,8 +2,8 @@
   "@context": "https://openvex.dev/ns/v0.2.0",
   "@id": "https://github.com/XwK-P/medh5/blob/main/vex/medh5.openvex.json",
   "author": "medh5 (https://github.com/XwK-P/medh5)",
-  "timestamp": "2026-10-24T00:00:00Z",
-  "version": 7,
+  "timestamp": "2026-10-30T00:00:00Z",
+  "version": 8,
   "statements": [
     {
       "vulnerability": {
@@ -305,6 +305,39 @@
             },
             {
               "@id": "pkg:cargo/libz-sys@1.1.29"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:pypi/medh5@2.2.4",
+          "subcomponents": [
+            {
+              "@id": "pkg:generic/zlib@1.3.2"
+            },
+            {
+              "@id": "pkg:cargo/libz-sys@1.1.31"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:cargo/medh5-cli@2.2.4",
+          "subcomponents": [
+            {
+              "@id": "pkg:generic/zlib@1.3.2"
+            },
+            {
+              "@id": "pkg:cargo/libz-sys@1.1.31"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:github/XwK-P/medh5@v2.2.4",
+          "subcomponents": [
+            {
+              "@id": "pkg:generic/zlib@1.3.2"
+            },
+            {
+              "@id": "pkg:cargo/libz-sys@1.1.31"
             }
           ]
         }
