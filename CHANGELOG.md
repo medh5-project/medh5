@@ -6,17 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-## [2.2.4] — 2026-10-29
+## [2.2.4] — 2026-10-30
 
 **A patch release, with no format change.** One fix, in the HDF5 the wheels
 and binaries build: the documented API is unchanged, the format stays 1.2 and
 the diagnostic code table keeps its codes, and every object 2.2.3 wrote, 2.2.4
 writes with the same digest. An amendment, pack, unpack, extract, repack or
 recompression no longer corrupts memory when the process holds open a dataset
-it copies, through a kept `Dataset` or a read on another thread. The
-concurrency page says when a forked child can still hang, the README and the
-site point to medh5 Viewer, and the pages that predate format 1.2 account for
-it.
+it copies, through a kept `Dataset` or a read on another thread. Two crates
+that build C libraries move past advisories that did not reach medh5, and still
+build zlib 1.3.2 and Zstandard 1.5.7. The concurrency page says when a forked
+child can still hang, the README and the site point to medh5 Viewer, and the
+pages that predate format 1.2 account for it.
+
+### Security
+
+- **The wheels and binaries build with `libz-sys` 1.1.31 and `zstd-sys` 2.1.2,
+  past two advisories that did not reach them.** RUSTSEC-2026-0418: through
+  1.1.30, the `libz-sys` build script printed the build's environment, secrets
+  included, into the output Cargo keeps under `target/`, but only from its
+  probe for a system zlib, which a `static` build such as medh5's skips.
+  RUSTSEC-2026-0410: on wasm32, the `zstd-sys` allocator shim wrote to
+  address 0 when an allocation failed, and medh5 builds nothing for wasm32.
+  The libraries they build are unchanged, zlib 1.3.2 and Zstandard 1.5.7, and
+  `medh5-sys` now requires the fixed versions, so a build from crates.io takes
+  them too.
 
 ### Fixed
 

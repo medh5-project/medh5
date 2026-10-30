@@ -128,10 +128,10 @@ is the library's own, which is what advisories and scanners name.
 | Library | Version | Built from | Used for |
 |---|---|---|---|
 | HDF5 | 2.2.0 | `hdf5-metno-src` 0.10.4, patched: `vendor/hdf5-metno-src` | the container |
-| zlib | 1.3.2 | `libz-sys` 1.1.29 | HDF5's deflate filter, C-Blosc2's zlib codec |
+| zlib | 1.3.2 | `libz-sys` 1.1.31 | HDF5's deflate filter, C-Blosc2's zlib codec |
 | C-Blosc2 | 3.3.5 | vendored: `crates/medh5-sys/vendor/c-blosc2` | the Blosc2 codecs |
 | LZ4 | 1.10.0 | `lz4-sys` 1.11.1+lz4-1.10.0 | C-Blosc2's LZ4 codecs |
-| Zstandard | 1.5.7 | `zstd-sys` 2.1.0+zstd.1.5.7 | C-Blosc2's Zstd codec, the Zstandard filter (32015) |
+| Zstandard | 1.5.7 | `zstd-sys` 2.1.2+zstd.1.5.7 | C-Blosc2's Zstd codec, the Zstandard filter (32015) |
 | HDF5-Blosc2 filter | 3.0.1 | vendored: `crates/medh5-sys/vendor/hdf5-blosc2` | the Blosc2 filter (32026) |
 
 The HDF5-Blosc2 filter is the source `hdf5plugin` 7.1.0 ships, with the local
