@@ -163,6 +163,12 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
 
+    /// The seconds after which an alarm takes a child to be waiting forever.
+    /// A loaded machine stretches what a child needs: one that takes 1.5 s
+    /// took 16 s at a load average of 200, past the 10 s it used to have.
+    #[cfg(unix)]
+    const FOREVER: libc::c_uint = 60;
+
     /// `fork`, the child closing every descriptor past stderr before
     /// anything else.  A file another test has open at the fork is the
     /// child's too, and HDF5 locks a file it opens: held open by the child,
@@ -278,7 +284,7 @@ mod tests {
             let pid = unsafe { fork() };
             if pid == 0 {
                 // SAFETY: an alarm ends a child that waits forever.
-                unsafe { libc::alarm(5) };
+                unsafe { libc::alarm(FOREVER) };
                 let sum = std::sync::atomic::AtomicUsize::new(0);
                 let ran = crate::parallel::ordered(
                     2,
@@ -296,6 +302,10 @@ mod tests {
                 0 => {}
                 status if libc::WIFSIGNALED(status) => failed.push(format!("signal {}", libc::WTERMSIG(status))),
                 status => failed.push(format!("exit {}", libc::WEXITSTATUS(status))),
+            }
+            // A hang takes [`FOREVER`] to show: one says what all would.
+            if !failed.is_empty() {
+                break;
             }
         }
         stop.store(true, Ordering::SeqCst);
@@ -441,7 +451,7 @@ mod tests {
                 let pid = unsafe { fork() };
                 if pid == 0 {
                     // SAFETY: an alarm ends a child that waits forever.
-                    unsafe { libc::alarm(10) };
+                    unsafe { libc::alarm(FOREVER) };
                     let failed =
                         [2, 1].into_iter().find_map(|threads| match write(&path, threads).and_then(|()| read(&path)) {
                             Ok(read) if read == values => None,
@@ -461,6 +471,10 @@ mod tests {
                     0 => {}
                     status if libc::WIFSIGNALED(status) => failed.push(format!("signal {}", libc::WTERMSIG(status))),
                     status => failed.push(format!("exit {}", libc::WEXITSTATUS(status))),
+                }
+                // A hang takes [`FOREVER`] to show: one says what all would.
+                if !failed.is_empty() {
+                    break;
                 }
             }
             stop.store(true, Ordering::SeqCst);
@@ -494,7 +508,7 @@ mod tests {
         let pid = unsafe { fork() };
         if pid == 0 {
             // SAFETY: an alarm ends a child that waits forever.
-            unsafe { libc::alarm(10) };
+            unsafe { libc::alarm(FOREVER) };
             let (sum, before) = (std::sync::atomic::AtomicUsize::new(0), STARTED.load(Ordering::SeqCst));
             let ran = crate::parallel::ordered(4, 0..8usize, slow, |i| {
                 sum.fetch_add(i, Ordering::SeqCst);
@@ -554,7 +568,7 @@ mod tests {
         let pid = unsafe { fork() };
         if pid == 0 {
             // SAFETY: an alarm ends a child that waits forever.
-            unsafe { libc::alarm(5) };
+            unsafe { libc::alarm(FOREVER) };
             drop(held);
             let called = hdf5_called();
             // SAFETY: the child ends without running the parent's exit handlers.
@@ -599,7 +613,7 @@ mod tests {
             let pid = unsafe { fork() };
             if pid == 0 {
                 // SAFETY: an alarm ends a child that waits forever.
-                unsafe { libc::alarm(5) };
+                unsafe { libc::alarm(FOREVER) };
                 let turns = || (0..200).all(|_| hdf5_called());
                 let other = std::thread::spawn(turns);
                 let ok = turns() && other.join().unwrap_or(false);
@@ -610,6 +624,10 @@ mod tests {
                 0 => {}
                 status if libc::WIFSIGNALED(status) => failed.push(format!("signal {}", libc::WTERMSIG(status))),
                 status => failed.push(format!("exit {}", libc::WEXITSTATUS(status))),
+            }
+            // A hang takes [`FOREVER`] to show: one says what all would.
+            if !failed.is_empty() {
+                break;
             }
         }
         stop.store(true, Ordering::SeqCst);
@@ -655,7 +673,7 @@ mod tests {
         let pid = unsafe { fork() };
         if pid == 0 {
             // SAFETY: an alarm ends a child that waits forever.
-            unsafe { libc::alarm(5) };
+            unsafe { libc::alarm(FOREVER) };
             let called = hdf5_called();
             // SAFETY: the child ends without running the parent's exit handlers.
             unsafe { libc::_exit(i32::from(!called)) };

@@ -1138,9 +1138,9 @@ class TestShared:
 
     @staticmethod
     def _ends_in_a_forked_child(call: Callable[[], object]) -> bool:
-        """Whether *call* ends in a child forked now, within ten seconds.  A
-        child that does not says why on stderr: its traceback, a hang, or
-        how it exited."""
+        """Whether *call* ends in a child forked now, within a minute, as a
+        loaded machine can make one many times slower.  A child that does not
+        says why on stderr: its traceback, a hang, or how it exited."""
         read, write = os.pipe()
         with warnings.catch_warnings():
             # Forking a process with threads is what is under test.
@@ -1159,7 +1159,7 @@ class TestShared:
                 os._exit(0)
         os.close(write)
         report = b""
-        while select.select([read], [], [], 10)[0]:
+        while select.select([read], [], [], 60)[0]:
             part = os.read(read, 1 << 16)
             if not part:
                 break
