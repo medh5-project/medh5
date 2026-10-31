@@ -47,6 +47,11 @@ parking_lot_core.workspace = true
 [build-dependencies]
 cc = "1.2"
 
+# What `tests/lock.rs` needs to build HDF5's lock on its own.
+[dev-dependencies]
+libc.workspace = true
+lock_api = "0.4"
+
 # `cargo fuzz` builds every crate with `--cfg fuzzing`, which compiles the
 # decoders the fuzz targets drive (`fuzz/`).
 [lints.rust]

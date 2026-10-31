@@ -29,6 +29,13 @@ updated, until `hdf5-metno-sys` has a lock of its own like it.
    an order: threads asleep on one address on macOS wake out of order, and with
    one address for all of them a thread could wait for seconds under load.
 
+   The word says who has been called and who has the lock, in the one write
+   that makes the call, and a place to sleep only wakes a thread to look. A
+   thread can be off the processor for thousands of calls, so nothing it reads
+   may depend on how many went by: its 47-bit number stays its own for years of
+   calls. `crates/medh5-sys/tests/lock.rs` runs the tests in `src/lock.rs`, as
+   `cargo test --workspace` does not reach this crate.
+
    A thread sleeps on a futex on Linux and Android, on `__ulock_wait` on Apple
    platforms, which is private API that libc++'s `std::atomic::wait` uses too,
    and in short naps on other Unix. Windows has no `fork` and keeps
