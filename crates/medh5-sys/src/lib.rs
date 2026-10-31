@@ -27,6 +27,39 @@ use std::os::raw::{c_char, c_int, c_void};
 
 pub use hdf5_metno_sys as hdf5_sys;
 
+/// Whether HDF5's lock keeps its waiters to itself, as the `hdf5-metno-sys`
+/// this repository builds does.  The published crate's lock is parking_lot's,
+/// which a forked child can find in a state it cannot get out of (#106).
+#[doc(hidden)]
+pub const HDF5_LOCK_IN_OWN_WORD: bool = cfg!(hdf5_lock_in_own_word);
+
+/// Forget the parent's threads that were waiting for HDF5's lock, in a child
+/// of `fork`: let go with them on its books, the lock could be handed to one
+/// of them, which the child does not have, and the child's first HDF5 call
+/// would wait for it forever.
+///
+/// # Safety
+///
+/// The caller is the one thread of a process just forked, and holds the lock.
+#[doc(hidden)]
+pub unsafe fn forget_lock_waiters() {
+    #[cfg(hdf5_lock_in_own_word)]
+    // SAFETY: the raw lock is forgotten about by the thread holding it, and
+    // the caller's process has no other.
+    unsafe {
+        hdf5_sys::LOCK.raw().forget_waiters()
+    };
+    #[cfg(not(hdf5_lock_in_own_word))]
+    {
+        // SAFETY: only the raw lock's address is used, the key parking_lot
+        // queues its waiters under.
+        let key = unsafe { hdf5_sys::LOCK.raw() } as *const _ as usize;
+        // SAFETY: wakes the threads queued under that key, none of which this
+        // process has; the lock they waited for is held, by this thread.
+        unsafe { parking_lot_core::unpark_all(key, parking_lot_core::DEFAULT_UNPARK_TOKEN) };
+    }
+}
+
 mod zstd_filter;
 pub use zstd_filter::ZSTD_FILTER_ID;
 
@@ -544,6 +577,115 @@ mod tests {
             blosc2_init();
             assert_eq!(blosc2_compname_to_compcode(name.as_ptr()), 250);
         }
+    }
+
+    /// The tests that measure HDF5's lock hold it, one at a time.
+    static LOCK_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Whichever lock a build has: one thread holds it at a time, and takes
+    /// it again without waiting for itself.  The count is read and written
+    /// apart, so that two threads inside would lose an update.
+    #[test]
+    fn hdf5s_lock_admits_one_thread_and_lets_it_take_the_lock_again() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNT: AtomicUsize = AtomicUsize::new(0);
+        let _serial = LOCK_TEST.lock().unwrap();
+        COUNT.store(0, Ordering::Relaxed);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..50_000 {
+                        let _held = hdf5_sys::LOCK.lock();
+                        let _again = hdf5_sys::LOCK.lock();
+                        assert!(hdf5_sys::LOCK.try_lock().is_some());
+                        COUNT.store(COUNT.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+        assert_eq!(COUNT.load(Ordering::Relaxed), 200_000);
+        assert!(!hdf5_sys::LOCK.is_locked());
+    }
+
+    /// With a thread asleep for the lock, and no hand-over for a while, letting
+    /// go hands it over: a running thread does not get to take it.
+    #[cfg(hdf5_lock_in_own_word)]
+    #[test]
+    fn a_running_thread_does_not_overtake_one_that_has_waited_for_hdf5s_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let _serial = LOCK_TEST.lock().unwrap();
+        let (started, turn, let_go) = (mpsc::channel(), mpsc::channel(), mpsc::channel::<()>());
+        let held = hdf5_sys::LOCK.lock();
+        let waiter = std::thread::spawn(move || {
+            started.0.send(()).unwrap();
+            let held = hdf5_sys::LOCK.lock();
+            turn.0.send(()).unwrap();
+            let_go.1.recv().unwrap();
+            drop(held);
+        });
+        started.1.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        drop(held);
+        assert!(hdf5_sys::LOCK.try_lock().is_none(), "a running thread overtook one that had waited");
+        turn.1.recv().unwrap();
+        let_go.0.send(()).unwrap();
+        waiter.join().unwrap();
+    }
+
+    /// Threads asleep for the lock get it in the order they came, which is not
+    /// the order macOS wakes threads asleep on one address in.
+    #[cfg(hdf5_lock_in_own_word)]
+    #[test]
+    fn threads_asleep_for_hdf5s_lock_get_it_in_the_order_they_came() {
+        use std::time::Duration;
+        let _serial = LOCK_TEST.lock().unwrap();
+        let order = std::sync::Mutex::new(Vec::new());
+        let held = hdf5_sys::LOCK.lock();
+        std::thread::scope(|scope| {
+            for thread in 0..6 {
+                let order = &order;
+                scope.spawn(move || {
+                    let _held = hdf5_sys::LOCK.lock();
+                    order.lock().unwrap().push(thread);
+                });
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            drop(held);
+        });
+        assert_eq!(*order.lock().unwrap(), [0, 1, 2, 3, 4, 5]);
+    }
+
+    /// Whichever lock a build has: a thread that waits for it gets turns from
+    /// one that holds it nearly all the time and takes it again the moment it
+    /// lets go.
+    #[test]
+    fn a_thread_waiting_for_hdf5s_lock_gets_turns_from_one_that_keeps_it_busy() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+        let _serial = LOCK_TEST.lock().unwrap();
+        let (stop, turns) = (AtomicBool::new(false), AtomicUsize::new(0));
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    let _held = hdf5_sys::LOCK.lock();
+                    let start = Instant::now();
+                    while start.elapsed() < Duration::from_micros(20) {
+                        std::hint::spin_loop();
+                    }
+                }
+            });
+            scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    drop(hdf5_sys::LOCK.lock());
+                    turns.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+            std::thread::sleep(Duration::from_millis(500));
+            stop.store(true, Ordering::Relaxed);
+        });
+        let turns = turns.load(Ordering::Relaxed);
+        assert!(turns >= 20, "a waiting thread got {turns} turns in half a second");
     }
 
     /// A child forked by a thread that had parked runs Blosc2's jobs on

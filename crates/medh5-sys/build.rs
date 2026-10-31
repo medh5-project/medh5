@@ -61,6 +61,14 @@ fn main() {
         eprintln!("{message}");
         std::process::exit(1);
     }
+    // `forget_lock_waiters`: the lock this repository's `hdf5-metno-sys` has
+    // says so; the published crate's, parking_lot's, does not.
+    println!("cargo:rerun-if-env-changed=DEP_HDF5_LOCK_IN_OWN_WORD");
+    println!("cargo:rustc-check-cfg=cfg(hdf5_lock_in_own_word)");
+    if env::var_os("DEP_HDF5_LOCK_IN_OWN_WORD").is_some() {
+        println!("cargo:rustc-cfg=hdf5_lock_in_own_word");
+    }
+
     let x86 = arch == "x86_64" || arch == "x86";
     let neon = arch == "aarch64" && !msvc;
 

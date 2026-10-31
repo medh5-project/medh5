@@ -146,6 +146,12 @@ the published `hdf5-metno-src`, and opening a crafted file can hang it, or
 make it allocate gigabytes, until the changes are released upstream. Install the wheel or a release binary to
 read files you did not write.
 
+HDF5's Rust bindings are built the same way, from `hdf5-metno-sys` 0.12.5 with
+the change `vendor/hdf5-metno-sys/PATCHES.md` lists. It gives HDF5's lock a
+form a forked child can let go, and is about hangs, not about what a file can
+do: a build from crates.io keeps the published lock, whose limit
+`docs/explanation/concurrency.md` gives.
+
 When a library changes (a `-sys` crate is bumped, or a vendored source
 updated), update its row, then read every advisory against the new version.
 

@@ -448,14 +448,13 @@ dependencies = [
 
 [[package]]
 name = "hdf5-metno-sys"
-version = "0.12.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "567a57ee34c38263f551f2cf02b95675def6b91d0e321c5e70f8c6d5ef9cee87"
+version = "0.12.5"
 dependencies = [
  "hdf5-metno-src",
  "libc",
  "libloading",
  "libz-sys",
+ "lock_api",
  "parking_lot",
  "pkg-config",
  "regex",
@@ -708,8 +707,11 @@ version = "2.2.4"
 dependencies = [
  "cc",
  "hdf5-metno-sys",
+ "libc",
  "libz-sys",
+ "lock_api",
  "lz4-sys",
+ "parking_lot_core",
  "zstd-sys",
 ]
 

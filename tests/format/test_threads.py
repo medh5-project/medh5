@@ -14,6 +14,7 @@ import os
 import re
 import select
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -1137,9 +1138,9 @@ class TestShared:
 
     @staticmethod
     def _ends_in_a_forked_child(call: Callable[[], object]) -> bool:
-        """Whether *call* ends in a child forked now, within ten seconds.  A
-        child that does not says why on stderr: its traceback, a hang, or
-        how it exited."""
+        """Whether *call* ends in a child forked now, within a minute, as a
+        loaded machine can make one many times slower.  A child that does not
+        says why on stderr: its traceback, a hang, or how it exited."""
         read, write = os.pipe()
         with warnings.catch_warnings():
             # Forking a process with threads is what is under test.
@@ -1158,7 +1159,7 @@ class TestShared:
                 os._exit(0)
         os.close(write)
         report = b""
-        while select.select([read], [], [], 10)[0]:
+        while select.select([read], [], [], 60)[0]:
             part = os.read(read, 1 << 16)
             if not part:
                 break
@@ -1272,19 +1273,10 @@ class TestShared:
             image = s.images["CT_tp0"]
             assert self._runs_in_children_forked_during(image.read, read)
 
-    @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX: fork")
-    def test_a_child_forked_after_a_threaded_recompression_recompresses(
-        self, tmp_path: Path
-    ):
-        """A child forked after a recompression at four threads recompresses
-        and reads at two and one: the parent's workers and runs are not the
-        child's.
-
-        A fork *during* one is held in Rust (`h5::fork`), by a thread that
-        compresses on workers and never takes HDF5's lock.  Here the thread
-        would take it, and a fork while it waits for the lock leaves the child
-        parking_lot's queue in a state it cannot unwind: about one child in
-        500 hangs (#106)."""
+    @staticmethod
+    def _recompresses_at_two_and_one(tmp_path: Path) -> Callable[[], None]:
+        """A call for a child to make: it recompresses a sample written now
+        into *tmp_path*, and reads what it wrote, at two threads and at one."""
         from medh5.storage import recompress
 
         shape = (40, 72, 72)
@@ -1301,6 +1293,44 @@ class TestShared:
                 with medh5.open(out) as s:
                     np.testing.assert_array_equal(s.images["CT"].read(), values)
 
+        return child
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX: fork")
+    def test_a_child_forked_during_a_threaded_recompression_recompresses(
+        self, tmp_path: Path
+    ):
+        """A child forked while another thread recompresses at four threads
+        recompresses and reads at two and one.  The recompression's sink waits
+        for HDF5's lock over and over, so that a fork often meets a thread
+        waiting for it: the child must not wait for that thread (#106)."""
+        from medh5.storage import recompress
+
+        child = self._recompresses_at_two_and_one(tmp_path)
+        outs = itertools.count()
+
+        def work() -> None:
+            out = tmp_path / f"parent-{next(outs)}.medh5"
+            # A child shares a file open at the fork, so the check of the output
+            # can find it locked, and say so: that is not what is under test.
+            recompress(tmp_path / "s.medh5", "training", out=out)
+
+        threads = medh5.get_threads()
+        try:
+            medh5.set_threads(4)
+            assert self._runs_in_children_forked_during(work, child)
+        finally:
+            medh5.set_threads(threads)
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX: fork")
+    def test_a_child_forked_after_a_threaded_recompression_recompresses(
+        self, tmp_path: Path
+    ):
+        """A child forked after a recompression at four threads recompresses
+        and reads at two and one: the parent's workers and runs are not the
+        child's."""
+        from medh5.storage import recompress
+
+        child = self._recompresses_at_two_and_one(tmp_path)
         threads = medh5.get_threads()
         try:
             medh5.set_threads(4)
@@ -1382,6 +1412,28 @@ class TestShared:
         assert hammered([name] * threads, rounds=rounds) == 0
         assert len(set(names)) == len(names) == threads * rounds
         assert used == set(names)
+
+    def test_a_set_changed_as_it_is_read_still_gives_a_name(self):
+        """pyo3's first size hint in a process lets go of the GIL, so another
+        thread can change a set being walked, and the walk then panics.  Here
+        the hint itself changes the set, in place of that thread, so a walk
+        fails every time rather than when the threads happen to meet."""
+        script = (
+            "import operator\n"
+            "used = {'taken'}\n"
+            "def length_hint(iterator, default=0):\n"
+            "    used.add('changed')\n"
+            "    return default\n"
+            "operator.length_hint = length_hint\n"
+            "from medh5.io.grouping import Occasion, SubjectGroup, output_name\n"
+            "group = SubjectGroup('p1', [Occasion('s1', 'p1', '20260101')])\n"
+            "print(output_name(group, used))\n"
+        )
+        done = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
+        )
+        assert done.returncode == 0, done.stderr
+        assert done.stdout.strip() == "p1"
 
     @pytest.mark.parametrize("threads", [8])
     def test_one_sample_read_from_eight_threads(

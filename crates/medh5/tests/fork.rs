@@ -30,8 +30,9 @@ fn a_child_forked_while_threads_use_hdf5_takes_hdf5s_lock() {
         // SAFETY: the child takes HDF5's lock and exits.
         let pid = unsafe { libc::fork() };
         if pid == 0 {
-            // SAFETY: an alarm ends a child that waits for the lock forever.
-            unsafe { libc::alarm(5) };
+            // SAFETY: an alarm ends a child that waits for the lock forever,
+            // late enough not to take one a loaded machine slows down for it.
+            unsafe { libc::alarm(60) };
             medh5::hdf5::sync::sync(|| ());
             unsafe { libc::_exit(0) };
         }
@@ -39,6 +40,10 @@ fn a_child_forked_while_threads_use_hdf5_takes_hdf5s_lock() {
         // SAFETY: waits for the child just forked.
         assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
         hung += usize::from(status != 0);
+        // A hang takes that alarm to show: one says what all would.
+        if hung > 0 {
+            break;
+        }
     }
     stop.store(true, Ordering::SeqCst);
     busy.into_iter().for_each(|t| t.join().unwrap());

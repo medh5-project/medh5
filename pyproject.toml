@@ -158,9 +158,10 @@ features = ["extension-module"]
 include = [
   # NDEBUG for HDF5 on MSVC targets: see the file.
   { path = ".cargo/config.toml", format = "sdist" },
-  # HDF5 as the wheels build it: the patched crate the workspace's
+  # HDF5 as the wheels build it: the patched crates the workspace's
   # `[patch.crates-io]` names, which maturin does not carry on its own.
   { path = "vendor/hdf5-metno-src/**/*", format = "sdist" },
+  { path = "vendor/hdf5-metno-sys/**/*", format = "sdist" },
   { path = "LICENSE", format = "sdist" },
   { path = "CHANGELOG.md", format = "sdist" },
   { path = "changes/*.md", format = "sdist" },

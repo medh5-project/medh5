@@ -238,9 +238,12 @@ fn io_output_name(
     let n = keys.len();
     let group = group_of(subject_id, keys, vec![None; n]);
     loop {
-        let items: Vec<Bound<'_, PyAny>> = with_critical_section(used.as_any(), || used.iter().collect());
+        // `set.copy` is one step. Walking `used` is not: under the stable ABI
+        // the first size hint in a process, which `collect` asks for, lets go
+        // of the GIL, and a walk of a set another thread then changes panics.
+        let copy = used.call_method0("copy")?.cast_into::<PySet>()?;
         let mut taken: BTreeSet<String> = BTreeSet::new();
-        for item in items {
+        for item in copy.iter() {
             taken.insert(item.str()?.to_string());
         }
         let name = output_name_from(&group, taken, safe)?;

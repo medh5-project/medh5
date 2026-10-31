@@ -34,7 +34,6 @@ jsonschema.workspace = true
 flate2.workspace = true
 unicode-normalization.workspace = true
 parking_lot.workspace = true
-parking_lot_core.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -44,6 +43,7 @@ windows-sys.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+parking_lot_core.workspace = true
 
 [lints.rust]
 # `--cfg medh5_phase_timings` in RUSTFLAGS builds the phase timings
