@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.5] — 2026-10-31
+
+**A patch release, with no format change.** Two fixes: the documented API is
+unchanged, the format stays 1.2 and the diagnostic code table keeps its codes,
+and every object 2.2.4 wrote, 2.2.5 writes with the same digest. A child forked
+while another thread starts to wait for HDF5 no longer hangs in the wheels, the
+sdist and the release binaries, which now build HDF5's lock with a queue the
+child can reset. Threads naming outputs from one shared set no longer panic.
+
+### Fixed
+
+- **Threads naming outputs from one shared set no longer panic.** The first
+  read of the set in a process could let go of the GIL partway through, and a
+  name another thread added then ended the call with a `PanicException`
+  (`Set changed size during iteration`). `output_name` now copies the set in
+  one step.
+- **A forked child no longer hangs because another thread was starting to wait
+  for HDF5.** A thread that met HDF5's lock at the moment of a `fork` could
+  leave the child stuck in its fork handler, before any of its own code ran,
+  about once in 500 forks made while another thread recompressed (#106). The
+  lock kept its waiters in a table shared across the process, which a `fork`
+  can copy half-changed. It now keeps its queue in one word of its own, which
+  the child resets (`vendor/hdf5-metno-sys/PATCHES.md`). The wheels, the sdist
+  and the release binaries have this lock; a build from crates.io keeps the
+  published one, and the concurrency page says what that means.
+
 ## [2.2.4] — 2026-10-30
 
 **A patch release, with no format change.** One fix, in the HDF5 the wheels
