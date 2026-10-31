@@ -25,6 +25,7 @@ on:
       - crates/medh5/src/convert/**
       - crates/medh5/src/annotations/**
       - vendor/hdf5-metno-src/**
+      - vendor/hdf5-metno-sys/**
       - .github/workflows/fuzz.yml
 
 permissions:

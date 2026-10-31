@@ -583,6 +583,33 @@ class TestRepositoryGates:
         assert f"(HDF5-Blosc2 {rows['HDF5-Blosc2 filter'][0]})" in patches
         assert set(rows) == {*crates, "C-Blosc2", "HDF5-Blosc2 filter"}
 
+    def test_the_workspace_builds_its_copy_of_hdf5s_bindings(self):
+        """HDF5's lock lives in its bindings, `hdf5-metno-sys`, and a copy of
+        them gives it one a forked child can let go (#106).  They are no
+        library of the inventory, so nothing above holds them: unpatched, the
+        hang comes back, one fork in 500, with no test to say so.  `[patch]`
+        yields to a newer version on crates.io, so the weekly refresh holds
+        the copy back too."""
+        crate, path = "hdf5-metno-sys", "vendor/hdf5-metno-sys"
+        lock = (ROOT / "Cargo.lock").read_text(encoding="utf-8")
+        locked = dict(re.findall(r'^name = "([^"]+)"\nversion = "([^"]+)"', lock, re.M))
+        entry = lock.split(f'\nname = "{crate}"\n', 1)[1].split("\n\n", 1)[0]
+        assert "source = " not in entry, f"{crate} is locked from a registry"
+        manifest = (ROOT / path / "Cargo.toml").read_text(encoding="utf-8")
+        assert f'\nversion = "{locked[crate]}"\n' in manifest
+        workspace = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+        assert f'\n{crate} = {{ path = "{path}" }}\n' in workspace
+        changes = (ROOT / path / "PATCHES.md").read_text(encoding="utf-8")
+        assert f"`{crate}` {locked[crate]} as crates.io publishes it" in changes
+        # `medh5-sys` lets a child forget the lock's waiters according to what
+        # the copy reports, and takes the published lock without the report.
+        script = (ROOT / path / "build.rs").read_text(encoding="utf-8")
+        assert "cargo::metadata=lock_in_own_word=1" in script
+        script = (ROOT / "crates/medh5-sys/build.rs").read_text(encoding="utf-8")
+        assert "DEP_HDF5_LOCK_IN_OWN_WORD" in script
+        refresh = _release_script("lock_refresh.py")
+        assert crate in refresh.PATCHED
+
     def test_a_release_that_bundles_an_affected_zlib_says_why_it_is_not(self):
         """CVE-2026-85091 names zlib 1.3.1.2 through 1.3.2, and a scanner that
         keys on the version flags every wheel, though the code is not linked
@@ -984,10 +1011,13 @@ class TestRepositoryGates:
         # And fuzzes the HDF5 that ships, patched as the root workspace
         # patches it: a target that built crates.io's would hang where no
         # wheel does, and need an exclusion again.
-        patch = 'hdf5-metno-src = { path = "../vendor/hdf5-metno-src" }'
-        assert f"\n[patch.crates-io]\n{patch}\n" in fuzz
+        patches = (
+            'hdf5-metno-src = { path = "../vendor/hdf5-metno-src" }',
+            'hdf5-metno-sys = { path = "../vendor/hdf5-metno-sys" }',
+        )
+        assert f"\n[patch.crates-io]\n{chr(10).join(patches)}\n" in fuzz
         root = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
-        assert patch.replace("../", "") in root
+        assert all(patch.replace("../", "") in root for patch in patches)
 
     def test_a_change_to_a_fuzzed_reader_is_smoke_run(self):
         """In 2.2.0 a red fuzz run went unseen for days, and only a change
@@ -1005,6 +1035,7 @@ class TestRepositoryGates:
             "crates/medh5/src/convert/**",
             "crates/medh5/src/annotations/**",
             "vendor/hdf5-metno-src/**",
+            "vendor/hdf5-metno-sys/**",
             ".github/workflows/fuzz.yml",
         ):
             assert reader in paths, reader

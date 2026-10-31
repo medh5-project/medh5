@@ -121,16 +121,18 @@ thread that forked, so a lock another thread held at that moment would stay held
 its first read would wait for it forever. medh5 has `fork` itself take HDF5's lock as it begins
 (`pthread_atfork`) and let it go on both sides as it returns, and the locks medh5 keeps in Python
 (the handle caches, the vocabulary registry, documents' live views) are made anew in the child.
+Threads waiting for HDF5's lock at that moment are not the child's either, and the child forgets
+them.
 
-One case is left ([#106](https://github.com/medh5-project/medh5/issues/106)). If another thread
-starts waiting for HDF5's lock at the very moment of the fork, the child can hang before any of its
-own code runs. The lock queues its waiters in a table shared across the process, and that thread
-can be partway into the table when the fork copies it. Measured with one thread recompressing at
-four threads while another forked over and over, the hang came about once in 500 forks. A
-`DataLoader` forks its workers when its iterator is made, so it meets this only if another thread
-of yours is calling medh5 at that moment. To rule it out, fork while no other thread is calling
-medh5, or start child processes with `spawn` or `forkserver` instead
-(`multiprocessing_context="spawn"` for a `DataLoader`).
+That last step depends on how medh5 was built. The wheels, the sdist and the release binaries have a
+lock that keeps its queue of waiters in one word of its own, which the child resets with one write.
+A build from crates.io (`cargo install medh5-cli`, or a crate that depends on `medh5`) has the lock
+the published `hdf5-metno-sys` crate provides, which queues its waiters in a table shared across the
+process. There, if another thread starts waiting for HDF5's lock at the very moment of the fork, it
+can be partway into the table when the fork copies it, and the child hangs before any of its own
+code runs ([#106](https://github.com/medh5-project/medh5/issues/106)). Measured with one thread
+recompressing at four threads while another forked over and over, that came about once in 500 forks.
+To rule it out in such a build, fork while no other thread is calling medh5.
 
 `exec` is the other half. HDF5 opens files without close-on-exec, so a program started while a
 sample was open used to inherit the descriptor, and with it HDF5's file lock. medh5 now marks each

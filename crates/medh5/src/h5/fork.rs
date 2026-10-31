@@ -140,12 +140,9 @@ fn release() {
 /// Let go of what [`prepare`] took, in the child, whose one thread is the one
 /// that took it.
 ///
-/// HDF5's lock is parking_lot's, whose queue of the threads waiting for it
-/// the child inherits: the parent's threads that met the lock held for the
-/// fork.  Let go with them queued, it could be handed to one --- parking_lot
-/// hands a lock over, now and then, to be fair --- which the child does not
-/// have, and the child's first HDF5 call would wait for it forever.  So they
-/// are taken off the queue first.  The parallel sections queue no thread
+/// The child inherits a record of the threads waiting for HDF5's lock: the
+/// parent's threads that met it held for the fork.  So that nothing waits for
+/// them, it forgets them first.  The parallel sections queue no thread
 /// (`crate::parallel::Sections`), so letting them go touches no queue.
 ///
 /// The command line's runs end here: the child is in none of the parent's
@@ -153,12 +150,8 @@ fn release() {
 /// one that forked, which on macOS starts no worker in the child
 /// (`crate::parallel::forked_here`).
 fn release_in_child() {
-    // SAFETY: only the raw lock's address is used, the key parking_lot
-    // queues its waiters under.
-    let hdf5 = unsafe { crate::h5sys::LOCK.raw() } as *const _ as usize;
-    // SAFETY: wakes the threads queued under that key, none of which this
-    // process has; the lock they waited for is held, by this thread.
-    unsafe { parking_lot_core::unpark_all(hdf5, parking_lot_core::DEFAULT_UNPARK_TOKEN) };
+    // SAFETY: this is the child's one thread, and `prepare` took the lock.
+    unsafe { medh5_sys::forget_lock_waiters() };
     release();
     crate::parallel::end_runs_in_child();
     crate::parallel::forked_here();
@@ -392,9 +385,8 @@ mod tests {
     /// until they have joined, and leaves a child that opens, writes and
     /// reads files, with threads and without.
     ///
-    /// The other thread compresses and stores nothing: a thread that meets
-    /// HDF5's lock held for the fork can leave parking_lot's table held in
-    /// the child (#106), which is not what this test is about.
+    /// The other thread compresses and stores nothing: a thread waiting for
+    /// HDF5's lock at the fork is what the tests that call HDF5 below are for.
     #[cfg(unix)]
     #[test]
     fn a_child_forked_during_threaded_compression_opens_writes_and_reads() {
@@ -529,6 +521,150 @@ mod tests {
         let status = exit_status(pid);
         assert!(!libc::WIFSIGNALED(status), "the child was stopped by signal {}", libc::WTERMSIG(status));
         assert_eq!(libc::WEXITSTATUS(status), 0, "the child's call did not run to the end on the threads it may use");
+    }
+
+    /// Whether a call into HDF5, which takes its lock, returns without error.
+    #[cfg(unix)]
+    fn hdf5_called() -> bool {
+        crate::h5::locked(|| {
+            let (mut major, mut minor, mut release) = (0, 0, 0);
+            // SAFETY: HDF5 is initialised, and the arguments outlive the call.
+            unsafe { crate::h5sys::h5::H5get_libversion(&mut major, &mut minor, &mut release) >= 0 }
+        })
+    }
+
+    /// A child forked while a parent's thread sleeps for HDF5's lock lets go of
+    /// the lock and calls HDF5 (#106): that thread is in the queue the child
+    /// inherits, and letting go must not call it, or hand the lock to it.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_forked_while_a_thread_sleeps_for_hdf5s_lock_calls_hdf5() {
+        let _serial = crate::parallel::tests::serial();
+        install();
+        crate::h5::init();
+        let held = crate::h5sys::LOCK.lock();
+        let (started_tx, started_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            drop(crate::h5sys::LOCK.lock());
+        });
+        started_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // SAFETY: the child lets go of the lock, makes one HDF5 call and exits.
+        let pid = unsafe { fork() };
+        if pid == 0 {
+            // SAFETY: an alarm ends a child that waits forever.
+            unsafe { libc::alarm(5) };
+            drop(held);
+            let called = hdf5_called();
+            // SAFETY: the child ends without running the parent's exit handlers.
+            unsafe { libc::_exit(i32::from(!called)) };
+        }
+        let status = exit_status(pid);
+        drop(held);
+        waiter.join().unwrap();
+        assert!(!libc::WIFSIGNALED(status), "the child was stopped by signal {}", libc::WTERMSIG(status));
+        assert_eq!(libc::WEXITSTATUS(status), 0);
+    }
+
+    /// A child forked while threads take turns with HDF5's lock, most of them
+    /// asleep waiting for it, calls HDF5 from two threads of its own, in every
+    /// one of a hundred forks (#106).  The child inherits the queue those
+    /// threads are in, with a place in it for each: it must not wait for them.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_forked_while_threads_wait_for_hdf5_calls_it_from_two_threads() {
+        // The published crate's lock can hang the child, about once in 500.
+        if !medh5_sys::HDF5_LOCK_IN_OWN_WORD {
+            return;
+        }
+        let _serial = crate::parallel::tests::serial();
+        install();
+        crate::h5::init();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let busy: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::SeqCst) {
+                        assert!(hdf5_called());
+                    }
+                })
+            })
+            .collect();
+        let mut failed = Vec::new();
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            // SAFETY: the child calls HDF5 from two threads and exits.
+            let pid = unsafe { fork() };
+            if pid == 0 {
+                // SAFETY: an alarm ends a child that waits forever.
+                unsafe { libc::alarm(5) };
+                let turns = || (0..200).all(|_| hdf5_called());
+                let other = std::thread::spawn(turns);
+                let ok = turns() && other.join().unwrap_or(false);
+                // SAFETY: the child ends without running the parent's exit handlers.
+                unsafe { libc::_exit(i32::from(!ok)) };
+            }
+            match exit_status(pid) {
+                0 => {}
+                status if libc::WIFSIGNALED(status) => failed.push(format!("signal {}", libc::WTERMSIG(status))),
+                status => failed.push(format!("exit {}", libc::WEXITSTATUS(status))),
+            }
+        }
+        stop.store(true, Ordering::SeqCst);
+        busy.into_iter().for_each(|t| t.join().unwrap());
+        assert_eq!(failed, Vec::<String>::new(), "a child could not call HDF5");
+    }
+
+    /// A child forked while a thread is partway into parking_lot's table,
+    /// holding the bucket of the key HDF5's lock had in it, calls HDF5 (#106):
+    /// in what this repository builds, nothing about the lock is in that
+    /// table.  The thread holds the bucket inside `park`'s validation, which
+    /// runs under it, so that the fork always finds it there: left to chance,
+    /// the few nanoseconds a thread holds it are met about once in 500 forks.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_forked_while_a_thread_parks_for_hdf5_calls_hdf5() {
+        // The published crate's lock is in the table: the child would hang.
+        if !medh5_sys::HDF5_LOCK_IN_OWN_WORD {
+            return;
+        }
+        let _serial = crate::parallel::tests::serial();
+        install();
+        crate::h5::init();
+        // SAFETY: only the raw lock's address is used, as a key.
+        let key = unsafe { crate::h5sys::LOCK.raw() } as *const _ as usize;
+        let (parking, forked) = (mpsc::channel(), mpsc::channel::<()>());
+        let parker = std::thread::spawn(move || unsafe {
+            parking_lot_core::park(
+                key,
+                || {
+                    parking.0.send(()).unwrap();
+                    forked.1.recv().unwrap();
+                    false
+                },
+                || {},
+                |_, _| {},
+                parking_lot_core::DEFAULT_PARK_TOKEN,
+                None,
+            );
+        });
+        parking.1.recv().unwrap();
+        // SAFETY: the child makes one HDF5 call and exits.
+        let pid = unsafe { fork() };
+        if pid == 0 {
+            // SAFETY: an alarm ends a child that waits forever.
+            unsafe { libc::alarm(5) };
+            let called = hdf5_called();
+            // SAFETY: the child ends without running the parent's exit handlers.
+            unsafe { libc::_exit(i32::from(!called)) };
+        }
+        let status = exit_status(pid);
+        forked.0.send(()).unwrap();
+        parker.join().unwrap();
+        assert!(!libc::WIFSIGNALED(status), "the child was stopped by signal {}", libc::WTERMSIG(status));
+        assert_eq!(libc::WEXITSTATUS(status), 0);
     }
 
     /// A fork made while a call holds the parallel sections and waits for

@@ -80,7 +80,7 @@ Rust crates (131)
   hdf5-metno 0.15.0                            MIT OR Apache-2.0                [53]
   hdf5-metno-derive 0.10.2                     MIT OR Apache-2.0                [53]
   hdf5-metno-src 0.10.4                        see the text                     [1]
-  hdf5-metno-sys 0.12.4                        MIT OR Apache-2.0                [53]
+  hdf5-metno-sys 0.12.5                        MIT OR Apache-2.0                [53]
   hdf5-metno-types 0.11.1                      MIT OR Apache-2.0                [53]
   heck 0.5.0                                   MIT OR Apache-2.0                [15, 54]
   hex 0.4.3                                    MIT OR Apache-2.0                [21, 55]
@@ -3484,7 +3484,7 @@ DEALINGS IN THE SOFTWARE.
 -------------------------------------------------------------------------------
 [53] hdf5-metno 0.15.0: no licence file; the manifest declares MIT;
     hdf5-metno-derive 0.10.2: no licence file; the manifest declares MIT;
-    hdf5-metno-sys 0.12.4: no licence file; the manifest declares MIT;
+    hdf5-metno-sys 0.12.5: no licence file; the manifest declares MIT;
     hdf5-metno-types 0.11.1: no licence file; the manifest declares MIT;
     jsonschema-regex 0.58.6: no licence file; the manifest declares MIT;
     jsonschema-value 0.58.6: no licence file; the manifest declares MIT;
