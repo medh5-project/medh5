@@ -14,6 +14,7 @@ import os
 import re
 import select
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -1411,6 +1412,28 @@ class TestShared:
         assert hammered([name] * threads, rounds=rounds) == 0
         assert len(set(names)) == len(names) == threads * rounds
         assert used == set(names)
+
+    def test_a_set_changed_as_it_is_read_still_gives_a_name(self):
+        """pyo3's first size hint in a process lets go of the GIL, so another
+        thread can change a set being walked, and the walk then panics.  Here
+        the hint itself changes the set, in place of that thread, so a walk
+        fails every time rather than when the threads happen to meet."""
+        script = (
+            "import operator\n"
+            "used = {'taken'}\n"
+            "def length_hint(iterator, default=0):\n"
+            "    used.add('changed')\n"
+            "    return default\n"
+            "operator.length_hint = length_hint\n"
+            "from medh5.io.grouping import Occasion, SubjectGroup, output_name\n"
+            "group = SubjectGroup('p1', [Occasion('s1', 'p1', '20260101')])\n"
+            "print(output_name(group, used))\n"
+        )
+        done = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
+        )
+        assert done.returncode == 0, done.stderr
+        assert done.stdout.strip() == "p1"
 
     @pytest.mark.parametrize("threads", [8])
     def test_one_sample_read_from_eight_threads(
