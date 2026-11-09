@@ -60,7 +60,7 @@ Rust crates (131)
   clap_lex 1.1.1                               MIT OR Apache-2.0                [22, 34]
   colorchoice 1.0.5                            MIT OR Apache-2.0                [21, 22]
   cpufeatures 0.2.17                           MIT OR Apache-2.0                [28, 35]
-  crc32fast 1.5.3                              MIT OR Apache-2.0                [21, 36]
+  crc32fast 1.5.4                              MIT OR Apache-2.0                [21, 36]
   crypto-common 0.1.7                          MIT OR Apache-2.0                [28, 37]
   data-encoding 2.11.1                         MIT                              [38]
   digest 0.10.7                                MIT OR Apache-2.0                [28, 39]
@@ -69,7 +69,7 @@ Rust crates (131)
   errno 0.3.14                                 MIT OR Apache-2.0                [15, 42]
   fancy-regex 0.19.2                           MIT                              [43]
   fastrand 2.5.0                               Apache-2.0 OR MIT                [14, 15]
-  flate2 1.1.10                                MIT OR Apache-2.0                [15, 44]
+  flate2 1.1.11                                MIT OR Apache-2.0                [15, 44]
   fluent-uri 0.4.1                             MIT                              [45]
   foldhash 0.2.0                               Zlib                             [46]
   fraction 0.17.0                              MIT OR Apache-2.0                [15, 27]
@@ -77,7 +77,7 @@ Rust crates (131)
   getrandom 0.3.4                              MIT OR Apache-2.0                [48, 49]
   half 2.7.1                                   MIT OR Apache-2.0                [50, 51]
   hashbrown 0.17.1                             MIT OR Apache-2.0                [15, 52]
-  hdf5-metno 0.15.0                            MIT OR Apache-2.0                [53]
+  hdf5-metno 0.15.1                            MIT OR Apache-2.0                [53]
   hdf5-metno-derive 0.10.2                     MIT OR Apache-2.0                [53]
   hdf5-metno-src 0.10.4                        see the text                     [1]
   hdf5-metno-sys 0.12.5                        MIT OR Apache-2.0                [53]
@@ -86,7 +86,7 @@ Rust crates (131)
   hex 0.4.3                                    MIT OR Apache-2.0                [21, 55]
   indexmap 2.14.2                              Apache-2.0 OR MIT                [15, 56]
   is_terminal_polyfill 1.70.2                  MIT OR Apache-2.0                [21, 22]
-  itoa 1.0.18                                  MIT OR Apache-2.0                [14, 20]
+  itoa 1.0.19                                  MIT OR Apache-2.0                [14, 20]
   jsonschema 0.58.6                            MIT                              [57]
   jsonschema-regex 0.58.6                      MIT                              [53]
   jsonschema-value 0.58.6                      MIT                              [53]
@@ -131,7 +131,7 @@ Rust crates (131)
   regex-automata 0.4.18                        MIT OR Apache-2.0                [15, 27]
   regex-syntax 0.8.11                          MIT OR Apache-2.0                [15, 27]
   rustc-hash 2.1.3                             Apache-2.0 OR MIT                [14, 20]
-  rustix 1.1.5                                 Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT [14, 15, 61, 77]
+  rustix 1.1.6                                 Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT [14, 15, 61, 77]
   scopeguard 1.2.0                             MIT OR Apache-2.0                [15, 78]
   serde 1.0.229                                MIT OR Apache-2.0                [14, 20]
   serde_core 1.0.229                           MIT OR Apache-2.0                [14, 20]
@@ -139,20 +139,20 @@ Rust crates (131)
   serde_json 1.0.154                           MIT OR Apache-2.0                [14, 20]
   sha2 0.10.9                                  MIT OR Apache-2.0                [28, 79]
   simd-adler32 0.3.10                          MIT                              [80]
-  smallvec 1.16.4                              MIT OR Apache-2.0                [15, 81]
+  smallvec 1.16.5                              MIT OR Apache-2.0                [15, 81]
   strsim 0.11.1                                MIT                              [82]
   strum 0.28.0                                 MIT                              [83]
   strum_macros 0.28.0                          MIT                              [83]
   subtle 2.6.1                                 BSD-3-Clause                     [84]
   syn 2.0.119                                  MIT OR Apache-2.0                [14, 20]
-  syn 3.0.9                                    MIT OR Apache-2.0                [14, 20]
+  syn 3.0.10                                   MIT OR Apache-2.0                [14, 20]
   tempfile 3.27.0                              MIT OR Apache-2.0                [15, 85]
   terminal_size 0.4.4                          MIT OR Apache-2.0                [21, 86]
   thiserror 2.0.21                             MIT OR Apache-2.0                [14, 20]
   thiserror-impl 2.0.21                        MIT OR Apache-2.0                [14, 20]
   tinyvec 1.13.3                               Zlib OR Apache-2.0 OR MIT        [87, 88, 89]
-  toml_datetime 1.1.2+spec-1.1.0               MIT OR Apache-2.0                [22, 34]
-  toml_edit 0.25.17+spec-1.1.0                 MIT OR Apache-2.0                [22, 34]
+  toml_datetime 1.1.3+spec-1.1.0               MIT OR Apache-2.0                [22, 34]
+  toml_edit 0.25.19+spec-1.1.0                 MIT OR Apache-2.0                [22, 34]
   toml_parser 1.1.5+spec-1.1.0                 MIT OR Apache-2.0                [22, 34]
   typenum 1.20.1                               MIT OR Apache-2.0                [90, 91, 92]
   unicode-general-category 1.1.0               Apache-2.0                       [21]
@@ -163,7 +163,7 @@ Rust crates (131)
   vsimd 0.8.0                                  MIT                              [53]
   windows-link 0.2.1                           MIT OR Apache-2.0                [96, 97]
   windows-sys 0.61.2                           MIT OR Apache-2.0                [96, 97]
-  winnow 1.0.4                                 MIT                              [98]
+  winnow 1.0.5                                 MIT                              [98]
   zerocopy 0.8.63                              BSD-2-Clause OR Apache-2.0 OR MIT [99, 100, 101]
   zerocopy-derive 0.8.63                       BSD-2-Clause OR Apache-2.0 OR MIT [99, 100, 101]
   zmij 1.0.23                                  MIT                              [14]
@@ -806,14 +806,14 @@ limitations under the License.
 
 -------------------------------------------------------------------------------
 [14] adler2 2.0.1: LICENSE-MIT; allocator-api2 0.2.21: LICENSE-MIT; fastrand
-    2.5.0: LICENSE-MIT; itoa 1.0.18: LICENSE-MIT; linux-raw-sys 0.12.1:
+    2.5.0: LICENSE-MIT; itoa 1.0.19: LICENSE-MIT; linux-raw-sys 0.12.1:
     LICENSE-MIT; once_cell 1.21.4: LICENSE-MIT; pastey 0.2.3: LICENSE-MIT;
     proc-macro-crate 3.5.0: LICENSE-MIT; proc-macro2 1.0.107: LICENSE-MIT;
     quote 1.0.47: LICENSE-MIT; ref-cast 1.0.27: LICENSE-MIT; ref-cast-impl
-    1.0.27: LICENSE-MIT; rustc-hash 2.1.3: LICENSE-MIT; rustix 1.1.5:
+    1.0.27: LICENSE-MIT; rustc-hash 2.1.3: LICENSE-MIT; rustix 1.1.6:
     LICENSE-MIT; serde 1.0.229: LICENSE-MIT; serde_core 1.0.229: LICENSE-MIT;
     serde_derive 1.0.229: LICENSE-MIT; serde_json 1.0.154: LICENSE-MIT; syn
-    2.0.119: LICENSE-MIT; syn 3.0.9: LICENSE-MIT; thiserror 2.0.21:
+    2.0.119: LICENSE-MIT; syn 3.0.10: LICENSE-MIT; thiserror 2.0.21:
     LICENSE-MIT; thiserror-impl 2.0.21: LICENSE-MIT; unicode-ident 1.0.27:
     LICENSE-MIT; zmij 1.0.23: LICENSE-MIT
 -------------------------------------------------------------------------------
@@ -845,7 +845,7 @@ DEALINGS IN THE SOFTWARE.
 -------------------------------------------------------------------------------
 [15] ahash 0.8.12: LICENSE-APACHE; bitflags 2.13.2: LICENSE-APACHE; cfg-if
     1.0.5: LICENSE-APACHE; equivalent 1.0.3: LICENSE-APACHE; errno 0.3.14:
-    LICENSE-APACHE; fastrand 2.5.0: LICENSE-APACHE; flate2 1.1.10:
+    LICENSE-APACHE; fastrand 2.5.0: LICENSE-APACHE; flate2 1.1.11:
     LICENSE-APACHE; fraction 0.17.0: LICENSE-APACHE; hashbrown 0.17.1:
     LICENSE-APACHE; heck 0.5.0: LICENSE-APACHE; indexmap 2.14.2:
     LICENSE-APACHE; libz-sys 1.1.31: LICENSE-APACHE; linux-raw-sys 0.12.1:
@@ -858,8 +858,8 @@ DEALINGS IN THE SOFTWARE.
     parking_lot_core 0.9.12: LICENSE-APACHE; percent-encoding 2.3.2:
     LICENSE-APACHE; rawpointer 0.2.1: LICENSE-APACHE; regex 1.13.1:
     LICENSE-APACHE; regex-automata 0.4.18: LICENSE-APACHE; regex-syntax 0.8.11:
-    LICENSE-APACHE; rustix 1.1.5: LICENSE-APACHE; scopeguard 1.2.0:
-    LICENSE-APACHE; smallvec 1.16.4: LICENSE-APACHE; tempfile 3.27.0:
+    LICENSE-APACHE; rustix 1.1.6: LICENSE-APACHE; scopeguard 1.2.0:
+    LICENSE-APACHE; smallvec 1.16.5: LICENSE-APACHE; tempfile 3.27.0:
     LICENSE-APACHE; unicode-normalization 0.1.26: LICENSE-APACHE
 -------------------------------------------------------------------------------
 
@@ -1159,13 +1159,13 @@ OTHER DEALINGS IN THE SOFTWARE.
 For more information, please refer to <http://unlicense.org/>
 
 -------------------------------------------------------------------------------
-[20] allocator-api2 0.2.21: LICENSE-APACHE; itoa 1.0.18: LICENSE-APACHE; libc
+[20] allocator-api2 0.2.21: LICENSE-APACHE; itoa 1.0.19: LICENSE-APACHE; libc
     0.2.191: LICENSE-APACHE; pastey 0.2.3: LICENSE-APACHE; proc-macro2 1.0.107:
     LICENSE-APACHE; quote 1.0.47: LICENSE-APACHE; ref-cast 1.0.27:
     LICENSE-APACHE; ref-cast-impl 1.0.27: LICENSE-APACHE; rustc-hash 2.1.3:
     LICENSE-APACHE; serde 1.0.229: LICENSE-APACHE; serde_core 1.0.229:
     LICENSE-APACHE; serde_derive 1.0.229: LICENSE-APACHE; serde_json 1.0.154:
-    LICENSE-APACHE; syn 2.0.119: LICENSE-APACHE; syn 3.0.9: LICENSE-APACHE;
+    LICENSE-APACHE; syn 2.0.119: LICENSE-APACHE; syn 3.0.10: LICENSE-APACHE;
     thiserror 2.0.21: LICENSE-APACHE; thiserror-impl 2.0.21: LICENSE-APACHE;
     unicode-ident 1.0.27: LICENSE-APACHE; utf8parse 0.2.2: LICENSE-APACHE
 -------------------------------------------------------------------------------
@@ -1351,7 +1351,7 @@ END OF TERMS AND CONDITIONS
 [21] anstream 1.0.0: LICENSE-APACHE; anstyle 1.0.14: LICENSE-APACHE;
     anstyle-parse 1.0.0: LICENSE-APACHE; anstyle-query 1.1.5: LICENSE-APACHE;
     anstyle-wincon 3.0.11: LICENSE-APACHE; bytecount 0.6.9: LICENSE.Apache2;
-    colorchoice 1.0.5: LICENSE-APACHE; crc32fast 1.5.3: LICENSE-APACHE; hex
+    colorchoice 1.0.5: LICENSE-APACHE; crc32fast 1.5.4: LICENSE-APACHE; hex
     0.4.3: LICENSE-APACHE; is_terminal_polyfill 1.70.2: LICENSE-APACHE;
     once_cell_polyfill 1.70.2: LICENSE-APACHE; terminal_size 0.4.4:
     LICENSE-APACHE; unicode-general-category 1.1.0: LICENSE
@@ -1565,8 +1565,8 @@ END OF TERMS AND CONDITIONS
     3.0.11: LICENSE-MIT; clap 4.6.7: LICENSE-MIT; clap_builder 4.6.7:
     LICENSE-MIT; clap_lex 1.1.1: LICENSE-MIT; colorchoice 1.0.5: LICENSE-MIT;
     is_terminal_polyfill 1.70.2: LICENSE-MIT; once_cell_polyfill 1.70.2:
-    LICENSE-MIT; toml_datetime 1.1.2+spec-1.1.0: LICENSE-MIT; toml_edit
-    0.25.17+spec-1.1.0: LICENSE-MIT; toml_parser 1.1.5+spec-1.1.0: LICENSE-MIT
+    LICENSE-MIT; toml_datetime 1.1.3+spec-1.1.0: LICENSE-MIT; toml_edit
+    0.25.19+spec-1.1.0: LICENSE-MIT; toml_parser 1.1.5+spec-1.1.0: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) Individual contributors
@@ -2441,8 +2441,8 @@ DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
 [34] clap 4.6.7: LICENSE-APACHE; clap_builder 4.6.7: LICENSE-APACHE; clap_lex
-    1.1.1: LICENSE-APACHE; toml_datetime 1.1.2+spec-1.1.0: LICENSE-APACHE;
-    toml_edit 0.25.17+spec-1.1.0: LICENSE-APACHE; toml_parser 1.1.5+spec-1.1.0:
+    1.1.1: LICENSE-APACHE; toml_datetime 1.1.3+spec-1.1.0: LICENSE-APACHE;
+    toml_edit 0.25.19+spec-1.1.0: LICENSE-APACHE; toml_parser 1.1.5+spec-1.1.0:
     LICENSE-APACHE
 -------------------------------------------------------------------------------
 
@@ -2679,7 +2679,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[36] crc32fast 1.5.3: LICENSE-MIT
+[36] crc32fast 1.5.4: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 MIT License
@@ -2904,7 +2904,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[44] flate2 1.1.10: LICENSE-MIT
+[44] flate2 1.1.11: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2014-2026 Alex Crichton
@@ -3482,7 +3482,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[53] hdf5-metno 0.15.0: no licence file; the manifest declares MIT;
+[53] hdf5-metno 0.15.1: no licence file; the manifest declares MIT;
     hdf5-metno-derive 0.10.2: no licence file; the manifest declares MIT;
     hdf5-metno-sys 0.12.5: no licence file; the manifest declares MIT;
     hdf5-metno-types 0.11.1: no licence file; the manifest declares MIT;
@@ -3719,7 +3719,7 @@ at your option.
 
 -------------------------------------------------------------------------------
 [61] linux-raw-sys 0.12.1: LICENSE-Apache-2.0_WITH_LLVM-exception; rustix
-    1.1.5: LICENSE-Apache-2.0_WITH_LLVM-exception
+    1.1.6: LICENSE-Apache-2.0_WITH_LLVM-exception
 -------------------------------------------------------------------------------
 
                                  Apache License
@@ -4890,7 +4890,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-[77] rustix 1.1.5: COPYRIGHT
+[77] rustix 1.1.6: COPYRIGHT
 -------------------------------------------------------------------------------
 
 Short version for non-lawyers:
@@ -5012,7 +5012,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-[81] smallvec 1.16.4: LICENSE-MIT
+[81] smallvec 1.16.5: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Copyright (c) 2018 The Servo Project Developers
@@ -5974,7 +5974,7 @@ DEALINGS IN THE SOFTWARE.
     SOFTWARE
 
 -------------------------------------------------------------------------------
-[98] winnow 1.0.4: LICENSE-MIT
+[98] winnow 1.0.5: LICENSE-MIT
 -------------------------------------------------------------------------------
 
 Permission is hereby granted, free of charge, to any person obtaining
