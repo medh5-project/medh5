@@ -56,7 +56,7 @@ jobs:
             printf '\n%s\n' "Opened with the workflow's own token, which starts no CI: close and reopen this pull request to run CI." >> "$RUNNER_TEMP/body.md"
             echo "::notice::no LOCK_REFRESH app or token: close and reopen the pull request to run CI"
           fi
-      - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+      - uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1 # v8.1.3
         with:
           token: ${{ steps.app.outputs.token || secrets.LOCK_REFRESH_TOKEN || github.token }}
           branch: deps/cargo-lock
